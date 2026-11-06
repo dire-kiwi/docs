@@ -16,3 +16,11 @@ Thumbs.db
 tmp/
 *.tmp
 *.log
+
+# Build output and local data
+/target/
+frontend/node_modules/
+frontend/dist/
+*.db
+*.db-shm
+*.db-wal

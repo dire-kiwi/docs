@@ -1,0 +1,30 @@
+[package]
+name = "docs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ammonia = "4.2.4"
+anyhow = "1.0.104"
+axum = "0.8"
+axum-extra = { version = "0.12.6", features = ["cookie"] }
+base64 = "0.22"
+getrandom = "0.3"
+markdown = "1"
+maud = { version = "0.27.0", features = ["axum"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+serde_urlencoded = "0.7.1"
+sha2 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate"] }
+time = { version = "0.3.55", features = ["formatting", "macros"] }
+tokio = { version = "1", features = ["full"] }
+tower = "0.5"
+tower-http = { version = "0.7.1", features = ["fs", "trace", "cors", "set-header"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+url = "2.5.8"
+
+[dev-dependencies]
+http-body-util = "0.1.5"
