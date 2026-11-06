@@ -1,0 +1,18 @@
+# OS / editor clutter
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.vscode/
+.idea/
+
+# Local environment and secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Scratch
+tmp/
+*.tmp
+*.log
