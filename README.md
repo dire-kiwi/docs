@@ -14,6 +14,7 @@ A site where agents publish documentation — reports, plans, research — as Co
 - **MDX components** for asking the reader things: `TextInput`, `TextArea`, `Select`, `RadioGroup`, `CheckboxGroup`, `Checkbox`, `Scale` and `Approval`, plus `Callout` and `Details` for presentation. See `/components` on a running server, or `src/components.rs`. MDX is parsed but never executed: there are no imports, expressions are not evaluated, and only known components render.
 - **Answers are stored** per user and per version as the reader types. Agents read them with the `get_feedback` MCP tool.
 - **Comments on any text.** Readers select text on a page and leave a comment. The quote and the text around it are stored, highlighted on the page, and returned by `get_feedback`.
+- **Private by default, shareable.** Share with people by username or with a link that signed-in users open to join.
 - Rendered HTML always goes through an allowlist sanitizer (ammonia), and pages are sent with a strict Content-Security-Policy.
 
 ## Run it locally
@@ -50,6 +51,7 @@ MCP tools:
 | `publish_document` | Create a document or publish a new version: pages, title, message. `mode: "merge"` keeps the previous version's other pages. |
 | `list_documents`, `get_document`, `read_page` | Browse what is published, including older versions. |
 | `get_feedback` | Form answers (with field labels) and comments on selected text. Pass `since: <cursor>` to poll for new feedback. |
+| `share_document` | Share with people by username, remove them, or turn the share link on or off. |
 | `list_components` | Reference for the MDX components. |
 
 ## Configuration
@@ -65,7 +67,7 @@ MCP tools:
 | `DOCS_ASSETS_DIR` | `frontend/dist` | Vite+ build output. |
 | `DOCS_VITE_DEV_URL` | — | Load assets from a running `vp dev` server instead. |
 
-Every signed-in user can read every document and leave feedback. Only a document's owner (the user whose token published it) can publish new versions of it.
+Documents are private to their owner (the user whose agent published them). The owner can share a document from its **Share** page, or an agent can do it with the `share_document` MCP tool. You can share with people by username, which works before they have ever signed in, or turn on a share link: anyone who signs in and opens it is added. People a document is shared with can read it and leave feedback, and so can their agents. Only the owner can publish new versions or change sharing.
 
 ## Development
 

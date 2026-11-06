@@ -355,21 +355,130 @@ const DOC_SUMMARY: &str = "SELECT d.id, d.slug, d.title, u.login AS owner, d.own
        WHERE v.document_id = d.id AND v.number = (SELECT MAX(number) FROM versions WHERE document_id = d.id)) AS page_count
     FROM documents d JOIN users u ON u.id = d.owner_id";
 
-pub async fn list_documents(db: &Db) -> Result<Vec<DocumentSummary>> {
+/// Who can see a document: its owner and the people it is shared with.
+const CAN_VIEW: &str =
+    "(d.owner_id = ? OR EXISTS (SELECT 1 FROM document_shares s WHERE s.document_id = d.id AND s.login = ?))";
+
+/// Documents `user` can see, most recently updated first.
+pub async fn list_documents(db: &Db, user: &User) -> Result<Vec<DocumentSummary>> {
     Ok(
-        sqlx::query_as::<_, DocumentSummary>(&format!("{DOC_SUMMARY} ORDER BY d.updated_at DESC"))
+        sqlx::query_as::<_, DocumentSummary>(&format!("{DOC_SUMMARY} WHERE {CAN_VIEW} ORDER BY d.updated_at DESC"))
+            .bind(user.id)
+            .bind(user.login.to_lowercase())
             .fetch_all(db)
             .await?,
     )
 }
 
-pub async fn get_document(db: &Db, slug: &str) -> Result<Option<DocumentSummary>> {
+/// A document, if `user` can see it.
+pub async fn get_document(db: &Db, slug: &str, user: &User) -> Result<Option<DocumentSummary>> {
     Ok(
-        sqlx::query_as::<_, DocumentSummary>(&format!("{DOC_SUMMARY} WHERE d.slug = ?"))
+        sqlx::query_as::<_, DocumentSummary>(&format!("{DOC_SUMMARY} WHERE d.slug = ? AND {CAN_VIEW}"))
             .bind(slug)
+            .bind(user.id)
+            .bind(user.login.to_lowercase())
             .fetch_optional(db)
             .await?,
     )
+}
+
+/// Whether `user` can see the document a version belongs to.
+pub async fn can_view_version(db: &Db, version_id: i64, user: &User) -> Result<bool> {
+    let row = sqlx::query(&format!(
+        "SELECT 1 FROM versions v JOIN documents d ON d.id = v.document_id WHERE v.id = ? AND {CAN_VIEW}"
+    ))
+    .bind(version_id)
+    .bind(user.id)
+    .bind(user.login.to_lowercase())
+    .fetch_optional(db)
+    .await?;
+    Ok(row.is_some())
+}
+
+/// Whether any document, visible or not, has this slug.
+pub async fn slug_exists(db: &Db, slug: &str) -> Result<bool> {
+    Ok(sqlx::query("SELECT 1 FROM documents WHERE slug = ?")
+        .bind(slug)
+        .fetch_optional(db)
+        .await?
+        .is_some())
+}
+
+// ---------- sharing ----------
+
+/// Lowercased login, if it looks like one.
+pub fn normalize_login(login: &str) -> Option<String> {
+    let l = login.trim().trim_start_matches('@').to_lowercase();
+    (!l.is_empty() && l.len() <= 100 && l.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))).then_some(l)
+}
+
+#[derive(Debug, Clone, FromRow, Serialize)]
+pub struct Share {
+    pub login: String,
+    pub created_at: i64,
+}
+
+pub async fn shares(db: &Db, document_id: i64) -> Result<Vec<Share>> {
+    Ok(
+        sqlx::query_as::<_, Share>(
+            "SELECT login, created_at FROM document_shares WHERE document_id = ? ORDER BY login",
+        )
+        .bind(document_id)
+        .fetch_all(db)
+        .await?,
+    )
+}
+
+pub async fn add_share(db: &Db, document_id: i64, login: &str) -> Result<()> {
+    sqlx::query("INSERT INTO document_shares (document_id, login, created_at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING")
+        .bind(document_id)
+        .bind(login)
+        .bind(now())
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+pub async fn remove_share(db: &Db, document_id: i64, login: &str) -> Result<()> {
+    sqlx::query("DELETE FROM document_shares WHERE document_id = ? AND login = ?")
+        .bind(document_id)
+        .bind(login)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+pub async fn share_token(db: &Db, document_id: i64) -> Result<Option<String>> {
+    let row: Option<(Option<String>,)> = sqlx::query_as("SELECT share_token FROM documents WHERE id = ?")
+        .bind(document_id)
+        .fetch_optional(db)
+        .await?;
+    Ok(row.and_then(|(t,)| t))
+}
+
+/// Turn the share link on (with a new secret) or off. Returns the new token.
+pub async fn set_share_token(db: &Db, document_id: i64, enabled: bool) -> Result<Option<String>> {
+    let token = enabled.then(random_token);
+    sqlx::query("UPDATE documents SET share_token = ? WHERE id = ?")
+        .bind(&token)
+        .bind(document_id)
+        .execute(db)
+        .await?;
+    Ok(token)
+}
+
+/// Opening a share link adds the user to the document's shares. Returns the slug.
+pub async fn accept_share_link(db: &Db, token: &str, user: &User) -> Result<Option<String>> {
+    let row: Option<(i64, String, i64)> =
+        sqlx::query_as("SELECT id, slug, owner_id FROM documents WHERE share_token = ?")
+            .bind(token)
+            .fetch_optional(db)
+            .await?;
+    let Some((id, slug, owner)) = row else { return Ok(None) };
+    if owner != user.id {
+        add_share(db, id, &user.login.to_lowercase()).await?;
+    }
+    Ok(Some(slug))
 }
 
 #[derive(Debug, Clone, FromRow, Serialize)]
@@ -488,7 +597,7 @@ pub async fn publish(db: &Db, p: Publish<'_>) -> Result<(String, i64)> {
     let (doc_id, slug) = match existing {
         Some((id, owner, slug)) => {
             if owner != p.user_id {
-                bail!("document {slug:?} belongs to another user");
+                bail!("the slug {slug:?} is taken by another user's document; choose a different slug, or omit it");
             }
             if let Some(title) = p.title {
                 sqlx::query("UPDATE documents SET title = ? WHERE id = ?")

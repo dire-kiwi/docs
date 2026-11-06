@@ -64,6 +64,9 @@ pub async fn save_response(
     Json(req): Json<SaveResponse>,
 ) -> Result<Json<Value>, ApiError> {
     let user = authorize(&viewer, &headers)?;
+    if !db::can_view_version(&state.db, req.version_id, user).await? {
+        return Err(bad("no such page"));
+    }
     let page = db::page(&state.db, req.version_id, &req.page)
         .await?
         .ok_or_else(|| bad("no such page"))?;
@@ -121,6 +124,9 @@ pub async fn add_selection(
     }
     if quote.chars().count() > 10_000 || req.comment.chars().count() > 20_000 {
         return Err(bad("selection or comment is too long"));
+    }
+    if !db::can_view_version(&state.db, req.version_id, user).await? {
+        return Err(bad("no such page"));
     }
     db::page(&state.db, req.version_id, &req.page)
         .await?

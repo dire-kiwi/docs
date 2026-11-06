@@ -899,3 +899,22 @@ details.connect {
 [hidden] {
   display: none !important;
 }
+
+.doc-links {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+form.inline {
+  display: inline;
+  margin: 0;
+}
+
+.share-list {
+  padding-left: 1.2em;
+}
+
+.share-list li {
+  margin: 4px 0;
+}

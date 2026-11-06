@@ -10,7 +10,7 @@ use serde::Deserialize;
 
 use crate::AppState;
 use crate::components::COMPONENTS;
-use crate::db::{self, DocumentSummary, Version};
+use crate::db::{self, DocumentSummary, User, Version};
 use crate::error::{AppError, AppResult};
 use crate::paths::{self, NavNode};
 use crate::render::{self, Format, Options};
@@ -35,7 +35,7 @@ fn mcp_help(base: &str) -> Markup {
 
 pub async fn home(State(state): State<AppState>, viewer: Viewer) -> AppResult<Markup> {
     let user = viewer.require()?;
-    let docs = db::list_documents(&state.db).await?;
+    let docs = db::list_documents(&state.db, user).await?;
     Ok(layout::simple(
         "Documents",
         Some(user),
@@ -122,8 +122,16 @@ pub async fn components_page(viewer: Viewer) -> Markup {
 
 // ---------- documents ----------
 
-async fn load_doc(state: &AppState, slug: &str, number: Option<i64>) -> AppResult<(DocumentSummary, Version)> {
-    let doc = db::get_document(&state.db, slug).await?.ok_or(AppError::NotFound)?;
+async fn load_doc(
+    state: &AppState,
+    slug: &str,
+    number: Option<i64>,
+    user: &User,
+) -> AppResult<(DocumentSummary, Version)> {
+    // Documents the viewer can't see are reported as missing.
+    let doc = db::get_document(&state.db, slug, user)
+        .await?
+        .ok_or(AppError::NotFound)?;
     let version = db::version(&state.db, doc.id, number)
         .await?
         .ok_or(AppError::NotFound)?;
@@ -170,7 +178,7 @@ async fn show_page(
     suffix: String,
 ) -> AppResult<Response> {
     let user = viewer.require()?;
-    let (doc, version) = load_doc(&state, &slug, number).await?;
+    let (doc, version) = load_doc(&state, &slug, number, user).await?;
     let base = doc_base(&doc.slug, number);
     let pages = db::pages(&state.db, version.id).await?;
 
@@ -224,6 +232,11 @@ async fn show_page(
                 (nav_list(&nav, &base, &page.path))
                 div.doc-links {
                     a href={ "/d/" (doc.slug) "/-/feedback" } { "All feedback" }
+                    @if doc.owner_id == user.id {
+                        a href={ "/d/" (doc.slug) "/-/share" } { "Share" }
+                    } @else {
+                        span.muted { "Shared by " (doc.owner) }
+                    }
                 }
             }
             main.doc-main {
@@ -318,7 +331,9 @@ pub async fn versions_page(
     Path(slug): Path<String>,
 ) -> AppResult<Markup> {
     let user = viewer.require()?;
-    let doc = db::get_document(&state.db, &slug).await?.ok_or(AppError::NotFound)?;
+    let doc = db::get_document(&state.db, &slug, user)
+        .await?
+        .ok_or(AppError::NotFound)?;
     let versions = db::versions(&state.db, doc.id).await?;
     Ok(layout::simple(
         &format!("Versions · {}", doc.title),
@@ -347,7 +362,9 @@ pub async fn feedback_page(
     Path(slug): Path<String>,
 ) -> AppResult<Markup> {
     let user = viewer.require()?;
-    let doc = db::get_document(&state.db, &slug).await?.ok_or(AppError::NotFound)?;
+    let doc = db::get_document(&state.db, &slug, user)
+        .await?
+        .ok_or(AppError::NotFound)?;
     let (responses, selections) = db::feedback(&state.db, doc.id, None, 0).await?;
     let link = |version: i64, page: &str| format!("{}{}", doc_base(&doc.slug, Some(version)), paths::url_suffix(page));
     Ok(layout::simple(
@@ -502,4 +519,149 @@ pub async fn revoke_token(
     let user = viewer.require()?;
     db::revoke_token(&state.db, user.id, id).await?;
     Ok(Redirect::to("/settings/tokens"))
+}
+
+// ---------- sharing ----------
+
+pub async fn share_page(State(state): State<AppState>, viewer: Viewer, Path(slug): Path<String>) -> AppResult<Markup> {
+    let user = viewer.require()?;
+    let doc = owned_doc(&state, &slug, user).await?;
+    render_share(&state, &viewer, user, &doc, None).await
+}
+
+async fn owned_doc(state: &AppState, slug: &str, user: &User) -> AppResult<DocumentSummary> {
+    let doc = db::get_document(&state.db, slug, user)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if doc.owner_id != user.id {
+        return Err(AppError::Forbidden(
+            "Only the owner can change who this document is shared with.".into(),
+        ));
+    }
+    Ok(doc)
+}
+
+async fn render_share(
+    state: &AppState,
+    viewer: &Viewer,
+    user: &User,
+    doc: &DocumentSummary,
+    error: Option<String>,
+) -> AppResult<Markup> {
+    let shares = db::shares(&state.db, doc.id).await?;
+    let token = db::share_token(&state.db, doc.id).await?;
+    let action = format!("/d/{}/-/share", doc.slug);
+    let button = |label: &str, act: &str, login: Option<&str>, class: &str| {
+        html! {
+            form.inline method="post" action=(action) {
+                input type="hidden" name="csrf" value=(viewer.csrf);
+                input type="hidden" name="action" value=(act);
+                @if let Some(l) = login { input type="hidden" name="login" value=(l); }
+                button class=(class) type="submit" { (label) }
+            }
+        }
+    };
+    Ok(layout::simple(
+        &format!("Share · {}", doc.title),
+        Some(user),
+        &viewer.csrf,
+        html! {
+            p.crumbs { a href=(doc_base(&doc.slug, None)) { (doc.title) } " / Share" }
+            h1 { "Share" }
+            p { "Only you and the people listed here can see this document, answer its questions and comment on it. "
+                "Only you (and your agents) can publish new versions." }
+            @if let Some(e) = &error { div.render-error { (e) } }
+            h2 { "People" }
+            ul.share-list {
+                li { strong { (doc.owner) } " " span.badge { "owner" } }
+                @for s in &shares {
+                    li { (s.login) " " span.muted.small { "added " (time(s.created_at)) } " " (button("Remove", "remove", Some(&s.login), "link danger")) }
+                }
+            }
+            form.row method="post" action=(action) {
+                input type="hidden" name="csrf" value=(viewer.csrf);
+                input type="hidden" name="action" value="add";
+                input type="text" name="login" placeholder="GitHub username" required maxlength="100";
+                button type="submit" { "Share" }
+            }
+            h2 { "Share link" }
+            @match &token {
+                Some(t) => {
+                    p { "Anyone who signs in and opens this link gets access, and is added to the list above:" }
+                    pre { code { (state.config.base_url) "/s/" (t) } }
+                    div.row {
+                        (button("Make a new link", "link_on", None, ""))
+                        (button("Turn off link", "link_off", None, "danger"))
+                    }
+                    p.muted.small { "Turning the link off or replacing it doesn't remove people who already joined." }
+                }
+                None => {
+                    p.muted { "Link sharing is off." }
+                    (button("Create a share link", "link_on", None, "primary"))
+                }
+            }
+        },
+    ))
+}
+
+#[derive(Deserialize)]
+pub struct ShareForm {
+    csrf: String,
+    action: String,
+    #[serde(default)]
+    login: String,
+}
+
+pub async fn share_update(
+    State(state): State<AppState>,
+    viewer: Viewer,
+    Path(slug): Path<String>,
+    Form(f): Form<ShareForm>,
+) -> AppResult<Response> {
+    viewer.check_csrf(&f.csrf)?;
+    let user = viewer.require()?;
+    let doc = owned_doc(&state, &slug, user).await?;
+    match f.action.as_str() {
+        "add" | "remove" => {
+            let Some(login) = db::normalize_login(&f.login) else {
+                return Ok(render_share(
+                    &state,
+                    &viewer,
+                    user,
+                    &doc,
+                    Some(format!("{:?} is not a valid username.", f.login)),
+                )
+                .await?
+                .into_response());
+            };
+            if f.action == "add" {
+                if login != user.login.to_lowercase() {
+                    db::add_share(&state.db, doc.id, &login).await?;
+                }
+            } else {
+                db::remove_share(&state.db, doc.id, &login).await?;
+            }
+        }
+        "link_on" => {
+            db::set_share_token(&state.db, doc.id, true).await?;
+        }
+        "link_off" => {
+            db::set_share_token(&state.db, doc.id, false).await?;
+        }
+        _ => return Err(AppError::BadRequest("unknown action".into())),
+    }
+    Ok(Redirect::to(&format!("/d/{}/-/share", doc.slug)).into_response())
+}
+
+/// `/s/{token}`: join a document through its share link.
+pub async fn share_link(
+    State(state): State<AppState>,
+    viewer: Viewer,
+    Path(token): Path<String>,
+) -> AppResult<Redirect> {
+    let user = viewer.require()?;
+    match db::accept_share_link(&state.db, &token, user).await? {
+        Some(slug) => Ok(Redirect::to(&doc_base(&slug, None))),
+        None => Err(AppError::NotFound),
+    }
 }

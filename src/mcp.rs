@@ -27,6 +27,7 @@ Publish with `publish_document` (one or more pages; nested paths like `plan/phas
 Every publish creates a new version, so you can revise freely. \
 Use format \"mdx\" to add form fields (call `list_components` for the list) when you need a decision or input from the reader, \
 then call `get_feedback` later to read their answers and any text they selected and commented on. \
+Documents are private to the user you act for; use `share_document` to share one with other people (by username) or to get a share link. \
 Always give the reader the URL returned by `publish_document`.";
 
 pub async fn not_allowed() -> impl IntoResponse {
@@ -160,6 +161,7 @@ impl Server<'_> {
                     "read_page" => self.read_page(arguments).await,
                     "publish_document" => self.publish(arguments).await,
                     "get_feedback" => self.get_feedback(arguments).await,
+                    "share_document" => self.share(arguments).await,
                     "list_components" => Ok(Value::String(components::reference())),
                     _ => return Some(rpc_error(id, -32602, &format!("unknown tool {name:?}"))),
                 };
@@ -189,7 +191,7 @@ impl Server<'_> {
     }
 
     async fn doc(&self, slug: &str) -> Result<db::DocumentSummary, ToolError> {
-        db::get_document(&self.state.db, slug)
+        db::get_document(&self.state.db, slug, self.user)
             .await?
             .ok_or_else(|| ToolError(format!("no document {slug:?}; call list_documents to see what exists")))
     }
@@ -205,7 +207,7 @@ impl Server<'_> {
     }
 
     async fn list_documents(&self) -> ToolResult {
-        let docs = db::list_documents(&self.state.db).await?;
+        let docs = db::list_documents(&self.state.db, self.user).await?;
         Ok(json!({
             "documents": docs.iter().map(|d| json!({
                 "slug": d.slug,
@@ -214,6 +216,7 @@ impl Server<'_> {
                 "latest_version": d.latest_version,
                 "pages": d.page_count,
                 "owner": d.owner,
+                "shared_with_you": d.owner_id != self.user.id,
                 "updated_at": d.updated_at,
             })).collect::<Vec<_>>()
         }))
@@ -230,7 +233,13 @@ impl Server<'_> {
         let version = self.version(&doc, a.version).await?;
         let pages = db::pages(&self.state.db, version.id).await?;
         let versions = db::versions(&self.state.db, doc.id).await?;
+        let sharing = if doc.owner_id == self.user.id {
+            Some(self.sharing(&doc).await?)
+        } else {
+            None
+        };
         Ok(json!({
+            "sharing": sharing,
             "slug": doc.slug,
             "title": doc.title,
             "owner": doc.owner,
@@ -352,7 +361,7 @@ impl Server<'_> {
         }
 
         let exists = match &a.slug {
-            Some(s) => db::get_document(&self.state.db, &db::doc_slug(s)).await?.is_some(),
+            Some(s) => db::slug_exists(&self.state.db, &db::doc_slug(s)).await?,
             None => false,
         };
         let title = a.title.clone().or_else(|| {
@@ -389,6 +398,70 @@ impl Server<'_> {
             "pages": all.iter().map(|p| json!({ "path": p.path, "title": p.title, "url": self.url(&slug, None, &p.path) })).collect::<Vec<_>>(),
             "warnings": warnings,
         }))
+    }
+
+    /// Who a document is shared with, and its share link.
+    async fn sharing(&self, doc: &db::DocumentSummary) -> Result<Value, ToolError> {
+        let shares = db::shares(&self.state.db, doc.id).await?;
+        let token = db::share_token(&self.state.db, doc.id).await?;
+        Ok(json!({
+            "shared_with": shares.iter().map(|s| &s.login).collect::<Vec<_>>(),
+            "share_link": token.map(|t| format!("{}/s/{t}", self.state.config.base_url)),
+            "manage_url": format!("{}/d/{}/-/share", self.state.config.base_url, doc.slug),
+        }))
+    }
+
+    async fn share(&self, a: Value) -> ToolResult {
+        #[derive(Deserialize)]
+        struct A {
+            slug: String,
+            #[serde(default)]
+            add_users: Vec<String>,
+            #[serde(default)]
+            remove_users: Vec<String>,
+            link: Option<String>,
+        }
+        let a: A = args(a)?;
+        let doc = self.doc(&a.slug).await?;
+        if doc.owner_id != self.user.id {
+            return Err(ToolError(format!(
+                "only the owner ({}) can share {:?}",
+                doc.owner, doc.slug
+            )));
+        }
+        let login =
+            |l: &String| db::normalize_login(l).ok_or_else(|| ToolError(format!("{l:?} is not a valid username")));
+        for l in &a.add_users {
+            let l = login(l)?;
+            if l != self.user.login.to_lowercase() {
+                db::add_share(&self.state.db, doc.id, &l).await?;
+            }
+        }
+        for l in &a.remove_users {
+            db::remove_share(&self.state.db, doc.id, &login(l)?).await?;
+        }
+        match a.link.as_deref() {
+            None | Some("keep") => {}
+            Some("enable") => {
+                if db::share_token(&self.state.db, doc.id).await?.is_none() {
+                    db::set_share_token(&self.state.db, doc.id, true).await?;
+                }
+            }
+            Some("regenerate") => {
+                db::set_share_token(&self.state.db, doc.id, true).await?;
+            }
+            Some("disable") => {
+                db::set_share_token(&self.state.db, doc.id, false).await?;
+            }
+            Some(other) => {
+                return Err(ToolError(format!(
+                    "link must be enable, disable, regenerate or keep, not {other:?}"
+                )));
+            }
+        }
+        let mut out = self.sharing(&doc).await?;
+        out["url"] = json!(self.url(&doc.slug, None, "index"));
+        Ok(out)
     }
 
     async fn get_feedback(&self, a: Value) -> ToolResult {
@@ -471,7 +544,7 @@ fn tool_definitions() -> Value {
         {
             "name": "list_documents",
             "title": "List documents",
-            "description": "List all documents with their latest version and URL.",
+            "description": "List the documents you can see (yours and those shared with you) with their latest version and URL.",
             "inputSchema": { "type": "object", "properties": {} },
             "annotations": { "readOnlyHint": true },
         },
@@ -542,6 +615,23 @@ fn tool_definitions() -> Value {
                 "required": ["slug"],
             },
             "annotations": { "readOnlyHint": true },
+        },
+        {
+            "name": "share_document",
+            "title": "Share document",
+            "description": "Documents are private to their owner. Share one with people by username (they see it after signing in), \
+    and/or turn on a share link: anyone who signs in and opens it gets access. People it is shared with can read it and leave feedback, \
+    but only the owner can publish versions. Only the owner can change sharing. Returns who it is shared with and the link.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "slug": slug,
+                    "add_users": { "type": "array", "items": { "type": "string" }, "description": "Usernames (e.g. GitHub logins) to share with." },
+                    "remove_users": { "type": "array", "items": { "type": "string" }, "description": "Usernames to stop sharing with." },
+                    "link": { "type": "string", "enum": ["keep", "enable", "disable", "regenerate"], "description": "Share link: enable (keeps an existing link), disable, or regenerate (invalidates the old link). Default keep." },
+                },
+                "required": ["slug"],
+            },
         },
         {
             "name": "list_components",

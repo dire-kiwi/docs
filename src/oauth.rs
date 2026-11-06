@@ -239,8 +239,8 @@ pub async fn authorize_page(
                 h1 { "Connect " (req.client.client_name) "?" }
                 p { strong { (req.client.client_name) } " wants to act as " strong { (user.login) } " on this site. It will be able to:" }
                 ul {
-                    li { "read every document" }
-                    li { "publish new documents and versions" }
+                    li { "read your documents and the ones shared with you" }
+                    li { "publish new documents and versions, and share them" }
                     li { "read the answers and comments people leave" }
                 }
                 p.muted { "You will be sent back to " code { (host) } ". You can revoke access at any time under "

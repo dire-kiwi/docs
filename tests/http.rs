@@ -387,7 +387,7 @@ async fn versions_merge_and_validation() {
             json!({ "slug": "research-notes", "pages": [{ "path": "a", "content": "pwned" }] }),
         )
         .await;
-    assert!(err.contains("belongs to another user"), "{err}");
+    assert!(err.contains("is taken by another user"), "{err}");
 
     let warn = t
         .tool(
@@ -621,4 +621,153 @@ async fn removing_a_user_from_the_allowlist_revokes_access() {
         .await;
     assert_eq!(token.status, StatusCode::BAD_REQUEST, "{}", token.body);
     assert_eq!(token.json()["error"], "invalid_grant");
+}
+
+#[tokio::test]
+async fn documents_are_private_until_shared() {
+    let t = TestApp::new().await;
+    let (alice_cookie, alice) = t.user("alice").await;
+    let (bob_cookie, bob) = t.user("bob").await;
+    let (carol_cookie, carol) = t.user("carol").await;
+    t.tool(
+        &alice,
+        "publish_document",
+        json!({ "slug": "secret", "pages": [{ "path": "index", "content": "# Secret\n\n<TextInput name=\"q\" label=\"Q\" />" }] }),
+    )
+    .await;
+
+    // Bob can't see it anywhere.
+    assert_eq!(t.get("/d/secret/", &bob_cookie).await.status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        t.get("/d/secret/-/feedback", &bob_cookie).await.status,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(t.tool(&bob, "list_documents", json!({})).await["documents"], json!([]));
+    let err = t.tool_error(&bob, "get_feedback", json!({ "slug": "secret" })).await;
+    assert!(err.contains("no document"), "{err}");
+    let page = t.get("/d/secret/", &alice_cookie).await;
+    let version_id: i64 = attr_after(&page.body, "<article", "data-version-id").parse().unwrap();
+    let bob_home = t.get("/", &bob_cookie).await;
+    let saved = t
+        .post_json(
+            "/api/responses",
+            &bob_cookie,
+            &csrf_of(&bob_home.body),
+            json!({ "version_id": version_id, "page": "index", "field": "q", "value": "x" }),
+        )
+        .await;
+    assert_eq!(
+        saved.status,
+        StatusCode::BAD_REQUEST,
+        "can't answer a document you can't see"
+    );
+    let err = t
+        .tool_error(
+            &bob,
+            "share_document",
+            json!({ "slug": "secret", "add_users": ["bob"] }),
+        )
+        .await;
+    assert!(err.contains("no document"), "{err}");
+
+    // Shared by username: bob can read it and answer, but not publish or share.
+    let shared = t
+        .tool(
+            &alice,
+            "share_document",
+            json!({ "slug": "secret", "add_users": ["Bob"] }),
+        )
+        .await;
+    assert_eq!(shared["shared_with"], json!(["bob"]));
+    assert_eq!(shared["share_link"], Value::Null);
+    let page = t.get("/d/secret/", &bob_cookie).await;
+    assert_eq!(page.status, StatusCode::OK);
+    assert!(page.body.contains("Shared by alice"));
+    let saved = t
+        .post_json(
+            "/api/responses",
+            &bob_cookie,
+            &csrf_of(&page.body),
+            json!({ "version_id": version_id, "page": "index", "field": "q", "value": "from bob" }),
+        )
+        .await;
+    assert_eq!(saved.status, StatusCode::OK);
+    let listed = t.tool(&bob, "list_documents", json!({})).await;
+    assert_eq!(listed["documents"][0]["shared_with_you"], true);
+    let err = t
+        .tool_error(
+            &bob,
+            "share_document",
+            json!({ "slug": "secret", "add_users": ["carol"] }),
+        )
+        .await;
+    assert!(err.contains("only the owner"), "{err}");
+    assert_eq!(
+        t.get("/d/secret/-/share", &bob_cookie).await.status,
+        StatusCode::FORBIDDEN
+    );
+    let err = t
+        .tool_error(
+            &bob,
+            "publish_document",
+            json!({ "slug": "secret", "pages": [{ "path": "index", "content": "x" }] }),
+        )
+        .await;
+    assert!(err.contains("taken by another user"), "{err}");
+
+    // Share link: carol joins by opening it; turning it off stops new joins.
+    let shared = t
+        .tool(&alice, "share_document", json!({ "slug": "secret", "link": "enable" }))
+        .await;
+    let link = shared["share_link"].as_str().unwrap().to_string();
+    let path = link.strip_prefix("http://docs.test").unwrap();
+    assert_eq!(
+        t.get(path, "").await.status,
+        StatusCode::SEE_OTHER,
+        "must sign in first"
+    );
+    let joined = t.get(path, &carol_cookie).await;
+    assert_eq!(joined.location(), "/d/secret/");
+    assert_eq!(t.get("/d/secret/", &carol_cookie).await.status, StatusCode::OK);
+    let (dave_cookie, _) = t.user("dave").await;
+    t.tool(&alice, "share_document", json!({ "slug": "secret", "link": "disable" }))
+        .await;
+    assert_eq!(t.get(path, &dave_cookie).await.status, StatusCode::NOT_FOUND);
+
+    // Removing a person revokes their access, including their agent's.
+    let shared = t
+        .tool(
+            &alice,
+            "share_document",
+            json!({ "slug": "secret", "remove_users": ["carol"] }),
+        )
+        .await;
+    assert_eq!(shared["shared_with"], json!(["bob"]));
+    assert_eq!(t.get("/d/secret/", &carol_cookie).await.status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        t.tool(&carol, "list_documents", json!({})).await["documents"],
+        json!([])
+    );
+
+    // The owner's share page lists people and manages the link.
+    let share_page = t.get("/d/secret/-/share", &alice_cookie).await;
+    assert_eq!(share_page.status, StatusCode::OK);
+    assert!(share_page.body.contains("bob") && share_page.body.contains("Link sharing is off"));
+    let form = serde_urlencoded::to_string([
+        ("csrf", csrf_of(&share_page.body).as_str()),
+        ("action", "add"),
+        ("login", "erin"),
+    ])
+    .unwrap();
+    let res = t
+        .send(
+            Request::post("/d/secret/-/share")
+                .header(header::COOKIE, &alice_cookie)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(form))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::SEE_OTHER);
+    assert!(t.get("/d/secret/-/share", &alice_cookie).await.body.contains("erin"));
 }
