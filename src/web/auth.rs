@@ -37,6 +37,9 @@ impl FromRequestParts<AppState> for Viewer {
             Some(c) => db::session_user(&state.db, c.value()).await?,
             None => None,
         };
+        // Re-check the allowlist on every request, so removing someone from
+        // DOCS_ALLOWED_USERS ends their existing sessions too.
+        let session = session.filter(|(user, _)| state.config.user_allowed(&user.login));
         Ok(match session {
             Some((user, csrf)) => Viewer {
                 user: Some(user),

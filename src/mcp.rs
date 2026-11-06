@@ -61,7 +61,8 @@ pub async fn handle(State(state): State<AppState>, headers: HeaderMap, body: Byt
         return unauthorized(&state, "sign in to use this server");
     };
     let user = match db::bearer_user(&state.db, token).await {
-        Ok(Some(u)) => u,
+        Ok(Some(u)) if state.config.user_allowed(&u.login) => u,
+        Ok(Some(_)) => return unauthorized(&state, "this user is no longer allowed to use this site"),
         Ok(None) => return unauthorized(&state, "token is invalid or expired"),
         Err(e) => {
             tracing::error!("{e:#}");

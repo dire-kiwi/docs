@@ -394,6 +394,10 @@ async fn issue(state: &AppState, t: TokenRequest) -> anyhow::Result<Response> {
             ));
         }
     };
+    match db::get_user(&state.db, user_id).await? {
+        Some(u) if state.config.user_allowed(&u.login) => {}
+        _ => return invalid_grant("this user is no longer allowed to use this site"),
+    }
     let access = db::create_token(
         &state.db,
         "access",

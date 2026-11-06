@@ -555,3 +555,70 @@ async fn dev_login_sets_a_session() {
     let components = t.get("/components", "").await;
     assert!(components.body.contains("&lt;Approval&gt;"));
 }
+
+#[tokio::test]
+async fn removing_a_user_from_the_allowlist_revokes_access() {
+    let t = TestApp::new().await;
+    let (cookie, pat) = t.user("erin").await;
+    let user = db::upsert_user(&t.state.db, "dev", "erin", "erin", None, None)
+        .await
+        .unwrap();
+    let client_id = db::register_client(&t.state.db, "Agent", &["http://localhost:1/cb".to_string()])
+        .await
+        .unwrap();
+    let refresh = db::create_token(
+        &t.state.db,
+        "refresh",
+        user.id,
+        Some(&client_id),
+        None,
+        Some(db::REFRESH_TTL),
+    )
+    .await
+    .unwrap();
+    assert_eq!(t.get("/", &cookie).await.status, StatusCode::OK);
+
+    // Same database, restarted with an allowlist that no longer includes erin.
+    let mut config = Config::for_tests();
+    config.allowed_users = Some(vec!["someone-else".into()]);
+    let state = AppState {
+        db: t.state.db.clone(),
+        config: std::sync::Arc::new(config),
+        http: t.state.http.clone(),
+    };
+    let t = TestApp {
+        app: docs::app(state.clone()),
+        state,
+    };
+
+    let page = t.get("/", &cookie).await;
+    assert_eq!(page.status, StatusCode::SEE_OTHER, "session no longer signs erin in");
+    assert!(page.location().starts_with("/login"));
+
+    let mcp = t
+        .send(
+            Request::post("/mcp")
+                .header(header::AUTHORIZATION, format!("Bearer {pat}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(mcp.status, StatusCode::UNAUTHORIZED, "personal access token rejected");
+
+    let token = t
+        .send(
+            Request::post("/oauth/token")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    serde_urlencoded::to_string([("grant_type", "refresh_token"), ("refresh_token", refresh.as_str())])
+                        .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(token.status, StatusCode::BAD_REQUEST, "{}", token.body);
+    assert_eq!(token.json()["error"], "invalid_grant");
+}

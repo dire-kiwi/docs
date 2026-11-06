@@ -75,6 +75,15 @@ pub async fn upsert_user(
     Ok(user)
 }
 
+pub async fn get_user(db: &Db, id: i64) -> Result<Option<User>> {
+    Ok(
+        sqlx::query_as::<_, User>("SELECT id, login, name, avatar_url FROM users WHERE id = ?")
+            .bind(id)
+            .fetch_optional(db)
+            .await?,
+    )
+}
+
 // ---------- sessions ----------
 
 pub const SESSION_TTL: i64 = 30 * 24 * 3600;
