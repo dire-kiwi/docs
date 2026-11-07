@@ -1,0 +1,29 @@
+---
+title: The plan
+---
+
+<Callout type="warning" title="Heads up">Careful **now**, see [phase 2](phase-2.mdx).</Callout>
+
+<Details summary="More">
+
+Hidden *content*.
+
+</Details>
+
+<TextInput name="owner" label="Who owns this?" placeholder="GitHub username" required />
+
+<TextArea name="notes" label="Anything else?" rows={3} help="Optional" />
+
+<Select name="db" label="Database" options={["SQLite", "Postgres"]} />
+
+<RadioGroup name="region" label="Region" options={[{value: "us", label: "US"}, {value: "eu", label: "EU"}]} />
+
+<CheckboxGroup name="phases" label="Phases" options="Phase 1, Phase 2, Phase 3" />
+
+<Checkbox name="ok" label="Looks good" />
+
+<Scale name="confidence" label="Confidence" minLabel="Low" maxLabel="High" />
+
+<Approval name="plan" />
+
+{/* an MDX comment */}

@@ -45,3 +45,10 @@ url = "2.5.8"
 
 [dev-dependencies]
 http-body-util = "0.1.5"
+
+# Small, fast WebAssembly for the npm package (crates/docs-render-wasm/build.sh).
+[profile.wasm]
+inherits = "release"
+opt-level = "s"
+lto = true
+codegen-units = 1

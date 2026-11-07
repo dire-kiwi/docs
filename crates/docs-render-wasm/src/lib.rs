@@ -258,7 +258,7 @@ fn valid_json(p: &publish::ValidPage) -> Value {
 #[wasm_bindgen(js_name = validatePage, unchecked_return_type = "ValidatedPage")]
 pub fn validate_page(
     source: &str,
-    #[wasm_bindgen(unchecked_param_type = "Format")] format: Option<String>,
+    #[wasm_bindgen(unchecked_param_type = "Format | null | undefined")] format: Option<String>,
     path: Option<String>,
 ) -> JsResult<JsValue> {
     let input = PageInput {

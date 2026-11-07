@@ -1,0 +1,27 @@
+{
+  "paths": ["./Plan/Phase 1.md", "index.mdx", "/", "plan/index.md", "../etc/passwd", "a/<b>", "-/versions", "Notes/Ünïcode"],
+  "links": [
+    ["plan/phase-1", "phase-2.md"],
+    ["plan/index", "phase-2.md#x"],
+    ["plan/phase-1", "../intro.md"],
+    ["index", "plan/"],
+    ["index", "https://x.y"],
+    ["index", "mailto:a@b"],
+    ["index", "#top"],
+    ["index", "/abs"]
+  ],
+  "titles": ["index", "plan/index", "plan/phase-1", "notes/my_big-idea"],
+  "suffixes": ["", "plan/", "plan/phase-1"],
+  "nav": [
+    ["index", "Home"],
+    ["plan/index", "The plan"],
+    ["plan/phase-1", "Phase 1"],
+    ["notes/a/b", "Deep"]
+  ],
+  "html": ["<p onclick=\"x()\">hi <script>bad()</script><a href=\"https://ok\">ok</a></p>", "<iframe src=\"https://x\"></iframe><table><tr><td>1</td></tr></table>"],
+  "publish": [
+    [{ "path": "Plan/Phase 1.md", "content": "# One" }, { "path": "notes", "content": "<Chart />" }, { "path": "x", "content": "---\norder: 7\n---\nbody", "title": "Given" }],
+    [{ "path": "a", "content": "" }, { "path": "a.md", "content": "" }],
+    [{ "path": "a", "content": "", "format": "html" }]
+  ]
+}

@@ -1,0 +1,383 @@
+/*
+ * Styles for rendered pages: colours, code, tables, rendered Markdown/MDX and
+ * form fields. The site imports this from styles.css; the npm package
+ * (@dire-kiwi/docs-render) ships it as styles.css, scoped under `.docs-render`
+ * (see crates/docs-render-wasm/build.sh). Keep site chrome out of this file.
+ */
+
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff;
+  --bg-soft: #f6f7f9;
+  --bg-mark: #fff3bf;
+  --fg: #1d2129;
+  --fg-muted: #5c6370;
+  --border: #e2e5ea;
+  --accent: #2f6fde;
+  --accent-fg: #ffffff;
+  --danger: #c4373a;
+  --success: #24864a;
+  --warning: #a86200;
+  --radius: 8px;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  --topbar: 52px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #15171c;
+    --bg-soft: #1e2128;
+    --bg-mark: #5a4a0f;
+    --fg: #e4e6eb;
+    --fg-muted: #9aa1ad;
+    --border: #2e323b;
+    --accent: #6ea0ff;
+    --accent-fg: #0d1117;
+    --danger: #ff7b7e;
+    --success: #5fd08a;
+    --warning: #f0b55a;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+a {
+  color: var(--accent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+code,
+pre {
+  font-family: var(--mono);
+  font-size: 0.9em;
+}
+
+:not(pre) > code {
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.05em 0.3em;
+}
+
+pre {
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  overflow-x: auto;
+  line-height: 1.45;
+}
+
+button,
+.button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+input[type="text"],
+select,
+textarea {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  padding: 7px 10px;
+}
+
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+th {
+  font-weight: 600;
+}
+
+.table-wrap {
+  overflow-x: auto;
+  margin: 1em 0;
+}
+
+.align-center {
+  text-align: center;
+}
+
+.align-right {
+  text-align: right;
+}
+
+/* ---------- rendered content ---------- */
+
+.doc-content {
+  line-height: 1.7;
+}
+
+.doc-content h1,
+.doc-content h2,
+.doc-content h3,
+.doc-content h4 {
+  line-height: 1.25;
+  margin: 1.6em 0 0.6em;
+}
+
+.doc-content h1 {
+  font-size: 2em;
+  margin-top: 0.4em;
+}
+
+.doc-content h2 {
+  font-size: 1.45em;
+  padding-bottom: 0.25em;
+  border-bottom: 1px solid var(--border);
+}
+
+.doc-content .anchor {
+  margin-left: 0.3em;
+  color: var(--fg-muted);
+  text-decoration: none;
+  opacity: 0;
+  font-weight: 400;
+}
+
+.doc-content :is(h1, h2, h3, h4, h5, h6):hover .anchor {
+  opacity: 1;
+}
+
+.doc-content img {
+  max-width: 100%;
+  height: auto;
+}
+
+.doc-content blockquote {
+  margin: 1em 0;
+  padding: 0 1em;
+  border-left: 3px solid var(--border);
+  color: var(--fg-muted);
+}
+
+.doc-content hr {
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin: 2em 0;
+}
+
+.doc-content .task-list {
+  list-style: none;
+  padding-left: 1.2em;
+}
+
+.doc-content .task-list input {
+  margin: 0 0.4em 0 -1.3em;
+}
+
+.doc-content .footnotes {
+  margin-top: 3em;
+  padding-top: 1em;
+  border-top: 1px solid var(--border);
+  font-size: 0.9em;
+}
+
+.doc-content .fnref a {
+  text-decoration: none;
+}
+
+.callout {
+  --c: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--c) 40%, var(--border));
+  border-left: 4px solid var(--c);
+  background: color-mix(in srgb, var(--c) 7%, var(--bg));
+  border-radius: var(--radius);
+  padding: 2px 16px;
+  margin: 1.2em 0;
+}
+
+.callout-title {
+  font-weight: 650;
+  margin-bottom: 0;
+}
+
+.callout-success,
+.callout-tip {
+  --c: var(--success);
+}
+
+.callout-warning {
+  --c: var(--warning);
+}
+
+.callout-danger {
+  --c: var(--danger);
+}
+
+.doc-content details {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 14px;
+  margin: 1em 0;
+}
+
+.doc-content summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.unknown-component {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 0.8em;
+  color: var(--danger);
+  border: 1px dashed var(--danger);
+  border-radius: 4px;
+  padding: 0 6px;
+}
+
+/* ---------- form fields ---------- */
+
+.field {
+  margin: 1.4em 0;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-soft);
+}
+
+.field-label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.field-required {
+  color: var(--danger);
+  margin-left: 2px;
+}
+
+.field-help {
+  color: var(--fg-muted);
+  font-size: 0.92em;
+  margin-bottom: 8px;
+}
+
+.field .options {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.field .option {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  cursor: pointer;
+}
+
+.field.field-checkbox .option {
+  font-weight: 600;
+}
+
+.approval {
+  flex-direction: row !important;
+  flex-wrap: wrap;
+  gap: 8px !important;
+  margin-bottom: 10px;
+}
+
+.approval .option {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 12px;
+  background: var(--bg);
+}
+
+.approval .option:has(input:checked) {
+  border-color: var(--c, var(--accent));
+  background: color-mix(in srgb, var(--c, var(--accent)) 12%, var(--bg));
+}
+
+.option-approve {
+  --c: var(--success);
+}
+
+.option-changes {
+  --c: var(--warning);
+}
+
+.option-reject {
+  --c: var(--danger);
+}
+
+.scale {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.scale-point input {
+  position: absolute;
+  opacity: 0;
+}
+
+.scale-point span {
+  display: inline-grid;
+  place-items: center;
+  min-width: 2.2em;
+  height: 2.2em;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  cursor: pointer;
+}
+
+.scale-point input:checked + span {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-fg);
+}
+
+.scale-point input:focus-visible + span {
+  outline: 2px solid var(--accent);
+}
+
+.scale-end {
+  font-size: 0.85em;
+  color: var(--fg-muted);
+}
+
+.field-status {
+  min-height: 1.2em;
+  margin-top: 6px;
+  font-size: 0.8em;
+  color: var(--fg-muted);
+}
+
+.field-status[data-state="saved"] {
+  color: var(--success);
+}
+
+.field-status[data-state="error"] {
+  color: var(--danger);
+}

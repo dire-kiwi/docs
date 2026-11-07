@@ -1,0 +1,44 @@
+{
+  "name": "@dire-kiwi/docs-render",
+  "version": "0.0.0",
+  "description": "The docs Markdown/MDX renderer, page paths, publish checks and MCP tool definitions, as WebAssembly for Node and browsers.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dire-kiwi/docs.git",
+    "directory": "crates/docs-render-wasm"
+  },
+  "type": "module",
+  "sideEffects": [
+    "./node.js",
+    "*.css"
+  ],
+  "types": "./docs_render.d.ts",
+  "exports": {
+    ".": {
+      "types": "./docs_render.d.ts",
+      "node": "./node.js",
+      "default": "./docs_render.js"
+    },
+    "./web": {
+      "types": "./docs_render.d.ts",
+      "default": "./docs_render.js"
+    },
+    "./docs_render_bg.wasm": "./docs_render_bg.wasm",
+    "./styles.css": "./styles.css",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "docs_render.js",
+    "docs_render.d.ts",
+    "docs_render_bg.wasm",
+    "docs_render_bg.wasm.d.ts",
+    "node.js",
+    "styles.css",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  }
+}
