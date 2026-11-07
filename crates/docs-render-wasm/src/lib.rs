@@ -243,6 +243,13 @@ pub fn normalize_path(#[wasm_bindgen(unchecked_param_type = "string")] raw: JsVa
     paths::normalize(&string(&raw, "path")?).map_err(err)
 }
 
+/// Normalise the folder a document is filed in (` Huntaway//plans/ ` → `Huntaway/plans`, `""` is the top level),
+/// as publish_document and move_document do. Throws a string for invalid folders (`..`, control characters, too long).
+#[wasm_bindgen(js_name = normalizeFolder)]
+pub fn normalize_folder(#[wasm_bindgen(unchecked_param_type = "string")] raw: JsValue) -> JsResult<String> {
+    paths::normalize_folder(&string(&raw, "folder")?).map_err(err)
+}
+
 /// URL suffix, relative to a version base ending in `/`, for a page path (`plan/index` → `plan/`, `index` → ``).
 #[wasm_bindgen(js_name = urlSuffix)]
 pub fn url_suffix(#[wasm_bindgen(unchecked_param_type = "string")] path: JsValue) -> JsResult<String> {

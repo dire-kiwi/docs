@@ -7,7 +7,7 @@ The renderer of [docs](https://github.com/dire-kiwi/docs) as WebAssembly, for No
 Each release attaches the package to a GitHub release, so it installs from a URL, without a registry or a token:
 
 ```sh
-pnpm add https://github.com/dire-kiwi/docs/releases/download/render-v0.1.0/dire-kiwi-docs-render-0.1.0.tgz
+pnpm add https://github.com/dire-kiwi/docs/releases/download/render-v0.2.0/dire-kiwi-docs-render-0.2.0.tgz
 ```
 
 ## Use it from Node
@@ -67,6 +67,7 @@ Errors are thrown as plain strings: the same messages the hosted server reports.
 | `meta(source, format)` | → `{ title, order }` from YAML frontmatter `title:` / `order:`, else the first `# heading`. |
 | `normalizePath(raw)` | `./Plan/Phase 1.md` → `plan/phase-1`. Throws for invalid paths. |
 | `urlSuffix(path)`, `pathCandidates(suffix)` | Page path ↔ URL: `plan/index` ↔ `plan/`, `index` ↔ `` . |
+| `normalizeFolder(raw)` | ` docs//plans/ ` → `docs/plans`: the folder a document is filed in, as `publish_document` and `move_document` normalise it (`""` is the top level). Throws for `.`/`..` segments, control characters and folders over 200 characters. |
 | `resolveLink(from, href)` | → `{ path, suffix }` for a relative link written in page `from`, or `null` for absolute URLs, `/root` links and `#fragments`. |
 | `titleFromPath(path)` | `plan/phase-1` → `Phase 1`, `index` → `Overview`. |
 | `navTree([[path, title], ...])` | → nested `{ segment, title, page, children }[]` for the menu. |

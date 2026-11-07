@@ -154,6 +154,7 @@ impl Server<'_> {
                     "publish_document" => self.publish(arguments).await,
                     "get_feedback" => self.get_feedback(arguments).await,
                     "share_document" => self.share(arguments).await,
+                    "move_document" => self.move_document(arguments).await,
                     "list_components" => Ok(Value::String(components::reference())),
                     _ => return Some(rpc_error(id, -32602, &format!("unknown tool {name:?}"))),
                 };
@@ -204,6 +205,7 @@ impl Server<'_> {
             "documents": docs.iter().map(|d| json!({
                 "slug": d.slug,
                 "title": d.title,
+                "folder": d.folder,
                 "url": self.url(&d.slug, None, "index").trim_end_matches('/').to_string() + "/",
                 "latest_version": d.latest_version,
                 "pages": d.page_count,
@@ -234,6 +236,7 @@ impl Server<'_> {
             "sharing": sharing,
             "slug": doc.slug,
             "title": doc.title,
+            "folder": doc.folder,
             "owner": doc.owner,
             "url": self.url(&doc.slug, None, "index"),
             "version": version,
@@ -282,6 +285,7 @@ impl Server<'_> {
         struct A {
             slug: Option<String>,
             title: Option<String>,
+            folder: Option<String>,
             message: Option<String>,
             #[serde(default)]
             pages: Vec<PageInput>,
@@ -298,6 +302,7 @@ impl Server<'_> {
         if a.pages.is_empty() && a.delete_paths.is_empty() {
             return Err(ToolError("pass at least one page".into()));
         }
+        let folder = paths::normalize_folder(a.folder.as_deref().unwrap_or("")).map_err(ToolError)?;
         let (valid, warnings) = publish::validate_pages(a.pages).map_err(ToolError)?;
         let pages: Vec<db::NewPage> = valid
             .into_iter()
@@ -330,6 +335,7 @@ impl Server<'_> {
                 user_id: self.user.id,
                 slug: a.slug.as_deref(),
                 title: title.as_deref(),
+                folder: &folder,
                 message: a.message.as_deref(),
                 pages,
                 merge,
@@ -340,8 +346,17 @@ impl Server<'_> {
         let doc = self.doc(&slug).await?;
         let version = self.version(&doc, Some(number)).await?;
         let all = db::pages(&self.state.db, version.id).await?;
+        // An existing document stays where it is, so a publish doesn't undo the user's move.
+        let note = (a.folder.is_some() && doc.folder != folder).then(|| {
+            format!(
+                "The document stays in its folder {:?}; call move_document only if the user asks to move it.",
+                doc.folder
+            )
+        });
         Ok(json!({
             "slug": slug,
+            "folder": doc.folder,
+            "note": note,
             "version": number,
             "url": self.url(&slug, None, "index"),
             "version_url": self.url(&slug, Some(number), "index"),
@@ -412,6 +427,29 @@ impl Server<'_> {
         let mut out = self.sharing(&doc).await?;
         out["url"] = json!(self.url(&doc.slug, None, "index"));
         Ok(out)
+    }
+
+    async fn move_document(&self, a: Value) -> ToolResult {
+        #[derive(Deserialize)]
+        struct A {
+            slug: String,
+            folder: String,
+        }
+        let a: A = args(a)?;
+        let doc = self.doc(&a.slug).await?;
+        if doc.owner_id != self.user.id {
+            return Err(ToolError(format!(
+                "only the owner ({}) can move {:?}",
+                doc.owner, doc.slug
+            )));
+        }
+        let folder = paths::normalize_folder(&a.folder).map_err(ToolError)?;
+        db::move_document(&self.state.db, self.user.id, &doc.slug, &folder).await?;
+        Ok(json!({
+            "slug": doc.slug,
+            "folder": folder,
+            "url": self.url(&doc.slug, None, "index"),
+        }))
     }
 
     async fn get_feedback(&self, a: Value) -> ToolResult {

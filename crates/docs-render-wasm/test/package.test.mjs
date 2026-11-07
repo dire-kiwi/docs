@@ -52,6 +52,11 @@ test("paths match native", () => {
     native.paths,
   );
   assert.deepEqual(
+    cases.folders.map((f) => attempt(() => ({ ok: docs.normalizeFolder(f) }))),
+    native.folders,
+  );
+  assert.equal(docs.normalizeFolder(" docs//plans/ "), "docs/plans");
+  assert.deepEqual(
     cases.links.map(([from, href]) => docs.resolveLink(from, href)),
     native.links,
   );
@@ -72,6 +77,10 @@ test("sanitize, references and tool definitions match native", () => {
   assert.deepEqual(cases.html.map(docs.sanitize), native.sanitize);
   assert.equal(docs.componentsReference(), native.componentsReference);
   assert.deepEqual(docs.toolDefinitions(), native.toolDefinitions);
+  const tools = Object.fromEntries(docs.toolDefinitions().map((t) => [t.name, t]));
+  assert.deepEqual(tools.move_document.inputSchema.required, ["slug", "folder"]);
+  assert.equal(tools.publish_document.inputSchema.properties.folder.type, "string");
+  assert.match(docs.serverInstructions(), /`folder`/);
   assert.equal(docs.serverInstructions(), native.serverInstructions);
   assert.deepEqual(
     docs.components().map((c) => c.name),
@@ -106,6 +115,7 @@ test("missing arguments use the defaults or throw strings", () => {
     "meta(undefined, md)": () => docs.meta(undefined, "md"),
     "normalizePath()": () => docs.normalizePath(),
     "normalizePath(3)": () => docs.normalizePath(3),
+    "normalizeFolder()": () => docs.normalizeFolder(),
     "resolveLink(from)": () => docs.resolveLink("index"),
     "titleFromPath()": () => docs.titleFromPath(),
     "urlSuffix()": () => docs.urlSuffix(),
@@ -120,6 +130,7 @@ test("missing arguments use the defaults or throw strings", () => {
     assert.doesNotMatch(error, /unwrap/, call);
   }
   assert.equal(attempt(() => docs.normalizePath(3)).error, "path must be a string, not number");
+  assert.equal(attempt(() => docs.normalizeFolder(null)).error, "folder must be a string, not null");
   assert.equal(attempt(() => docs.render("x")).error, 'format must be "md" or "mdx", not undefined');
   // The instance still works after all that.
   assert.equal(docs.normalizePath("./A b.md"), "a-b");

@@ -1187,3 +1187,230 @@ async fn pending_device_authorizations_are_capped() {
         .unwrap();
     t.start_device(&client_id).await;
 }
+
+#[tokio::test]
+async fn folders_organise_documents() {
+    let t = TestApp::new().await;
+    let (alice_cookie, alice) = t.user("alice").await;
+    let (bob_cookie, bob) = t.user("bob").await;
+    let page = |content: &str| json!([{ "path": "index", "content": content }]);
+
+    // Created in a folder, normalised; documents without one are at the top level.
+    let created = t
+        .tool(
+            &alice,
+            "publish_document",
+            json!({ "slug": "plan", "folder": " docs//plans/ ", "pages": page("# Plan") }),
+        )
+        .await;
+    assert_eq!(created["folder"], "docs/plans");
+    assert_eq!(created["note"], Value::Null);
+    t.tool(
+        &alice,
+        "publish_document",
+        json!({ "slug": "notes", "folder": "docs", "pages": page("# Notes") }),
+    )
+    .await;
+    t.tool(
+        &alice,
+        "publish_document",
+        json!({ "slug": "loose", "pages": page("# Loose") }),
+    )
+    .await;
+    t.tool(
+        &bob,
+        "publish_document",
+        json!({ "slug": "bobs", "folder": "docs", "pages": page("# Bob's") }),
+    )
+    .await;
+    let listed = t.tool(&alice, "list_documents", json!({})).await;
+    let folder_of = |listed: &Value, slug: &str| {
+        listed["documents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["slug"] == slug)
+            .unwrap_or_else(|| panic!("{slug} not listed"))["folder"]
+            .clone()
+    };
+    assert_eq!(folder_of(&listed, "plan"), "docs/plans");
+    assert_eq!(folder_of(&listed, "loose"), "");
+    let got = t.tool(&alice, "get_document", json!({ "slug": "plan" })).await;
+    assert_eq!(got["folder"], "docs/plans");
+
+    // Bad folders are rejected, and nothing is created.
+    for bad in ["docs/../etc", "./x", "a\u{7}b", &"x".repeat(201)] {
+        let err = t
+            .tool_error(
+                &alice,
+                "publish_document",
+                json!({ "slug": "bad", "folder": bad, "pages": page("x") }),
+            )
+            .await;
+        assert!(err.starts_with("invalid folder"), "{err}");
+        let err = t
+            .tool_error(&alice, "move_document", json!({ "slug": "plan", "folder": bad }))
+            .await;
+        assert!(err.starts_with("invalid folder"), "{err}");
+    }
+    let err = t.tool_error(&alice, "get_document", json!({ "slug": "bad" })).await;
+    assert!(err.contains("no document"), "{err}");
+
+    // move_document moves it; the URL stays the same; a later publish keeps the move.
+    let moved = t
+        .tool(&alice, "move_document", json!({ "slug": "plan", "folder": "archive" }))
+        .await;
+    assert_eq!(moved["folder"], "archive");
+    assert_eq!(moved["url"], "http://docs.test/d/plan/");
+    let republished = t
+        .tool(
+            &alice,
+            "publish_document",
+            json!({ "slug": "plan", "folder": "docs/plans", "pages": page("# Plan v2") }),
+        )
+        .await;
+    assert_eq!(republished["version"], 2);
+    assert_eq!(republished["folder"], "archive");
+    assert!(republished["note"].as_str().unwrap().contains("move_document"));
+    let republished = t
+        .tool(
+            &alice,
+            "publish_document",
+            json!({ "slug": "plan", "pages": page("# Plan v3") }),
+        )
+        .await;
+    assert_eq!(republished["folder"], "archive");
+    assert_eq!(republished["note"], Value::Null);
+
+    // The home page shows the tree, each document once however many pages it has.
+    t.tool(
+        &alice,
+        "publish_document",
+        json!({ "slug": "notes", "pages": [{ "path": "index", "content": "# Notes" }, { "path": "a/b", "content": "x" }] }),
+    )
+    .await;
+    let home = t.get("/", &alice_cookie).await;
+    assert_eq!(home.status, StatusCode::OK);
+    assert!(home.body.contains(r#"data-folder-key="mine:docs""#), "{}", home.body);
+    assert!(home.body.contains(r#"data-folder-key="mine:archive""#));
+    assert!(home.body.contains("2 pages"));
+    assert_eq!(home.body.matches(r#"href="/d/notes/""#).count(), 1);
+    assert!(
+        home.body.find("mine:archive").unwrap() < home.body.find(r#"href="/d/loose/""#).unwrap(),
+        "folders come before documents"
+    );
+    assert!(
+        home.body.contains(r#"<option value="docs">"#),
+        "existing folders are suggested"
+    );
+    let csrf = csrf_of(&home.body);
+
+    // Moving from the home page, including into a new folder.
+    let res = t
+        .post_form(
+            "/d/loose/-/move",
+            &alice_cookie,
+            &[("csrf", &csrf), ("folder", "docs/new one")],
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::SEE_OTHER, "{}", res.body);
+    let listed = t.tool(&alice, "list_documents", json!({})).await;
+    assert_eq!(folder_of(&listed, "loose"), "docs/new one");
+    let res = t
+        .post_form("/d/loose/-/move", &alice_cookie, &[("csrf", &csrf), ("folder", "../x")])
+        .await;
+    assert_eq!(res.status, StatusCode::OK);
+    assert!(res.body.contains("invalid folder"), "the error is shown on the page");
+    let res = t
+        .post_form("/d/loose/-/move", &alice_cookie, &[("csrf", "wrong"), ("folder", "x")])
+        .await;
+    assert_ne!(res.status, StatusCode::SEE_OTHER, "needs the CSRF token");
+
+    // Renaming a folder moves everything under it, but only your own documents.
+    let res = t
+        .post_form(
+            "/folders/rename",
+            &alice_cookie,
+            &[("csrf", &csrf), ("from", "docs"), ("to", "Project/docs")],
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::SEE_OTHER, "{}", res.body);
+    let listed = t.tool(&alice, "list_documents", json!({})).await;
+    assert_eq!(folder_of(&listed, "notes"), "Project/docs");
+    assert_eq!(folder_of(&listed, "loose"), "Project/docs/new one");
+    assert_eq!(folder_of(&listed, "plan"), "archive");
+    let listed = t.tool(&bob, "list_documents", json!({})).await;
+    assert_eq!(
+        folder_of(&listed, "bobs"),
+        "docs",
+        "bob's folder of the same name is untouched"
+    );
+    // A folder whose name only starts the same way is not under it.
+    t.tool(
+        &alice,
+        "move_document",
+        json!({ "slug": "plan", "folder": "Project/docs2" }),
+    )
+    .await;
+    t.post_form(
+        "/folders/rename",
+        &alice_cookie,
+        &[("csrf", &csrf), ("from", "Project/docs"), ("to", "")],
+    )
+    .await;
+    let listed = t.tool(&alice, "list_documents", json!({})).await;
+    assert_eq!(folder_of(&listed, "notes"), "");
+    assert_eq!(folder_of(&listed, "loose"), "new one");
+    assert_eq!(folder_of(&listed, "plan"), "Project/docs2");
+    let res = t
+        .post_form(
+            "/folders/rename",
+            &alice_cookie,
+            &[("csrf", &csrf), ("from", "a/.."), ("to", "b")],
+        )
+        .await;
+    assert!(res.body.contains("invalid folder"));
+
+    // Shared documents show under their owner, and the reader can't reorganise them.
+    t.tool(
+        &bob,
+        "share_document",
+        json!({ "slug": "bobs", "add_users": ["alice"] }),
+    )
+    .await;
+    let home = t.get("/", &alice_cookie).await;
+    assert!(home.body.contains("Shared with you"));
+    assert!(home.body.contains(r#"data-folder-key="shared:bob:docs""#));
+    assert!(
+        !home.body.contains(r#"action="/d/bobs/-/move""#),
+        "no move form for shared documents"
+    );
+    let err = t
+        .tool_error(&alice, "move_document", json!({ "slug": "bobs", "folder": "mine" }))
+        .await;
+    assert!(err.contains("only the owner"), "{err}");
+    let res = t
+        .post_form("/d/bobs/-/move", &alice_cookie, &[("csrf", &csrf), ("folder", "mine")])
+        .await;
+    assert_eq!(res.status, StatusCode::FORBIDDEN);
+    t.post_form(
+        "/folders/rename",
+        &alice_cookie,
+        &[("csrf", &csrf), ("from", "docs"), ("to", "mine")],
+    )
+    .await;
+    let listed = t.tool(&bob, "list_documents", json!({})).await;
+    assert_eq!(folder_of(&listed, "bobs"), "docs");
+    let bob_home = t.get("/", &bob_cookie).await;
+    assert!(bob_home.body.contains(r#"action="/d/bobs/-/move""#));
+
+    // The tools are advertised.
+    let tools = t.rpc(&alice, "tools/list", json!({})).await;
+    let names: Vec<&str> = tools["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"move_document"));
+}
