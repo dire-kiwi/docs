@@ -6,11 +6,18 @@ use serde_json::{Value, json};
 
 /// The `instructions` sent in the MCP `initialize` result.
 pub const INSTRUCTIONS: &str = "Docs hosts Markdown documents for people to read and respond to: reports, plans, research. \
+If you can start sub-agents, have one write and publish the document: give it what the document should say, \
+let it look up components, publish and fix any problems, and have it return the URL. \
+That keeps the component reference and the page sources out of your own context. \
 Publish with `publish_document` (one or more pages; nested paths like `plan/phase-1` make a nested menu). \
 Every publish creates a new version, so you can revise freely. \
 Documents are organised in folders: when you create one, set `folder` to the name of the project or repository you are working in (e.g. \"docs\"), \
 optionally with a subfolder (\"docs/plans\"). Later versions stay in whatever folder the document is in; use `move_document` only when the user asks to move one. \
-Use format \"mdx\" to add form fields (call `list_components` for the list) when you need a decision or input from the reader, \
+Plain Markdown needs no reference. For components (callouts, collapsible sections, form fields), call `list_components` \
+for their names, props and examples, and use format \"mdx\". \
+`publish_document` is the check: it rejects a page it can't publish and says why, and returns warnings (an unknown component, a bad prop) with the URL; \
+fix them and publish again. Don't install or run npm packages, renderers or other tools to check pages. \
+Add form fields when you need a decision or input from the reader, \
 then call `get_feedback` later to read their answers and any text they selected and commented on. \
 Documents are private to the user you act for; use `share_document` to share one with other people (by username) or to get a share link. \
 Always give the reader the URL returned by `publish_document`.";
@@ -139,7 +146,8 @@ pub fn tool_definitions() -> Value {
         {
             "name": "list_components",
             "title": "List MDX components",
-            "description": "Reference for the MDX components (form fields, callouts…) pages can use.",
+            "description": "Reference for the MDX components (form fields, callouts…) pages can use: names, props and examples. \
+    It is long, so call it from the sub-agent writing the document if you have one.",
             "inputSchema": { "type": "object", "properties": {} },
             "annotations": { "readOnlyHint": true },
         },
