@@ -335,6 +335,161 @@ pub async fn take_code(db: &Db, code: &str) -> Result<Option<Code>> {
     )
 }
 
+// ---------- device authorization (RFC 8628) ----------
+
+pub const DEVICE_CODE_TTL: i64 = 600;
+pub const DEVICE_POLL_INTERVAL: i64 = 5;
+/// No vowels, so codes don't spell words; no digits, so nothing is mistaken for a letter.
+const USER_CODE_ALPHABET: &[u8] = b"BCDFGHJKLMNPQRSTVWXZ";
+
+/// Eight letters from [`USER_CODE_ALPHABET`] (about 34 bits).
+fn random_user_code() -> String {
+    let mut code = String::with_capacity(8);
+    while code.len() < 8 {
+        let mut buf = [0u8; 16];
+        getrandom::fill(&mut buf).expect("system random number generator");
+        // Reject bytes past the largest multiple of 20 to keep the letters uniform.
+        for b in buf.into_iter().filter(|b| *b < 240) {
+            if code.len() < 8 {
+                code.push(USER_CODE_ALPHABET[(b % 20) as usize] as char);
+            }
+        }
+    }
+    code
+}
+
+/// What people type is forgiving: case and separators don't matter.
+pub fn normalize_user_code(input: &str) -> String {
+    input
+        .chars()
+        .filter(|c| c.is_ascii_alphabetic())
+        .map(|c| c.to_ascii_uppercase())
+        .collect()
+}
+
+/// Returns `(device_code, user_code)`.
+pub async fn create_device_code(db: &Db, client_id: &str) -> Result<(String, String)> {
+    sqlx::query("DELETE FROM oauth_device_codes WHERE expires_at < ?")
+        .bind(now())
+        .execute(db)
+        .await?;
+    let device_code = random_token();
+    let user_code = random_user_code();
+    sqlx::query(
+        "INSERT INTO oauth_device_codes (hash, user_code, client_id, interval, expires_at) VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(hash_token(&device_code))
+    .bind(&user_code)
+    .bind(client_id)
+    .bind(DEVICE_POLL_INTERVAL)
+    .bind(now() + DEVICE_CODE_TTL)
+    .execute(db)
+    .await?;
+    Ok((device_code, user_code))
+}
+
+/// The client a pending, unexpired user code belongs to.
+pub async fn pending_device_client(db: &Db, user_code: &str) -> Result<Option<Client>> {
+    let row: Option<(String,)> = sqlx::query_as(
+        "SELECT client_id FROM oauth_device_codes WHERE user_code = ? AND status = 'pending' AND expires_at > ?",
+    )
+    .bind(normalize_user_code(user_code))
+    .bind(now())
+    .fetch_optional(db)
+    .await?;
+    match row {
+        Some((client_id,)) => get_client(db, &client_id).await,
+        None => Ok(None),
+    }
+}
+
+/// Approve or deny a pending code. False if it is unknown, expired or already decided.
+pub async fn decide_device_code(db: &Db, user_code: &str, user_id: i64, approve: bool) -> Result<bool> {
+    let res = sqlx::query(
+        "UPDATE oauth_device_codes SET status = ?, user_id = ?
+         WHERE user_code = ? AND status = 'pending' AND expires_at > ?",
+    )
+    .bind(if approve { "approved" } else { "denied" })
+    .bind(user_id)
+    .bind(normalize_user_code(user_code))
+    .bind(now())
+    .execute(db)
+    .await?;
+    Ok(res.rows_affected() == 1)
+}
+
+#[derive(Debug, PartialEq)]
+pub enum DevicePoll {
+    Unknown,
+    Expired,
+    Pending,
+    SlowDown,
+    Denied,
+    Approved { user_id: i64, client_id: String },
+}
+
+/// A token-endpoint poll with a device code. Decided codes are single use.
+pub async fn poll_device_code(db: &Db, device_code: &str) -> Result<DevicePoll> {
+    let hash = hash_token(device_code);
+    #[derive(FromRow)]
+    struct Row {
+        client_id: String,
+        status: String,
+        user_id: Option<i64>,
+        interval: i64,
+        last_polled_at: Option<i64>,
+        expires_at: i64,
+    }
+    let row = sqlx::query_as::<_, Row>(
+        "SELECT client_id, status, user_id, interval, last_polled_at, expires_at
+         FROM oauth_device_codes WHERE hash = ?",
+    )
+    .bind(&hash)
+    .fetch_optional(db)
+    .await?;
+    let Some(Row {
+        client_id,
+        status,
+        user_id,
+        interval,
+        last_polled_at,
+        expires_at,
+    }) = row
+    else {
+        return Ok(DevicePoll::Unknown);
+    };
+    let now = now();
+    if expires_at <= now {
+        return Ok(DevicePoll::Expired);
+    }
+    if status != "pending" {
+        // Delete first, so two concurrent polls can't both get tokens.
+        let taken = sqlx::query("DELETE FROM oauth_device_codes WHERE hash = ? AND status = ?")
+            .bind(&hash)
+            .bind(&status)
+            .execute(db)
+            .await?;
+        return Ok(match (taken.rows_affected(), status.as_str(), user_id) {
+            (1, "approved", Some(user_id)) => DevicePoll::Approved { user_id, client_id },
+            (1, _, _) => DevicePoll::Denied,
+            _ => DevicePoll::Unknown,
+        });
+    }
+    let too_soon = last_polled_at.is_some_and(|t| now - t < interval);
+    // RFC 8628 3.5: on slow_down the client adds 5 seconds to its interval, and so do we.
+    sqlx::query("UPDATE oauth_device_codes SET last_polled_at = ?, interval = interval + ? WHERE hash = ?")
+        .bind(now)
+        .bind(if too_soon { 5 } else { 0 })
+        .bind(&hash)
+        .execute(db)
+        .await?;
+    Ok(if too_soon {
+        DevicePoll::SlowDown
+    } else {
+        DevicePoll::Pending
+    })
+}
+
 // ---------- documents ----------
 
 #[derive(Debug, Clone, FromRow, Serialize)]
