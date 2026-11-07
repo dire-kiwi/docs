@@ -86,6 +86,45 @@ test("bad arguments throw strings", () => {
   assert.match(attempt(() => docs.render("x", "md", {})).error, /^invalid render options/);
 });
 
+test("missing arguments use the defaults or throw strings", () => {
+  // Options are optional: the page is `index` and the base URL `/`.
+  const defaults = docs.render("[next](next.md)", "md");
+  assert.deepEqual(defaults, docs.render("[next](next.md)", "md", { pagePath: "index", baseUrl: "/" }));
+  assert.deepEqual(docs.render("x", "md", null), docs.render("x", "md", undefined));
+  assert.match(defaults.html, /href="\/next"/);
+  assert.deepEqual(docs.validatePage("x"), docs.validatePage("x", null, null));
+
+  const fails = {
+    "navTree()": () => docs.navTree(),
+    "navTree(undefined)": () => docs.navTree(undefined),
+    "navTree(fn)": () => docs.navTree(() => 1),
+    "validatePages(undefined)": () => docs.validatePages(undefined),
+    "validatePages(null)": () => docs.validatePages(null),
+    "render()": () => docs.render(),
+    "render(src)": () => docs.render("x"),
+    "render(src, fmt, {})": () => docs.render("x", "md", {}),
+    "meta(undefined, md)": () => docs.meta(undefined, "md"),
+    "normalizePath()": () => docs.normalizePath(),
+    "normalizePath(3)": () => docs.normalizePath(3),
+    "resolveLink(from)": () => docs.resolveLink("index"),
+    "titleFromPath()": () => docs.titleFromPath(),
+    "urlSuffix()": () => docs.urlSuffix(),
+    "pathCandidates()": () => docs.pathCandidates(),
+    "validatePage()": () => docs.validatePage(),
+    "validatePage(src, 3)": () => docs.validatePage("x", 3),
+    "sanitize()": () => docs.sanitize(),
+  };
+  for (const [call, f] of Object.entries(fails)) {
+    const { error } = attempt(f);
+    assert.equal(typeof error, "string", `${call} throws a string`);
+    assert.doesNotMatch(error, /unwrap/, call);
+  }
+  assert.equal(attempt(() => docs.normalizePath(3)).error, "path must be a string, not number");
+  assert.equal(attempt(() => docs.render("x")).error, 'format must be "md" or "mdx", not undefined');
+  // The instance still works after all that.
+  assert.equal(docs.normalizePath("./A b.md"), "a-b");
+});
+
 test("the browser build initialises from bytes", async () => {
   const web = await import("@dire-kiwi/docs-render/web");
   const require = createRequire(import.meta.url);

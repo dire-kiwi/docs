@@ -23,6 +23,15 @@ mkdir -p "$out"
 wasm-bindgen --target web --out-dir "$out" --out-name docs_render \
   target/wasm32-unknown-unknown/wasm/docs_render_wasm.wasm
 
+# wasm-bindgen drops the `?` from Option parameters that have an explicit TypeScript type.
+dts="$out/docs_render.d.ts"
+sed -i -e 's/options: RenderOptions | null)/options?: RenderOptions | null)/' \
+  -e 's/format: Format | null, path: string | null)/format?: Format | null, path?: string | null)/' "$dts"
+grep -q 'options?: RenderOptions' "$dts" && grep -q 'path?: string | null)' "$dts" || {
+  echo "build.sh: could not mark the optional parameters in $dts" >&2
+  exit 1
+}
+
 cp "$crate/npm/node.js" "$crate/README.md" LICENSE "$out/"
 sed "s/\"version\": \"0.0.0\"/\"version\": \"$version\"/" "$crate/npm/package.json" > "$out/package.json"
 

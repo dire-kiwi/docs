@@ -3,6 +3,10 @@
 //! Values cross the boundary as JSON (`JSON.parse` / `JSON.stringify`), so
 //! numbers, answers and results mean exactly what they do on the server.
 //! Errors are thrown as plain strings: the same messages the server reports.
+//!
+//! Every argument is taken as a `JsValue` and checked here, so a missing or
+//! wrongly typed argument throws a string error instead of a `TypeError` from
+//! the generated glue (or, for non-strings, reading the wrong memory).
 
 use std::collections::HashMap;
 
@@ -138,23 +142,54 @@ fn to_js(v: &Value) -> JsValue {
     js_sys::JSON::parse(&v.to_string()).expect("serde_json output is valid JSON")
 }
 
+/// Read a JSON-like argument. `undefined` (a missing argument) reads as `null`.
 fn from_js<T: for<'de> Deserialize<'de>>(v: &JsValue, what: &str) -> JsResult<T> {
-    let s: String = js_sys::JSON::stringify(v)
+    let json = js_sys::JSON::stringify(v)
         .map_err(|_| err(format!("{what} must be JSON-serialisable")))?
-        .into();
-    serde_json::from_str(&s).map_err(|e| err(format!("invalid {what}: {e}")))
+        .as_string()
+        // JSON.stringify returns undefined for undefined, functions and symbols.
+        .unwrap_or_else(|| "null".into());
+    serde_json::from_str(&json).map_err(|e| err(format!("invalid {what}: {e}")))
 }
 
-fn format(s: &str) -> JsResult<Format> {
-    Format::parse(s).ok_or_else(|| err(format!("format must be md or mdx, not {s:?}")))
+fn absent(v: &JsValue) -> bool {
+    v.is_undefined() || v.is_null()
 }
 
-/// Render a page to sanitized HTML. Throws if the source cannot be parsed (e.g. broken MDX).
+fn string(v: &JsValue, name: &str) -> JsResult<String> {
+    v.as_string()
+        .ok_or_else(|| err(format!("{name} must be a string, not {}", type_name(v))))
+}
+
+fn opt_string(v: Option<JsValue>, name: &str) -> JsResult<Option<String>> {
+    match v {
+        Some(v) if !absent(&v) => string(&v, name).map(Some),
+        _ => Ok(None),
+    }
+}
+
+fn type_name(v: &JsValue) -> String {
+    if v.is_null() {
+        "null".into()
+    } else {
+        v.js_typeof().as_string().unwrap_or_default()
+    }
+}
+
+fn format(v: &JsValue) -> JsResult<Format> {
+    let s = v
+        .as_string()
+        .ok_or_else(|| err(format!("format must be \"md\" or \"mdx\", not {}", type_name(v))))?;
+    Format::parse(&s).ok_or_else(|| err(format!("format must be md or mdx, not {s:?}")))
+}
+
+/// Render a page to sanitized HTML. Without options, the page is `index` with base URL `/`.
+/// Throws if the source cannot be parsed (e.g. broken MDX).
 #[wasm_bindgen(unchecked_return_type = "RenderResult")]
 pub fn render(
-    source: &str,
-    #[wasm_bindgen(unchecked_param_type = "Format")] format: &str,
-    #[wasm_bindgen(unchecked_param_type = "RenderOptions")] options: JsValue,
+    #[wasm_bindgen(unchecked_param_type = "string")] source: JsValue,
+    #[wasm_bindgen(unchecked_param_type = "Format")] format: JsValue,
+    #[wasm_bindgen(unchecked_param_type = "RenderOptions | null")] options: Option<JsValue>,
 ) -> JsResult<JsValue> {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -164,15 +199,23 @@ pub fn render(
         #[serde(default)]
         answers: Option<HashMap<String, Value>>,
     }
-    let format = self::format(format)?;
-    let o: Opts = from_js(&options, "render options")?;
+    let source = string(&source, "source")?;
+    let format = self::format(&format)?;
+    let o = match options {
+        Some(o) if !absent(&o) => from_js(&o, "render options")?,
+        _ => Opts {
+            page_path: "index".into(),
+            base_url: "/".into(),
+            answers: None,
+        },
+    };
     let answers = o.answers.unwrap_or_default();
     let opts = Options {
         page_path: &o.page_path,
         base_url: &o.base_url,
         answers: &answers,
     };
-    let r = render::render(source, format, &opts).map_err(err)?;
+    let r = render::render(&source, format, &opts).map_err(err)?;
     Ok(to_js(&json!({
         "html": r.html,
         "toc": r.toc.iter().map(|t| json!({ "depth": t.depth, "id": t.id, "text": t.text })).collect::<Vec<_>>(),
@@ -184,44 +227,53 @@ pub fn render(
 
 /// Title and ordering hints from frontmatter or the first `# heading`. Throws if the source cannot be parsed.
 #[wasm_bindgen(unchecked_return_type = "PageMeta")]
-pub fn meta(source: &str, #[wasm_bindgen(unchecked_param_type = "Format")] format: &str) -> JsResult<JsValue> {
-    let tree = render::parse(source, self::format(format)?).map_err(err)?;
+pub fn meta(
+    #[wasm_bindgen(unchecked_param_type = "string")] source: JsValue,
+    #[wasm_bindgen(unchecked_param_type = "Format")] format: JsValue,
+) -> JsResult<JsValue> {
+    let source = string(&source, "source")?;
+    let tree = render::parse(&source, self::format(&format)?).map_err(err)?;
     let m = render::meta(&tree);
     Ok(to_js(&json!({ "title": m.title, "order": m.order })))
 }
 
 /// Normalise a page path (`./Plan/Phase 1.md` → `plan/phase-1`). Throws a string for invalid paths.
 #[wasm_bindgen(js_name = normalizePath)]
-pub fn normalize_path(raw: &str) -> JsResult<String> {
-    paths::normalize(raw).map_err(err)
+pub fn normalize_path(#[wasm_bindgen(unchecked_param_type = "string")] raw: JsValue) -> JsResult<String> {
+    paths::normalize(&string(&raw, "path")?).map_err(err)
 }
 
 /// URL suffix, relative to a version base ending in `/`, for a page path (`plan/index` → `plan/`, `index` → ``).
 #[wasm_bindgen(js_name = urlSuffix)]
-pub fn url_suffix(path: &str) -> String {
-    paths::url_suffix(path)
+pub fn url_suffix(#[wasm_bindgen(unchecked_param_type = "string")] path: JsValue) -> JsResult<String> {
+    Ok(paths::url_suffix(&string(&path, "path")?))
 }
 
 /// Page paths a URL suffix may stand for, in the order to try them (the inverse of `urlSuffix`).
 #[wasm_bindgen(js_name = pathCandidates)]
-pub fn path_candidates(suffix: &str) -> Vec<String> {
-    paths::candidates(suffix)
+pub fn path_candidates(#[wasm_bindgen(unchecked_param_type = "string")] suffix: JsValue) -> JsResult<Vec<String>> {
+    Ok(paths::candidates(&string(&suffix, "suffix")?))
 }
 
 /// Resolve a relative link written in page `from` (file semantics). Returns null for absolute URLs,
 /// root-relative links and pure fragments, which are left as they are.
 #[wasm_bindgen(js_name = resolveLink, unchecked_return_type = "ResolvedLink | null")]
-pub fn resolve_link(from: &str, href: &str) -> JsValue {
-    match paths::resolve_link(from, href) {
-        Some((path, suffix)) => to_js(&json!({ "path": path, "suffix": suffix })),
-        None => JsValue::NULL,
-    }
+pub fn resolve_link(
+    #[wasm_bindgen(unchecked_param_type = "string")] from: JsValue,
+    #[wasm_bindgen(unchecked_param_type = "string")] href: JsValue,
+) -> JsResult<JsValue> {
+    Ok(
+        match paths::resolve_link(&string(&from, "from")?, &string(&href, "href")?) {
+            Some((path, suffix)) => to_js(&json!({ "path": path, "suffix": suffix })),
+            None => JsValue::NULL,
+        },
+    )
 }
 
 /// A readable title from the last segment of a path (`plan/phase-1` → `Phase 1`, `index` → `Overview`).
 #[wasm_bindgen(js_name = titleFromPath)]
-pub fn title_from_path(path: &str) -> String {
-    paths::title_from_path(path)
+pub fn title_from_path(#[wasm_bindgen(unchecked_param_type = "string")] path: JsValue) -> JsResult<String> {
+    Ok(paths::title_from_path(&string(&path, "path")?))
 }
 
 fn nav_json(nodes: &[NavNode]) -> Value {
@@ -257,14 +309,14 @@ fn valid_json(p: &publish::ValidPage) -> Value {
 /// then content). Throws the message publish_document would return.
 #[wasm_bindgen(js_name = validatePage, unchecked_return_type = "ValidatedPage")]
 pub fn validate_page(
-    source: &str,
-    #[wasm_bindgen(unchecked_param_type = "Format | null | undefined")] format: Option<String>,
-    path: Option<String>,
+    #[wasm_bindgen(unchecked_param_type = "string")] source: JsValue,
+    #[wasm_bindgen(unchecked_param_type = "Format | null")] format: Option<JsValue>,
+    #[wasm_bindgen(unchecked_param_type = "string | null")] path: Option<JsValue>,
 ) -> JsResult<JsValue> {
     let input = PageInput {
-        path: path.unwrap_or_else(|| "index".into()),
-        content: source.into(),
-        format,
+        path: opt_string(path, "path")?.unwrap_or_else(|| "index".into()),
+        content: string(&source, "source")?,
+        format: opt_string(format, "format")?,
         title: None,
     };
     let (pages, warnings) = publish::validate_pages(vec![input]).map_err(err)?;
@@ -324,6 +376,6 @@ pub fn server_instructions() -> String {
 
 /// Run HTML through the same allowlist sanitizer rendered pages go through.
 #[wasm_bindgen]
-pub fn sanitize(html: &str) -> String {
-    render::sanitize(html)
+pub fn sanitize(#[wasm_bindgen(unchecked_param_type = "string")] html: JsValue) -> JsResult<String> {
+    Ok(render::sanitize(&string(&html, "html")?))
 }

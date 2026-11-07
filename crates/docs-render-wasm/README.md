@@ -59,11 +59,11 @@ The site's form autosave and text-selection comments (`frontend/src/fields.ts`, 
 
 ## API
 
-Errors are thrown as plain strings: the same messages the hosted server reports. Full types are in `docs_render.d.ts`.
+Errors are thrown as plain strings: the same messages the hosted server reports. A missing or wrongly typed argument throws a string too (e.g. `path must be a string, not number`). Full types are in `docs_render.d.ts`.
 
 | Function | |
 |---|---|
-| `render(source, format, { pagePath, baseUrl, answers? })` | → `{ html, toc, hasH1, fields, warnings }`. `format` is `"md"` or `"mdx"`. Relative links are rewritten against `baseUrl` (ending in `/`). `answers` (field name → saved answer) prefills form fields. Throws if the source cannot be parsed (e.g. an unclosed MDX tag). |
+| `render(source, format, { pagePath, baseUrl, answers? }?)` | → `{ html, toc, hasH1, fields, warnings }`. `format` is `"md"` or `"mdx"`. Relative links are rewritten against `baseUrl` (ending in `/`). Without options, the page is `index` and `baseUrl` is `/`. `answers` (field name → saved answer) prefills form fields. Throws if the source cannot be parsed (e.g. an unclosed MDX tag). |
 | `meta(source, format)` | → `{ title, order }` from YAML frontmatter `title:` / `order:`, else the first `# heading`. |
 | `normalizePath(raw)` | `./Plan/Phase 1.md` → `plan/phase-1`. Throws for invalid paths. |
 | `urlSuffix(path)`, `pathCandidates(suffix)` | Page path ↔ URL: `plan/index` ↔ `plan/`, `index` ↔ `` . |
