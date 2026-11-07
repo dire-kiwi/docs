@@ -465,6 +465,20 @@ async fn oauth_authorization_code_flow() {
             .body(Body::from(body))
             .unwrap()
     };
+    // Naming another client doesn't use up the code.
+    let other_client = t
+        .send(token_req(
+            serde_urlencoded::to_string([
+                ("grant_type", "authorization_code"),
+                ("code", code.as_str()),
+                ("client_id", "client_other"),
+                ("code_verifier", verifier),
+            ])
+            .unwrap(),
+        ))
+        .await;
+    assert_eq!(other_client.status, StatusCode::BAD_REQUEST);
+    assert_eq!(other_client.json()["error"], "invalid_grant");
     let wrong = t
         .send(token_req(
             serde_urlencoded::to_string([
@@ -478,6 +492,11 @@ async fn oauth_authorization_code_flow() {
         .await;
     assert_eq!(wrong.status, StatusCode::BAD_REQUEST);
     assert_eq!(wrong.json()["error"], "invalid_grant");
+    assert_eq!(
+        wrong.json()["error_description"],
+        "PKCE verification failed",
+        "the code survived the other client's attempt"
+    );
 
     // The code was consumed by the failed attempt, so get a fresh one.
     let user = db::upsert_user(&t.state.db, "dev", "carol", "carol", None, None)
@@ -563,9 +582,14 @@ async fn removing_a_user_from_the_allowlist_revokes_access() {
     let user = db::upsert_user(&t.state.db, "dev", "erin", "erin", None, None)
         .await
         .unwrap();
-    let client_id = db::register_client(&t.state.db, "Agent", &["http://localhost:1/cb".to_string()])
-        .await
-        .unwrap();
+    let client_id = db::register_client(
+        &t.state.db,
+        "Agent",
+        &["http://localhost:1/cb".to_string()],
+        &["authorization_code", "refresh_token"],
+    )
+    .await
+    .unwrap();
     let refresh = db::create_token(
         &t.state.db,
         "refresh",
@@ -770,4 +794,396 @@ async fn documents_are_private_until_shared() {
         .await;
     assert_eq!(res.status, StatusCode::SEE_OTHER);
     assert!(t.get("/d/secret/-/share", &alice_cookie).await.body.contains("erin"));
+}
+
+const DEVICE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
+
+impl TestApp {
+    async fn post_form(&self, uri: &str, cookie: &str, form: &[(&str, &str)]) -> Resp {
+        self.send(
+            Request::post(uri)
+                .header(header::COOKIE, cookie)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(serde_urlencoded::to_string(form).unwrap()))
+                .unwrap(),
+        )
+        .await
+    }
+
+    /// Register a device-only client, as Huntaway does.
+    async fn device_client(&self) -> String {
+        let reg = self
+            .send(
+                Request::post("/oauth/register")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({ "client_name": "Huntaway", "grant_types": [DEVICE_GRANT, "refresh_token"] })
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(reg.status, StatusCode::CREATED, "{}", reg.body);
+        let reg = reg.json();
+        assert_eq!(reg["grant_types"], json!([DEVICE_GRANT, "refresh_token"]));
+        assert_eq!(reg["redirect_uris"], json!([]));
+        reg["client_id"].as_str().unwrap().to_string()
+    }
+
+    async fn start_device(&self, client_id: &str) -> Value {
+        let res = self
+            .post_form(
+                "/oauth/device_authorization",
+                "",
+                &[("client_id", client_id), ("scope", "docs")],
+            )
+            .await;
+        assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+        res.json()
+    }
+
+    async fn poll(&self, client_id: &str, device_code: &str) -> Resp {
+        self.post_form(
+            "/oauth/token",
+            "",
+            &[
+                ("grant_type", DEVICE_GRANT),
+                ("device_code", device_code),
+                ("client_id", client_id),
+            ],
+        )
+        .await
+    }
+
+    /// Open the verification link as a signed-in user and allow or deny.
+    async fn decide_device(&self, cookie: &str, user_code: &str, decision: &str) -> Resp {
+        let page = self.get(&format!("/device?user_code={user_code}"), cookie).await;
+        assert_eq!(page.status, StatusCode::OK, "{}", page.body);
+        assert!(page.body.contains("Connect Huntaway?"), "{}", page.body);
+        assert!(page.body.contains(user_code));
+        let csrf = csrf_of(&page.body);
+        self.post_form(
+            "/device",
+            cookie,
+            &[("csrf", &csrf), ("user_code", user_code), ("decision", decision)],
+        )
+        .await
+    }
+}
+
+fn error_of(res: &Resp) -> String {
+    assert_eq!(res.status, StatusCode::BAD_REQUEST, "{}", res.body);
+    res.json()["error"].as_str().unwrap().to_string()
+}
+
+#[tokio::test]
+async fn oauth_device_flow_publishes_as_the_user() {
+    let t = TestApp::new().await;
+    let asm = t
+        .send(
+            Request::get("/.well-known/oauth-authorization-server")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .json();
+    assert_eq!(
+        asm["device_authorization_endpoint"],
+        "http://docs.test/oauth/device_authorization"
+    );
+    assert!(
+        asm["grant_types_supported"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(DEVICE_GRANT))
+    );
+
+    let client_id = t.device_client().await;
+    let start = t.start_device(&client_id).await;
+    let device_code = start["device_code"].as_str().unwrap();
+    let user_code = start["user_code"].as_str().unwrap();
+    assert_eq!(start["verification_uri"], "http://docs.test/device");
+    assert_eq!(
+        start["verification_uri_complete"],
+        format!("http://docs.test/device?user_code={user_code}")
+    );
+    assert_eq!(start["interval"], 5);
+    assert_eq!(start["expires_in"], 600);
+    assert_eq!(user_code.len(), 9, "XXXX-XXXX: {user_code}");
+
+    assert_eq!(
+        error_of(&t.poll(&client_id, device_code).await),
+        "authorization_pending"
+    );
+
+    // Opening the link signs the user in (dev login here) and comes back to the code.
+    let anon = t.get(&format!("/device?user_code={user_code}"), "").await;
+    assert_eq!(anon.status, StatusCode::SEE_OTHER);
+    let login = url::Url::parse(&format!("http://docs.test{}", anon.location())).unwrap();
+    let next = login.query_pairs().find(|(k, _)| k == "next").unwrap().1.into_owned();
+    assert_eq!(next, format!("/device?user_code={user_code}"));
+    let signed_in = t
+        .post_form("/auth/dev", "", &[("login", "frank"), ("next", &next)])
+        .await;
+    assert_eq!(signed_in.status, StatusCode::SEE_OTHER, "{}", signed_in.body);
+    assert_eq!(signed_in.location(), next);
+    let set_cookie = signed_in.headers.get(header::SET_COOKIE).unwrap().to_str().unwrap();
+    let cookie = set_cookie.split(';').next().unwrap().to_string();
+
+    // A device-only client can't use the authorization code flow.
+    let authorize = t
+        .get(
+            &format!("/oauth/authorize?response_type=code&client_id={client_id}&redirect_uri=http%3A%2F%2Fomarchy%3A7878%2Fcb&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256"),
+            &cookie,
+        )
+        .await;
+    assert_eq!(authorize.status, StatusCode::BAD_REQUEST);
+
+    // Typing the code in lower case without the dash works too.
+    let entry = t.get("/device", &cookie).await;
+    assert!(entry.body.contains("Enter the code"));
+    let typed = t
+        .get(
+            &format!("/device?user_code={}", user_code.replace('-', "").to_lowercase()),
+            &cookie,
+        )
+        .await;
+    assert!(typed.body.contains("Connect Huntaway?"));
+    assert!(typed.body.contains("it is not verified"), "{}", typed.body);
+    assert!(typed.body.contains("It registered <time"), "{}", typed.body);
+    let wrong = t.get("/device?user_code=BBBB-BBBB", &cookie).await;
+    assert!(wrong.body.contains("That code is not valid"));
+
+    let approved = t.decide_device(&cookie, user_code, "allow").await;
+    assert_eq!(approved.status, StatusCode::OK, "{}", approved.body);
+    assert!(approved.body.contains("Huntaway is connected"));
+    let again = t.get(&format!("/device?user_code={user_code}"), &cookie).await;
+    assert!(again.body.contains("That code is not valid"), "codes are single use");
+
+    let ok = t.poll(&client_id, device_code).await;
+    assert_eq!(ok.status, StatusCode::OK, "{}", ok.body);
+    let tokens = ok.json();
+    assert_eq!(tokens["token_type"], "Bearer");
+    let access = tokens["access_token"].as_str().unwrap();
+    let published = t
+        .tool(
+            access,
+            "publish_document",
+            json!({ "slug": "from-huntaway", "pages": [{ "path": "index.md", "content": "# Hello\n" }] }),
+        )
+        .await;
+    assert_eq!(published["version"], 1);
+    let page = t.get("/d/from-huntaway/", &cookie).await;
+    assert_eq!(page.status, StatusCode::OK, "published as frank");
+
+    assert_eq!(
+        error_of(&t.poll(&client_id, device_code).await),
+        "invalid_grant",
+        "the device code is single use"
+    );
+
+    let refreshed = t
+        .post_form(
+            "/oauth/token",
+            "",
+            &[
+                ("grant_type", "refresh_token"),
+                ("refresh_token", tokens["refresh_token"].as_str().unwrap()),
+            ],
+        )
+        .await;
+    assert_eq!(refreshed.status, StatusCode::OK, "{}", refreshed.body);
+}
+
+#[tokio::test]
+async fn oauth_device_flow_denial_expiry_and_slow_down() {
+    let t = TestApp::new().await;
+    let (cookie, _) = t.user("gina").await;
+    let client_id = t.device_client().await;
+
+    // Polling faster than the interval.
+    let start = t.start_device(&client_id).await;
+    let device_code = start["device_code"].as_str().unwrap();
+    assert_eq!(
+        error_of(&t.poll(&client_id, device_code).await),
+        "authorization_pending"
+    );
+    assert_eq!(error_of(&t.poll(&client_id, device_code).await), "slow_down");
+    assert_eq!(error_of(&t.poll(&client_id, device_code).await), "slow_down");
+    let other = t.device_client().await;
+    t.decide_device(&cookie, start["user_code"].as_str().unwrap(), "allow")
+        .await;
+    assert_eq!(
+        error_of(&t.poll(&other, device_code).await),
+        "invalid_grant",
+        "issued to another client"
+    );
+    let anonymous = t
+        .post_form(
+            "/oauth/token",
+            "",
+            &[("grant_type", DEVICE_GRANT), ("device_code", device_code)],
+        )
+        .await;
+    assert_eq!(error_of(&anonymous), "invalid_request", "client_id is required");
+    let ok = t.poll(&client_id, device_code).await;
+    assert_eq!(
+        ok.status,
+        StatusCode::OK,
+        "the wrong client didn't use up the approval: {}",
+        ok.body
+    );
+
+    // Denied.
+    let start = t.start_device(&client_id).await;
+    let device_code = start["device_code"].as_str().unwrap();
+    let denied = t
+        .decide_device(&cookie, start["user_code"].as_str().unwrap(), "deny")
+        .await;
+    assert!(denied.body.contains("Access denied"));
+    assert_eq!(error_of(&t.poll(&client_id, device_code).await), "access_denied");
+    assert_eq!(error_of(&t.poll(&client_id, device_code).await), "invalid_grant");
+
+    // Expired, and still reported as expired after another client starts.
+    let start = t.start_device(&client_id).await;
+    let device_code = start["device_code"].as_str().unwrap();
+    let expire = |ago: i64| {
+        sqlx::query("UPDATE oauth_device_codes SET expires_at = ? WHERE hash = ?")
+            .bind(db::now() - ago)
+            .bind(db::hash_token(device_code))
+            .execute(&t.state.db)
+    };
+    expire(60).await.unwrap();
+    t.start_device(&client_id).await;
+    assert_eq!(db::purge_device_codes(&t.state.db).await.unwrap(), 0);
+    assert_eq!(error_of(&t.poll(&client_id, device_code).await), "expired_token");
+    let late = t
+        .get(
+            &format!("/device?user_code={}", start["user_code"].as_str().unwrap()),
+            &cookie,
+        )
+        .await;
+    assert!(late.body.contains("That code is not valid"));
+    // Long expired codes are purged.
+    expire(db::DEVICE_CODE_GRACE + 1).await.unwrap();
+    assert_eq!(db::purge_device_codes(&t.state.db).await.unwrap(), 1);
+    assert_eq!(error_of(&t.poll(&client_id, device_code).await), "invalid_grant");
+
+    // Approved, but the user has since been removed from DOCS_ALLOWED_USERS.
+    let start = t.start_device(&client_id).await;
+    t.decide_device(&cookie, start["user_code"].as_str().unwrap(), "allow")
+        .await;
+    let mut config = Config::for_tests();
+    config.allowed_users = Some(vec!["someone-else".into()]);
+    let state = AppState {
+        db: t.state.db.clone(),
+        config: std::sync::Arc::new(config),
+        http: t.state.http.clone(),
+    };
+    let t = TestApp {
+        app: docs::app(state.clone()),
+        state,
+    };
+    assert_eq!(
+        error_of(&t.poll(&client_id, start["device_code"].as_str().unwrap()).await),
+        "invalid_grant"
+    );
+
+    // Unknown clients and registrations that can't do anything.
+    let unknown = t
+        .post_form("/oauth/device_authorization", "", &[("client_id", "client_nope")])
+        .await;
+    assert_eq!(unknown.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(unknown.json()["error"], "invalid_client");
+    let useless = t
+        .send(
+            Request::post("/oauth/register")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json!({ "grant_types": ["refresh_token"] }).to_string()))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(useless.status, StatusCode::BAD_REQUEST);
+    assert_eq!(useless.json()["error"], "invalid_client_metadata");
+}
+
+#[tokio::test]
+async fn oauth_clients_only_use_the_grants_they_registered() {
+    let t = TestApp::new().await;
+    let (cookie, _) = t.user("hana").await;
+    let code_only = t
+        .send(
+            Request::post("/oauth/register")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({ "client_name": "Web Agent", "redirect_uris": ["http://localhost:4444/cb"] }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .json();
+    assert_eq!(code_only["grant_types"], json!(["authorization_code", "refresh_token"]));
+    let code_only = code_only["client_id"].as_str().unwrap();
+    let res = t
+        .post_form("/oauth/device_authorization", "", &[("client_id", code_only)])
+        .await;
+    assert_eq!(error_of(&res), "unauthorized_client");
+
+    // A device-only client is turned away from /oauth/authorize, even with a redirect URI.
+    let reg = t
+        .send(
+            Request::post("/oauth/register")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({ "grant_types": [DEVICE_GRANT], "redirect_uris": ["http://localhost:4444/cb"] }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .json();
+    assert_eq!(reg["grant_types"], json!([DEVICE_GRANT, "refresh_token"]));
+    let authorize = t
+        .get(
+            &format!(
+                "/oauth/authorize?response_type=code&client_id={}&redirect_uri=http%3A%2F%2Flocalhost%3A4444%2Fcb&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256",
+                reg["client_id"].as_str().unwrap()
+            ),
+            &cookie,
+        )
+        .await;
+    assert_eq!(authorize.status, StatusCode::BAD_REQUEST);
+    assert!(
+        authorize
+            .body
+            .contains("did not register for the authorization code grant")
+    );
+}
+
+#[tokio::test]
+async fn pending_device_authorizations_are_capped() {
+    let t = TestApp::new().await;
+    let client_id = t.device_client().await;
+    sqlx::query(
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?)
+         INSERT INTO oauth_device_codes (hash, user_code, client_id, interval, expires_at)
+         SELECT 'h' || i, 'U' || i, ?, 5, ? FROM n",
+    )
+    .bind(db::MAX_PENDING_DEVICE_CODES)
+    .bind(&client_id)
+    .bind(db::now() + 600)
+    .execute(&t.state.db)
+    .await
+    .unwrap();
+    let full = t
+        .post_form("/oauth/device_authorization", "", &[("client_id", &client_id)])
+        .await;
+    assert_eq!(full.status, StatusCode::SERVICE_UNAVAILABLE, "{}", full.body);
+    assert_eq!(full.json()["error"], "temporarily_unavailable");
+
+    // Expired ones don't count.
+    sqlx::query("UPDATE oauth_device_codes SET expires_at = 0 WHERE hash = 'h1'")
+        .execute(&t.state.db)
+        .await
+        .unwrap();
+    t.start_device(&client_id).await;
 }

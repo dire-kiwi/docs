@@ -254,30 +254,44 @@ pub struct Client {
     pub client_id: String,
     pub client_name: String,
     pub redirect_uris: Vec<String>,
+    pub grant_types: Vec<String>,
+    pub created_at: i64,
 }
 
-pub async fn register_client(db: &Db, name: &str, redirect_uris: &[String]) -> Result<String> {
+impl Client {
+    pub fn allows(&self, grant_type: &str) -> bool {
+        self.grant_types.iter().any(|g| g == grant_type)
+    }
+}
+
+pub async fn register_client(db: &Db, name: &str, redirect_uris: &[String], grant_types: &[&str]) -> Result<String> {
     let client_id = format!("client_{}", random_token());
-    sqlx::query("INSERT INTO oauth_clients (client_id, client_name, redirect_uris, created_at) VALUES (?, ?, ?, ?)")
-        .bind(&client_id)
-        .bind(name)
-        .bind(serde_json::to_string(redirect_uris)?)
-        .bind(now())
-        .execute(db)
-        .await?;
+    sqlx::query(
+        "INSERT INTO oauth_clients (client_id, client_name, redirect_uris, grant_types, created_at) VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(&client_id)
+    .bind(name)
+    .bind(serde_json::to_string(redirect_uris)?)
+    .bind(serde_json::to_string(grant_types)?)
+    .bind(now())
+    .execute(db)
+    .await?;
     Ok(client_id)
 }
 
 pub async fn get_client(db: &Db, client_id: &str) -> Result<Option<Client>> {
-    let row: Option<(String, String, String)> =
-        sqlx::query_as("SELECT client_id, client_name, redirect_uris FROM oauth_clients WHERE client_id = ?")
-            .bind(client_id)
-            .fetch_optional(db)
-            .await?;
-    Ok(row.map(|(client_id, client_name, uris)| Client {
+    let row: Option<(String, String, String, String, i64)> = sqlx::query_as(
+        "SELECT client_id, client_name, redirect_uris, grant_types, created_at FROM oauth_clients WHERE client_id = ?",
+    )
+    .bind(client_id)
+    .fetch_optional(db)
+    .await?;
+    Ok(row.map(|(client_id, client_name, uris, grants, created_at)| Client {
         client_id,
         client_name,
         redirect_uris: serde_json::from_str(&uris).unwrap_or_default(),
+        grant_types: serde_json::from_str(&grants).unwrap_or_default(),
+        created_at,
     }))
 }
 
@@ -314,14 +328,16 @@ pub async fn create_code(
     Ok(code)
 }
 
-/// Codes are single use.
-pub async fn take_code(db: &Db, code: &str) -> Result<Option<Code>> {
+/// Codes are single use. With a `client_id`, only that client's code is taken, so a
+/// request naming another client can't use it up.
+pub async fn take_code(db: &Db, code: &str, client_id: Option<&str>) -> Result<Option<Code>> {
     let row: Option<(String, i64, String, String, Option<String>)> = sqlx::query_as(
-        "DELETE FROM oauth_codes WHERE hash = ? AND expires_at > ?
+        "DELETE FROM oauth_codes WHERE hash = ?1 AND expires_at > ?2 AND (?3 IS NULL OR client_id = ?3)
          RETURNING client_id, user_id, redirect_uri, code_challenge, scope",
     )
     .bind(hash_token(code))
     .bind(now())
+    .bind(client_id)
     .fetch_optional(db)
     .await?;
     Ok(
@@ -333,6 +349,201 @@ pub async fn take_code(db: &Db, code: &str) -> Result<Option<Code>> {
             scope,
         }),
     )
+}
+
+// ---------- device authorization (RFC 8628) ----------
+
+pub const DEVICE_CODE_TTL: i64 = 600;
+pub const DEVICE_POLL_INTERVAL: i64 = 5;
+/// No vowels, so codes don't spell words; no digits, so nothing is mistaken for a letter.
+const USER_CODE_ALPHABET: &[u8] = b"BCDFGHJKLMNPQRSTVWXZ";
+
+/// Eight letters from [`USER_CODE_ALPHABET`] (about 34 bits).
+fn random_user_code() -> String {
+    let mut code = String::with_capacity(8);
+    while code.len() < 8 {
+        let mut buf = [0u8; 16];
+        getrandom::fill(&mut buf).expect("system random number generator");
+        // Reject bytes past the largest multiple of 20 to keep the letters uniform.
+        for b in buf.into_iter().filter(|b| *b < 240) {
+            if code.len() < 8 {
+                code.push(USER_CODE_ALPHABET[(b % 20) as usize] as char);
+            }
+        }
+    }
+    code
+}
+
+/// What people type is forgiving: case and separators don't matter.
+pub fn normalize_user_code(input: &str) -> String {
+    input
+        .chars()
+        .filter(|c| c.is_ascii_alphabetic())
+        .map(|c| c.to_ascii_uppercase())
+        .collect()
+}
+
+/// At most this many device authorizations can be waiting for a user at once.
+pub const MAX_PENDING_DEVICE_CODES: i64 = 1000;
+/// Expired device codes are kept this long, so a late poll gets `expired_token`.
+pub const DEVICE_CODE_GRACE: i64 = 3600;
+
+/// Returns `(device_code, user_code)`, or `None` if [`MAX_PENDING_DEVICE_CODES`]
+/// authorizations are already pending.
+pub async fn create_device_code(db: &Db, client_id: &str) -> Result<Option<(String, String)>> {
+    create_device_code_with(db, client_id, random_user_code).await
+}
+
+async fn create_device_code_with(
+    db: &Db,
+    client_id: &str,
+    mut next_user_code: impl FnMut() -> String,
+) -> Result<Option<(String, String)>> {
+    let device_code = random_token();
+    // User codes have about 34 bits, so a collision with a live one is rare; just try another.
+    for _ in 0..5 {
+        let now = now();
+        let user_code = next_user_code();
+        let res = sqlx::query(
+            "INSERT INTO oauth_device_codes (hash, user_code, client_id, interval, expires_at)
+             SELECT ?, ?, ?, ?, ?
+             WHERE (SELECT COUNT(*) FROM oauth_device_codes WHERE status = 'pending' AND expires_at > ?) < ?",
+        )
+        .bind(hash_token(&device_code))
+        .bind(&user_code)
+        .bind(client_id)
+        .bind(DEVICE_POLL_INTERVAL)
+        .bind(now + DEVICE_CODE_TTL)
+        .bind(now)
+        .bind(MAX_PENDING_DEVICE_CODES)
+        .execute(db)
+        .await;
+        match res {
+            Ok(r) if r.rows_affected() == 0 => return Ok(None),
+            Ok(_) => return Ok(Some((device_code, user_code))),
+            Err(sqlx::Error::Database(e)) if e.is_unique_violation() => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    bail!("could not find an unused user code")
+}
+
+/// Delete device codes that expired more than [`DEVICE_CODE_GRACE`] ago.
+pub async fn purge_device_codes(db: &Db) -> Result<u64> {
+    let res = sqlx::query("DELETE FROM oauth_device_codes WHERE expires_at < ?")
+        .bind(now() - DEVICE_CODE_GRACE)
+        .execute(db)
+        .await?;
+    Ok(res.rows_affected())
+}
+
+/// The client a pending, unexpired user code belongs to.
+pub async fn pending_device_client(db: &Db, user_code: &str) -> Result<Option<Client>> {
+    let row: Option<(String,)> = sqlx::query_as(
+        "SELECT client_id FROM oauth_device_codes WHERE user_code = ? AND status = 'pending' AND expires_at > ?",
+    )
+    .bind(normalize_user_code(user_code))
+    .bind(now())
+    .fetch_optional(db)
+    .await?;
+    match row {
+        Some((client_id,)) => get_client(db, &client_id).await,
+        None => Ok(None),
+    }
+}
+
+/// Approve or deny a pending code. False if it is unknown, expired or already decided.
+pub async fn decide_device_code(db: &Db, user_code: &str, user_id: i64, approve: bool) -> Result<bool> {
+    let res = sqlx::query(
+        "UPDATE oauth_device_codes SET status = ?, user_id = ?
+         WHERE user_code = ? AND status = 'pending' AND expires_at > ?",
+    )
+    .bind(if approve { "approved" } else { "denied" })
+    .bind(user_id)
+    .bind(normalize_user_code(user_code))
+    .bind(now())
+    .execute(db)
+    .await?;
+    Ok(res.rows_affected() == 1)
+}
+
+#[derive(Debug, PartialEq)]
+pub enum DevicePoll {
+    Unknown,
+    Expired,
+    Pending,
+    SlowDown,
+    Denied,
+    /// The code belongs to another client. It is left as it was.
+    WrongClient,
+    Approved {
+        user_id: i64,
+    },
+}
+
+/// A token-endpoint poll by `client_id` with a device code. Decided codes are single use.
+pub async fn poll_device_code(db: &Db, device_code: &str, client_id: &str) -> Result<DevicePoll> {
+    let hash = hash_token(device_code);
+    #[derive(FromRow)]
+    struct Row {
+        client_id: String,
+        status: String,
+        user_id: Option<i64>,
+        interval: i64,
+        last_polled_at: Option<i64>,
+        expires_at: i64,
+    }
+    let row = sqlx::query_as::<_, Row>(
+        "SELECT client_id, status, user_id, interval, last_polled_at, expires_at
+         FROM oauth_device_codes WHERE hash = ?",
+    )
+    .bind(&hash)
+    .fetch_optional(db)
+    .await?;
+    let Some(Row {
+        client_id: owner,
+        status,
+        user_id,
+        interval,
+        last_polled_at,
+        expires_at,
+    }) = row
+    else {
+        return Ok(DevicePoll::Unknown);
+    };
+    if owner != client_id {
+        return Ok(DevicePoll::WrongClient);
+    }
+    let now = now();
+    if expires_at <= now {
+        return Ok(DevicePoll::Expired);
+    }
+    if status != "pending" {
+        // Delete first, so two concurrent polls can't both get tokens.
+        let taken = sqlx::query("DELETE FROM oauth_device_codes WHERE hash = ? AND status = ?")
+            .bind(&hash)
+            .bind(&status)
+            .execute(db)
+            .await?;
+        return Ok(match (taken.rows_affected(), status.as_str(), user_id) {
+            (1, "approved", Some(user_id)) => DevicePoll::Approved { user_id },
+            (1, _, _) => DevicePoll::Denied,
+            _ => DevicePoll::Unknown,
+        });
+    }
+    let too_soon = last_polled_at.is_some_and(|t| now - t < interval);
+    // RFC 8628 3.5: on slow_down the client adds 5 seconds to its interval, and so do we.
+    sqlx::query("UPDATE oauth_device_codes SET last_polled_at = ?, interval = interval + ? WHERE hash = ?")
+        .bind(now)
+        .bind(if too_soon { 5 } else { 0 })
+        .bind(&hash)
+        .execute(db)
+        .await?;
+    Ok(if too_soon {
+        DevicePoll::SlowDown
+    } else {
+        DevicePoll::Pending
+    })
 }
 
 // ---------- documents ----------
@@ -889,4 +1100,28 @@ pub async fn feedback(
     .fetch_all(db)
     .await?;
     Ok((responses, selections))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn device_user_code_collisions_retry() {
+        let db = connect("sqlite::memory:").await.unwrap();
+        let client = register_client(&db, "Agent", &[], &["refresh_token"]).await.unwrap();
+        let first = create_device_code_with(&db, &client, || "BCDFGHJK".into())
+            .await
+            .unwrap();
+        assert_eq!(first.unwrap().1, "BCDFGHJK");
+
+        let mut codes = ["BCDFGHJK", "BCDFGHJK", "LMNPQRST"].into_iter();
+        let second = create_device_code_with(&db, &client, || codes.next().unwrap().into())
+            .await
+            .unwrap();
+        assert_eq!(second.unwrap().1, "LMNPQRST", "took the next code after two collisions");
+
+        let stuck = create_device_code_with(&db, &client, || "BCDFGHJK".into()).await;
+        assert!(stuck.is_err(), "gives up after a few tries");
+    }
 }

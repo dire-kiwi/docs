@@ -19,6 +19,16 @@ async fn main() -> anyhow::Result<()> {
     let bind = config.bind;
     let base = config.base_url.clone();
     let state = AppState::new(config).await?;
+    let db = state.db.clone();
+    tokio::spawn(async move {
+        let mut every = tokio::time::interval(std::time::Duration::from_secs(600));
+        loop {
+            every.tick().await;
+            if let Err(e) = docs::db::purge_device_codes(&db).await {
+                tracing::warn!("purging expired device codes: {e:#}");
+            }
+        }
+    });
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .with_context(|| format!("binding {bind}"))?;
