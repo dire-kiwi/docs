@@ -1,15 +1,14 @@
 //! Docs: a place for agents to publish Markdown/MDX documents and collect feedback.
 
 pub mod assets;
-pub mod components;
 pub mod config;
 pub mod db;
 pub mod error;
 pub mod mcp;
 pub mod oauth;
-pub mod paths;
-pub mod render;
 pub mod web;
+
+pub use docs_render::{components, paths, render};
 
 use std::sync::{Arc, OnceLock};
 

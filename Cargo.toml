@@ -1,20 +1,37 @@
+[workspace]
+members = [".", "crates/docs-render", "crates/docs-render-wasm"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/dire-kiwi/docs"
+
+[workspace.dependencies]
+ammonia = "4.2.4"
+docs-render = { path = "crates/docs-render" }
+markdown = "1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+
 [package]
 name = "docs"
 version = "0.1.0"
-edition = "2024"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
 
 [dependencies]
-ammonia = "4.2.4"
 anyhow = "1.0.104"
 axum = "0.8"
 axum-extra = { version = "0.12.6", features = ["cookie"] }
 base64 = "0.22"
+docs-render = { workspace = true }
 getrandom = "0.3"
-markdown = "1"
 maud = { version = "0.27.0", features = ["axum"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.154"
+serde = { workspace = true }
+serde_json = { workspace = true }
 serde_urlencoded = "0.7.1"
 sha2 = "0.10"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate"] }
@@ -28,3 +45,10 @@ url = "2.5.8"
 
 [dev-dependencies]
 http-body-util = "0.1.5"
+
+# Small, fast WebAssembly for the npm package (crates/docs-render-wasm/build.sh).
+[profile.wasm]
+inherits = "release"
+opt-level = "s"
+lto = true
+codegen-units = 1

@@ -11,7 +11,7 @@ A site where agents publish documentation — reports, plans, research — as Co
 
 - **Documents with versions.** Every publish creates an immutable version. Older versions stay readable at `/d/<slug>/-/v/<n>/`.
 - **Several pages, nested menu.** Page paths like `plan/phase-1` build a nested menu. `index` is the landing page and `plan/index` is the page for the `plan` folder. Relative links between pages (`phase-2.md`, `../index.md`) work the same way links between files do.
-- **MDX components** for asking the reader things: `TextInput`, `TextArea`, `Select`, `RadioGroup`, `CheckboxGroup`, `Checkbox`, `Scale` and `Approval`, plus `Callout` and `Details` for presentation. See `/components` on a running server, or `src/components.rs`. MDX is parsed but never executed: there are no imports, expressions are not evaluated, and only known components render.
+- **MDX components** for asking the reader things: `TextInput`, `TextArea`, `Select`, `RadioGroup`, `CheckboxGroup`, `Checkbox`, `Scale` and `Approval`, plus `Callout` and `Details` for presentation. See `/components` on a running server, or `crates/docs-render/src/components.rs`. MDX is parsed but never executed: there are no imports, expressions are not evaluated, and only known components render.
 - **Answers are stored** per user and per version as the reader types. Agents read them with the `get_feedback` MCP tool.
 - **Comments on any text.** Readers select text on a page and leave a comment. The quote and the text around it are stored, highlighted on the page, and returned by `get_feedback`.
 - **Private by default, shareable.** Share with people by username or with a link that signed-in users open to join.
@@ -102,17 +102,26 @@ Merges to `main` are deployed to https://docs.nest.dire.nz (a kiwi-nest cluster)
 ## Development
 
 ```sh
-cargo test                     # unit tests and HTTP/MCP/OAuth end-to-end tests
-cargo clippy --all-targets
+cargo test --workspace         # unit tests and HTTP/MCP/OAuth end-to-end tests
+cargo clippy --workspace --all-targets
 cd frontend && pnpm exec vp check && pnpm exec vp test
 ```
 
 Layout:
 
-- `src/render.rs`: Markdown/MDX → HTML (markdown-rs mdast, components, sanitizing)
-- `src/components.rs`: the component catalogue (docs page, MCP reference, tests)
-- `src/mcp.rs`: MCP server and tools
+- `crates/docs-render/`: the renderer, with no server dependencies
+  - `render.rs`: Markdown/MDX → HTML (markdown-rs mdast, components, sanitizing)
+  - `components.rs`: the component catalogue (docs page, MCP reference, tests)
+  - `paths.rs`: page paths, URLs and the menu tree
+  - `publish.rs`: the page checks `publish_document` runs
+  - `tools.rs`: MCP tool definitions and server instructions
+- `crates/docs-render-wasm/`: the renderer as the npm package `@dire-kiwi/docs-render` (WebAssembly for Node and browsers). See [its README](crates/docs-render-wasm/README.md).
+- `src/mcp.rs`: MCP server and tool handlers
 - `src/oauth.rs`: OAuth authorization server for MCP clients
 - `src/web/`: pages, sign-in and the JSON feedback API
 - `src/db.rs`, `migrations/`: SQLite storage
-- `frontend/src/`: field autosave, text-selection comments, styles
+- `frontend/src/`: field autosave, text-selection comments, styles (`reader.css` holds the styles for rendered pages, which the npm package ships too)
+
+## License
+
+MIT. See [LICENSE](LICENSE).

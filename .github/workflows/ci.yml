@@ -3,7 +3,11 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ["render-v*"]
   pull_request:
+
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -29,6 +33,61 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  # Builds @dire-kiwi/docs-render and checks it against the native renderer.
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm
+      - name: wasm-bindgen version
+        id: wb
+        run: echo "version=$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | sed -n 's/^version = "\(.*\)"/\1/p')" >> "$GITHUB_OUTPUT"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@${{ steps.wb.outputs.version }}
+      - run: crates/docs-render-wasm/build.sh
+      - run: crates/docs-render-wasm/test.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: docs-render-npm
+          path: target/npm/*.tgz
+          if-no-files-found: error
+
+  # On a render-v<version> tag, attach the package to a GitHub release, so it
+  # can be installed from its URL without a registry or token.
+  release:
+    if: startsWith(github.ref, 'refs/tags/render-v')
+    needs: [test, wasm]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: docs-render-npm
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#render-v}"
+          tgz="dire-kiwi-docs-render-${version}.tgz"
+          if [ ! -f "$tgz" ]; then
+            echo "tag $TAG does not match the package version (crates/docs-render-wasm/Cargo.toml): found $(ls *.tgz)" >&2
+            exit 1
+          fi
+          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${tgz}"
+          gh release create "$TAG" "$tgz" --repo "$GITHUB_REPOSITORY" --title "@dire-kiwi/docs-render ${version}" \
+            --notes "Install with: \`pnpm add ${url}\` (or \`npm install ${url}\`). See crates/docs-render-wasm/README.md for the API."

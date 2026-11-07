@@ -1,0 +1,10 @@
+{
+  "owner": "alice",
+  "notes": "Line one\nline two",
+  "db": "Postgres",
+  "region": "eu",
+  "phases": ["Phase 1", "Phase 3"],
+  "ok": true,
+  "confidence": 4,
+  "plan": { "decision": "changes", "comment": "<b>not</b> yet" }
+}
