@@ -1,3 +1,8 @@
+---
+title: Using docs from Huntaway
+order: 1
+---
+
 # Using docs from Huntaway
 
 [Huntaway](https://github.com/dire-kiwi/huntaway) is a kanban board where each task is worked by its own agent. Agents on it publish documents with a `docs` MCP server, and people read them on the board. Huntaway can also publish them on to a hosted docs site such as https://docs.nest.dire.nz, where they can be shared and commented on.
@@ -6,6 +11,8 @@ There are two parts:
 
 1. **The board's own `docs` MCP server.** Every agent run gets it. Documents are stored on the Huntaway host, under the profile of the run's task, and shown on the board's **Docs** page.
 2. **Publishing to a hosted site.** From the **Docs** page, a person connects the profile to a docs site and publishes a document's version there.
+
+[Components](components.mdx) shows every MDX component a page can use.
 
 ## For agents: the `docs` MCP server
 
@@ -19,13 +26,19 @@ Each run has an MCP server named `docs`. In Claude Code its tools are `mcp__docs
 | `read_page` | The Markdown/MDX source of one page, from the latest version or a given `version`. |
 | `list_components` | Reference for the MDX components (callouts, details, form fields). |
 
-They are the hosted server's tools, with the same schemas, checks, errors and warnings, because Huntaway runs the same renderer ([`@dire-kiwi/docs-render`](../crates/docs-render-wasm/README.md)). A page that publishes on the board publishes the same way on the hosted site.
+They are the hosted server's tools, with the same schemas, checks, errors and warnings, because Huntaway runs the same renderer ([`@dire-kiwi/docs-render`](https://github.com/dire-kiwi/docs/blob/main/crates/docs-render-wasm/README.md)). A page that publishes on the board publishes the same way on the hosted site.
 
-What's different on the board:
+<Callout type="warning" title="What's different on the board">
 
 - **No feedback or sharing yet.** `get_feedback` and `share_document` aren't there. Form fields (`<Approval />`, `TextInput` and the rest) render read-only and collect no answers, so ask the user for a decision in the task's thread instead (Huntaway's `request_user_input`).
 - **Documents belong to the profile** of the run's task, not to a docs-site user. Slugs are unique per profile.
-- **URLs point at the board:** `<board>/docs/<profile id>/d/<slug>/`, with `-/v/<n>/` for a version. `<board>` is the host's _Public URL_ setting, or else its own address. Always give the user the URL that `publish_document` returns.
+- **URLs point at the board:** `<board>/docs/<profile id>/d/<slug>/`, with `-/v/<n>/` for a version. `<board>` is the host's _Public URL_ setting, or else its own address.
+
+</Callout>
+
+<Callout type="tip">
+  Always give the user the URL that `publish_document` returns, rather than leaving a write-up only in a message or a file.
+</Callout>
 
 ### Publishing a document
 
@@ -39,7 +52,9 @@ A single-page report:
 }
 ```
 
-A plan with a nested menu. `index` is the landing page, `plan/index` is the page for the `plan` folder, and relative links work as they do between files:
+<Details summary="A plan with a nested menu">
+
+`index` is the landing page, `plan/index` is the page for the `plan` folder, and relative links work as they do between files:
 
 ```json
 {
@@ -52,7 +67,11 @@ A plan with a nested menu. `index` is the landing page, `plan/index` is the page
 }
 ```
 
-To revise one page and keep the rest, publish again with the same `slug` and `mode: "merge"`:
+</Details>
+
+<Details summary="Revising one page and keeping the rest">
+
+Publish again with the same `slug` and `mode: "merge"`:
 
 ```json
 {
@@ -63,13 +82,13 @@ To revise one page and keep the rest, publish again with the same `slug` and `mo
 }
 ```
 
-Every publish creates a new version, and older ones stay readable, so revising is cheap. Use `"format": "mdx"` (or a `.mdx` path) for components, for example:
+</Details>
 
-```mdx
-<Callout type="warning">Merge dire-kiwi/docs-deploy#2 first.</Callout>
-```
+Every publish creates a new version, and older ones stay readable, so revising is cheap. Use `"format": "mdx"` (or a `.mdx` path) for [components](components.mdx).
 
-`publish_document` returns warnings (for example, an unknown component) along with the URL. Fix them and publish again.
+<Callout type="info">
+  `publish_document` returns warnings (for example, an unknown component) along with the URL. Fix them and publish again.
+</Callout>
 
 ### Checking a page before publishing
 
@@ -88,12 +107,20 @@ Under the profile's **Assistant**, **Docs** lists the profile's documents with t
 ### Publishing to a hosted docs site
 
 1. On **Docs**, choose **Connect to hosted docs**. The site defaults to https://docs.nest.dire.nz.
-2. Choose **Sign in**. The board shows a code and a link. Open the link, sign in, check that the code matches, and choose **Allow**. This is the OAuth device flow described under [Server-side clients](../README.md#server-side-clients-device-flow). The client's name is Huntaway's own. Alternatively, paste a personal access token from the site's **Access** page.
+2. Choose **Sign in**. The board shows a code and a link. Open the link, sign in, check that the code matches, and choose **Allow**. This is the OAuth device flow described under [Server-side clients](https://github.com/dire-kiwi/docs/blob/main/README.md#server-side-clients-device-flow). The client's name is Huntaway's own. Alternatively, paste a personal access token from the site's **Access** page.
 3. Open a document and choose **Publish**. This publishes the version shown, with all its pages, its title and its message. The first time, it asks for the slug on the site (the local one by default). After that, each publish adds a version to the same document there.
 
-The Huntaway host keeps the tokens and renews them, and the board only shows whether it's connected and as whom. **Disconnect** forgets the sign-in on the host. To end it on the site too, revoke the grant under **Access**. Once a document is on the site, share it from its **Share** page there. Answers to form fields and comments are collected on the site, not on the board.
+<Callout type="success" title="Tokens stay on the host">
+  The Huntaway host keeps the tokens and renews them, and the board only shows whether it's connected and as whom. **Disconnect** forgets the sign-in on the host. To end it on the site too, revoke the grant under **Access**.
+</Callout>
 
-To try it against a local site, run `DOCS_DEV_LOGIN=1 cargo run` here (after building `frontend`, see the [README](../README.md#run-it-locally)), and connect the board to `http://localhost:3000`.
+Once a document is on the site, share it from its **Share** page there. Answers to form fields and comments are collected on the site, not on the board.
+
+<Details summary="Trying it against a local site">
+
+Run `DOCS_DEV_LOGIN=1 cargo run` in a checkout of dire-kiwi/docs (after building `frontend`, see the [README](https://github.com/dire-kiwi/docs/blob/main/README.md#run-it-locally)), and connect the board to `http://localhost:3000`.
+
+</Details>
 
 ## Turning it off, or using the hosted server directly
 
@@ -108,5 +135,9 @@ To have agents publish straight to the hosted site, with feedback and sharing, g
   "headers": { "Authorization": "Bearer <token>" }
 }
 ```
+
+<Callout type="danger" title="Keep the token secret">
+  A personal access token acts as you on the site. Keep it in the project's server settings on the host, never in a repository.
+</Callout>
 
 The agent then has all the hosted tools, including `get_feedback` and `share_document`. Documents belong to the token's user, and their URLs are the site's.

@@ -44,7 +44,7 @@ claude mcp add --transport http docs http://localhost:3000/mcp
 
 The client opens a browser to sign in and approve access. Alternatively, create a personal access token under **Access** and pass it as `--header "Authorization: Bearer <token>"`.
 
-Agents on [Huntaway](https://github.com/dire-kiwi/huntaway) have a `docs` MCP server of the board's own, with the same tools. See [docs/huntaway.md](docs/huntaway.md) for using it, and for publishing from the board to this site.
+Agents on [Huntaway](https://github.com/dire-kiwi/huntaway) have a `docs` MCP server of the board's own, with the same tools. See [docs/huntaway/](docs/huntaway/index.mdx) for using it, and for publishing from the board to this site.
 
 #### Server-side clients (device flow)
 
