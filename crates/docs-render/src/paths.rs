@@ -37,6 +37,34 @@ pub fn normalize(raw: &str) -> Result<String, String> {
     Ok(segments.join("/"))
 }
 
+/// Folder paths are cut off at this many characters.
+pub const MAX_FOLDER_CHARS: usize = 200;
+
+/// Normalise the folder a document is filed in (` Huntaway//plans/ ` → `Huntaway/plans`).
+/// `""` is the top level. Folders are only for organising documents, so case and
+/// spaces are kept; `.`/`..` segments and control characters are rejected.
+pub fn normalize_folder(raw: &str) -> Result<String, String> {
+    let mut segments = Vec::new();
+    for seg in raw.split('/') {
+        let seg = seg.trim();
+        if seg.is_empty() {
+            continue;
+        }
+        if seg == "." || seg == ".." {
+            return Err(format!("invalid folder {raw:?}: \".\" and \"..\" are not folder names"));
+        }
+        if seg.chars().any(char::is_control) {
+            return Err(format!("invalid folder {raw:?}: no control characters"));
+        }
+        segments.push(seg);
+    }
+    let folder = segments.join("/");
+    if folder.chars().count() > MAX_FOLDER_CHARS {
+        return Err(format!("invalid folder: at most {MAX_FOLDER_CHARS} characters"));
+    }
+    Ok(folder)
+}
+
 /// URL suffix (relative to a document/version base ending in `/`) for a page path.
 pub fn url_suffix(path: &str) -> String {
     if path == "index" {
@@ -166,6 +194,22 @@ mod tests {
         assert!(normalize("../etc/passwd").is_err());
         assert!(normalize("a/<b>").is_err());
         assert!(normalize("-/versions").is_err(), "'-' is reserved for site routes");
+    }
+
+    #[test]
+    fn normalizes_folders() {
+        assert_eq!(normalize_folder("").unwrap(), "");
+        assert_eq!(normalize_folder(" / ").unwrap(), "");
+        assert_eq!(normalize_folder(" Huntaway//plans/ ").unwrap(), "Huntaway/plans");
+        assert_eq!(normalize_folder("/docs/ my notes /").unwrap(), "docs/my notes");
+        assert!(normalize_folder("a/../b").is_err());
+        assert!(normalize_folder("./a").is_err());
+        assert!(normalize_folder("a\nb").is_err());
+        assert!(normalize_folder(&"x".repeat(MAX_FOLDER_CHARS + 1)).is_err());
+        assert_eq!(
+            normalize_folder(&"x".repeat(MAX_FOLDER_CHARS)).unwrap().len(),
+            MAX_FOLDER_CHARS
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Server-rendered HTML pages.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use axum::Form;
 use axum::extract::{Path, State};
@@ -34,36 +34,188 @@ fn mcp_help(base: &str) -> Markup {
 }
 
 pub async fn home(State(state): State<AppState>, viewer: Viewer) -> AppResult<Markup> {
+    render_home(&state, &viewer, None).await
+}
+
+/// A folder on the home page, with its subfolders and documents.
+#[derive(Default)]
+struct Folder<'a> {
+    folders: BTreeMap<String, Folder<'a>>,
+    docs: Vec<&'a DocumentSummary>,
+}
+
+impl<'a> Folder<'a> {
+    fn build(docs: impl IntoIterator<Item = &'a DocumentSummary>) -> Self {
+        let mut root = Folder::default();
+        for d in docs {
+            let mut node = &mut root;
+            for seg in d.folder.split('/').filter(|s| !s.is_empty()) {
+                node = node.folders.entry(seg.to_string()).or_default();
+            }
+            node.docs.push(d);
+        }
+        root
+    }
+
+    fn count(&self) -> usize {
+        self.docs.len() + self.folders.values().map(Folder::count).sum::<usize>()
+    }
+
+    /// Every folder path in the tree, parents first.
+    fn paths(&self, prefix: &str, out: &mut Vec<String>) {
+        for (name, child) in &self.folders {
+            let path = join_folder(prefix, name);
+            out.push(path.clone());
+            child.paths(&path, out);
+        }
+    }
+}
+
+fn join_folder(parent: &str, name: &str) -> String {
+    if parent.is_empty() {
+        name.to_string()
+    } else {
+        format!("{parent}/{name}")
+    }
+}
+
+/// How a folder tree is shown: whose it is, and whether the viewer can reorganise it.
+struct TreeView<'a> {
+    /// Prefix of the keys the browser remembers open/closed folders by.
+    key: &'a str,
+    /// The viewer's own documents: show the move and rename forms.
+    editable: bool,
+    csrf: &'a str,
+}
+
+/// Folders first, then documents, each sorted by name (ignoring case).
+fn folder_tree(folder: &Folder, path: &str, depth: usize, view: &TreeView) -> Markup {
+    let mut folders: Vec<_> = folder.folders.iter().collect();
+    folders.sort_by_key(|(name, _)| (name.to_lowercase(), name.to_string()));
+    let mut docs = folder.docs.clone();
+    docs.sort_by_key(|d| (d.title.to_lowercase(), d.slug.clone()));
+    let indent = format!("--depth: {depth}");
+    html! {
+        ul.tree {
+            @for (name, child) in folders {
+                @let sub = join_folder(path, name);
+                @let n = child.count();
+                li.tree-folder {
+                    @if view.editable {
+                        details.tree-edit {
+                            summary { "Rename" }
+                            form method="post" action="/folders/rename" {
+                                input type="hidden" name="csrf" value=(view.csrf);
+                                input type="hidden" name="from" value=(sub);
+                                label { "Rename or move " strong { (sub) } " to" }
+                                input type="text" name="to" value=(sub) list="folder-options" maxlength="200"
+                                    placeholder="Top level" aria-label={ "New path for " (sub) };
+                                p.muted.small { "Moves the " (n) " " (if n == 1 { "document" } else { "documents" })
+                                    " in it, and any subfolders. Leave it empty to move them to the top level." }
+                                button.primary type="submit" { "Rename" }
+                            }
+                        }
+                    }
+                    details.folder open data-folder-key={ (view.key) ":" (sub) } {
+                        summary style=(indent) {
+                            span.folder-name { (name) }
+                            " " span.muted.small { (n) }
+                        }
+                        (folder_tree(child, &sub, depth + 1, view))
+                    }
+                }
+            }
+            @for d in docs {
+                li.tree-doc {
+                    span.tree-title style=(indent) {
+                        a href=(doc_base(&d.slug, None)) { (d.title) }
+                        " " small.muted { (d.slug) }
+                    }
+                    span.tree-pages { (d.page_count) " " (if d.page_count == 1 { "page" } else { "pages" }) }
+                    a.tree-version href={ "/d/" (d.slug) "/-/versions" } { "v" (d.latest_version) }
+                    span.tree-updated { (time(d.updated_at)) }
+                    @if view.editable {
+                        details.tree-edit {
+                            summary { "Move" }
+                            form method="post" action={ "/d/" (d.slug) "/-/move" } {
+                                input type="hidden" name="csrf" value=(view.csrf);
+                                label { "Move " strong { (d.title) } " to the folder" }
+                                input type="text" name="folder" value=(d.folder) list="folder-options" maxlength="200"
+                                    placeholder="Top level" aria-label={ "Folder for " (d.title) };
+                                p.muted.small { "Type a new path like " code { "docs/plans" } " to make a folder." }
+                                button.primary type="submit" { "Move" }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn render_home(state: &AppState, viewer: &Viewer, error: Option<String>) -> AppResult<Markup> {
     let user = viewer.require()?;
     let docs = db::list_documents(&state.db, user).await?;
+    let (mine, shared): (Vec<_>, Vec<_>) = docs.iter().partition(|d| d.owner_id == user.id);
+    let mine = Folder::build(mine);
+    let mut folder_paths = Vec::new();
+    mine.paths("", &mut folder_paths);
+    let mut by_owner: BTreeMap<&str, Vec<&DocumentSummary>> = BTreeMap::new();
+    for d in shared {
+        by_owner.entry(&d.owner).or_default().push(d);
+    }
+    let own = TreeView {
+        key: "mine",
+        editable: true,
+        csrf: &viewer.csrf,
+    };
     Ok(layout::simple(
         "Documents",
         Some(user),
         &viewer.csrf,
         html! {
             h1 { "Documents" }
-            @if docs.is_empty() {
+            @if let Some(e) = &error { div.render-error { (e) } }
+            @if mine.count() == 0 {
                 div.card {
-                    p { strong { "Nothing here yet." } }
+                    p { strong { "Nothing of yours here yet." } }
                     (mcp_help(&state.config.base_url))
                 }
             } @else {
-                div.table-wrap {
-                    table.doc-list {
-                        thead { tr { th { "Title" } th { "Pages" } th { "Version" } th { "Owner" } th { "Updated" } } }
-                        tbody {
-                            @for d in &docs {
-                                tr {
-                                    td { a href=(doc_base(&d.slug, None)) { (d.title) } br; small.muted { (d.slug) } }
-                                    td { (d.page_count) }
-                                    td { a href={ "/d/" (d.slug) "/-/versions" } { "v" (d.latest_version) } }
-                                    td { (d.owner) }
-                                    td { (time(d.updated_at)) }
+                datalist #folder-options {
+                    @for p in &folder_paths { option value=(p) {} }
+                }
+                div.doc-tree {
+                    div.tree-head {
+                        span { "Title" } span { "Pages" } span { "Version" } span { "Updated" }
+                    }
+                    (folder_tree(&mine, "", 0, &own))
+                }
+            }
+            @if !by_owner.is_empty() {
+                h2 { "Shared with you" }
+                div.doc-tree.shared {
+                    ul.tree {
+                        @for (owner, docs) in &by_owner {
+                            @let key = format!("shared:{owner}");
+                            li.tree-folder {
+                                details.folder open data-folder-key=(key) {
+                                    summary style="--depth: 0" {
+                                        span.folder-name { (owner) }
+                                        " " span.muted.small { (docs.len()) }
+                                    }
+                                    (folder_tree(&Folder::build(docs.iter().copied()), "", 1, &TreeView {
+                                        key: &key,
+                                        editable: false,
+                                        csrf: &viewer.csrf,
+                                    }))
                                 }
                             }
                         }
                     }
                 }
+            }
+            @if mine.count() > 0 || !by_owner.is_empty() {
                 details.connect {
                     summary { "Connect an agent" }
                     (mcp_help(&state.config.base_url))
@@ -71,6 +223,58 @@ pub async fn home(State(state): State<AppState>, viewer: Viewer) -> AppResult<Ma
             }
         },
     ))
+}
+
+#[derive(Deserialize)]
+pub struct MoveForm {
+    csrf: String,
+    #[serde(default)]
+    folder: String,
+}
+
+/// `POST /d/{slug}/-/move`: file one of your documents in another folder.
+pub async fn move_document(
+    State(state): State<AppState>,
+    viewer: Viewer,
+    Path(slug): Path<String>,
+    Form(f): Form<MoveForm>,
+) -> AppResult<Response> {
+    viewer.check_csrf(&f.csrf)?;
+    let user = viewer.require()?;
+    let doc = owned_doc(&state, &slug, user, "Only the owner can move this document.").await?;
+    match paths::normalize_folder(&f.folder) {
+        Ok(folder) => {
+            db::move_document(&state.db, user.id, &doc.slug, &folder).await?;
+            Ok(Redirect::to("/").into_response())
+        }
+        Err(e) => Ok(render_home(&state, &viewer, Some(e)).await?.into_response()),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct RenameFolderForm {
+    csrf: String,
+    from: String,
+    #[serde(default)]
+    to: String,
+}
+
+/// `POST /folders/rename`: rename or move one of your folders, with everything in it.
+pub async fn rename_folder(
+    State(state): State<AppState>,
+    viewer: Viewer,
+    Form(f): Form<RenameFolderForm>,
+) -> AppResult<Response> {
+    viewer.check_csrf(&f.csrf)?;
+    let user = viewer.require()?;
+    let renamed = match (paths::normalize_folder(&f.from), paths::normalize_folder(&f.to)) {
+        (Ok(from), Ok(to)) => db::rename_folder(&state.db, user.id, &from, &to).await?,
+        (Err(e), _) | (_, Err(e)) => Err(e),
+    };
+    match renamed {
+        Ok(_) => Ok(Redirect::to("/").into_response()),
+        Err(e) => Ok(render_home(&state, &viewer, Some(e)).await?.into_response()),
+    }
 }
 
 pub async fn components_page(viewer: Viewer) -> Markup {
@@ -523,20 +727,20 @@ pub async fn revoke_token(
 
 // ---------- sharing ----------
 
+const SHARE_FORBIDDEN: &str = "Only the owner can change who this document is shared with.";
+
 pub async fn share_page(State(state): State<AppState>, viewer: Viewer, Path(slug): Path<String>) -> AppResult<Markup> {
     let user = viewer.require()?;
-    let doc = owned_doc(&state, &slug, user).await?;
+    let doc = owned_doc(&state, &slug, user, SHARE_FORBIDDEN).await?;
     render_share(&state, &viewer, user, &doc, None).await
 }
 
-async fn owned_doc(state: &AppState, slug: &str, user: &User) -> AppResult<DocumentSummary> {
+async fn owned_doc(state: &AppState, slug: &str, user: &User, forbidden: &str) -> AppResult<DocumentSummary> {
     let doc = db::get_document(&state.db, slug, user)
         .await?
         .ok_or(AppError::NotFound)?;
     if doc.owner_id != user.id {
-        return Err(AppError::Forbidden(
-            "Only the owner can change who this document is shared with.".into(),
-        ));
+        return Err(AppError::Forbidden(forbidden.into()));
     }
     Ok(doc)
 }
@@ -620,7 +824,7 @@ pub async fn share_update(
 ) -> AppResult<Response> {
     viewer.check_csrf(&f.csrf)?;
     let user = viewer.require()?;
-    let doc = owned_doc(&state, &slug, user).await?;
+    let doc = owned_doc(&state, &slug, user, SHARE_FORBIDDEN).await?;
     match f.action.as_str() {
         "add" | "remove" => {
             let Some(login) = db::normalize_login(&f.login) else {

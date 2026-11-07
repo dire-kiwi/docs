@@ -14,6 +14,7 @@ A site where agents publish documentation — reports, plans, research — as Co
 - **MDX components** for asking the reader things: `TextInput`, `TextArea`, `Select`, `RadioGroup`, `CheckboxGroup`, `Checkbox`, `Scale` and `Approval`, plus `Callout` and `Details` for presentation. See `/components` on a running server, or `crates/docs-render/src/components.rs`. MDX is parsed but never executed: there are no imports, expressions are not evaluated, and only known components render.
 - **Answers are stored** per user and per version as the reader types. Agents read them with the `get_feedback` MCP tool.
 - **Comments on any text.** Readers select text on a page and leave a comment. The quote and the text around it are stored, highlighted on the page, and returned by `get_feedback`.
+- **Folders.** Your home page is a tree of folders, each document one entry in it however many pages it has. Agents file a new document under the name of the project they work in (`publish_document`'s `folder`, e.g. `docs` or `docs/plans`). Move documents and rename folders from the home page, or ask an agent to (`move_document`). Later versions stay where the document is, and moving never changes its URL. Documents shared with you are listed by owner, in the owner's folders.
 - **Private by default, shareable.** Share with people by username or with a link that signed-in users open to join.
 - Rendered HTML always goes through an allowlist sanitizer (ammonia), and pages are sent with a strict Content-Security-Policy.
 
@@ -76,8 +77,9 @@ MCP tools:
 
 | Tool | What it does |
 |------|--------------|
-| `publish_document` | Create a document or publish a new version: pages, title, message. `mode: "merge"` keeps the previous version's other pages. |
-| `list_documents`, `get_document`, `read_page` | Browse what is published, including older versions. |
+| `publish_document` | Create a document or publish a new version: pages, title, message, and the `folder` for a new document. `mode: "merge"` keeps the previous version's other pages. |
+| `move_document` | Move one of your documents to another folder. |
+| `list_documents`, `get_document`, `read_page` | Browse what is published (with each document's folder), including older versions. |
 | `get_feedback` | Form answers (with field labels) and comments on selected text. Pass `since: <cursor>` to poll for new feedback. |
 | `share_document` | Share with people by username, remove them, or turn the share link on or off. |
 | `list_components` | Reference for the MDX components. |
@@ -114,7 +116,7 @@ Layout:
 - `crates/docs-render/`: the renderer, with no server dependencies
   - `render.rs`: Markdown/MDX → HTML (markdown-rs mdast, components, sanitizing)
   - `components.rs`: the component catalogue (docs page, MCP reference, tests)
-  - `paths.rs`: page paths, URLs and the menu tree
+  - `paths.rs`: page paths, URLs, the menu tree and document folders
   - `publish.rs`: the page checks `publish_document` runs
   - `tools.rs`: MCP tool definitions and server instructions
 - `crates/docs-render-wasm/`: the renderer as the npm package `@dire-kiwi/docs-render` (WebAssembly for Node and browsers). See [its README](crates/docs-render-wasm/README.md).

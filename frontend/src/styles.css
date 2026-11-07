@@ -543,3 +543,136 @@ form.inline {
 .share-list li {
   margin: 4px 0;
 }
+
+/* ---------- home: the folder tree ---------- */
+
+.doc-tree {
+  border-top: 1px solid var(--border);
+  margin-bottom: 24px;
+}
+
+.doc-tree .tree {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.tree-head,
+.tree-doc {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 5.5rem 3.5rem 9rem 4rem;
+  gap: 12px;
+  align-items: baseline;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.tree-head {
+  font-size: 0.85em;
+  font-weight: 600;
+  color: var(--fg-muted);
+}
+
+.tree-title,
+.tree-folder > details.folder > summary {
+  padding-left: calc(var(--depth, 0) * 1.5em);
+}
+
+.tree-title {
+  overflow-wrap: anywhere;
+}
+
+.tree-pages,
+.tree-updated {
+  color: var(--fg-muted);
+  font-size: 0.9em;
+}
+
+.tree-folder {
+  position: relative;
+}
+
+.tree-folder > details.folder > summary {
+  padding-top: 8px;
+  padding-bottom: 8px;
+  padding-right: 5em;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.tree-folder > details.folder > summary .muted {
+  font-weight: normal;
+}
+
+/* Move and rename: a small popover form, opened without JavaScript. */
+.tree-edit {
+  position: relative;
+  text-align: right;
+}
+
+.tree-folder > .tree-edit {
+  position: absolute;
+  right: 0;
+  top: 8px;
+  z-index: 1;
+}
+
+.tree-edit[open] {
+  z-index: 20;
+}
+
+.tree-edit > summary {
+  list-style: none;
+  cursor: pointer;
+  color: var(--accent);
+  font-size: 0.85em;
+}
+
+.tree-edit > summary::-webkit-details-marker {
+  display: none;
+}
+
+.tree-edit > form {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 10;
+  width: min(320px, 80vw);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  text-align: left;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 4px 16px rgb(0 0 0 / 12%);
+}
+
+.tree-edit > form label {
+  font-size: 0.9em;
+}
+
+.tree-edit > form p {
+  margin: 0;
+}
+
+.tree-edit > form button {
+  align-self: flex-end;
+}
+
+@media (max-width: 640px) {
+  .tree-head {
+    display: none;
+  }
+
+  .tree-doc {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+  }
+
+  .tree-pages,
+  .tree-updated {
+    display: none;
+  }
+}
