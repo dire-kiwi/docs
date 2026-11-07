@@ -555,12 +555,14 @@ pub struct DocumentSummary {
     pub title: String,
     pub owner: String,
     pub owner_id: i64,
+    /// The owner's folder for it (`""` is the top level).
+    pub folder: String,
     pub latest_version: i64,
     pub page_count: i64,
     pub updated_at: i64,
 }
 
-const DOC_SUMMARY: &str = "SELECT d.id, d.slug, d.title, u.login AS owner, d.owner_id, d.updated_at,
+const DOC_SUMMARY: &str = "SELECT d.id, d.slug, d.title, u.login AS owner, d.owner_id, d.folder, d.updated_at,
     (SELECT MAX(number) FROM versions v WHERE v.document_id = d.id) AS latest_version,
     (SELECT COUNT(*) FROM pages p JOIN versions v ON v.id = p.version_id
        WHERE v.document_id = d.id AND v.number = (SELECT MAX(number) FROM versions WHERE document_id = d.id)) AS page_count
@@ -784,6 +786,8 @@ pub struct Publish<'a> {
     /// When `None`, a new document is created with a slug derived from the title.
     pub slug: Option<&'a str>,
     pub title: Option<&'a str>,
+    /// Normalised folder, used only when the document is created.
+    pub folder: &'a str,
     pub message: Option<&'a str>,
     pub pages: Vec<NewPage>,
     /// Keep pages of the previous version that are not in `pages`.
@@ -834,10 +838,11 @@ pub async fn publish(db: &Db, p: Publish<'_>) -> Result<(String, i64)> {
                 slug = format!("{base}-{n}");
             }
             let (id,): (i64,) = sqlx::query_as(
-                "INSERT INTO documents (slug, title, owner_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?) RETURNING id",
+                "INSERT INTO documents (slug, title, folder, owner_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
             )
             .bind(&slug)
             .bind(title)
+            .bind(p.folder)
             .bind(p.user_id)
             .bind(ts)
             .bind(ts)
@@ -929,6 +934,54 @@ pub fn doc_slug(title: &str) -> String {
     }
     let s = s.trim_matches('-').to_string();
     if s.is_empty() { "doc".into() } else { s }
+}
+
+/// Move one of `user_id`'s documents to a (normalised) folder. False if they don't own it.
+pub async fn move_document(db: &Db, user_id: i64, slug: &str, folder: &str) -> Result<bool> {
+    let res = sqlx::query("UPDATE documents SET folder = ? WHERE slug = ? AND owner_id = ?")
+        .bind(folder)
+        .bind(slug)
+        .bind(user_id)
+        .execute(db)
+        .await?;
+    Ok(res.rows_affected() > 0)
+}
+
+/// Rename (or move) one of `user_id`'s folders: `from` and every folder under it get
+/// the prefix `to` instead. Both are normalised; `from` can't be the top level.
+/// Returns how many documents moved, or `Err` with a message for the user.
+pub async fn rename_folder(db: &Db, user_id: i64, from: &str, to: &str) -> Result<std::result::Result<u64, String>> {
+    if from.is_empty() {
+        return Ok(Err("choose a folder to rename".into()));
+    }
+    let mut tx = db.begin().await?;
+    let docs: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT id, folder FROM documents WHERE owner_id = ? AND (folder = ? OR substr(folder, 1, length(?) + 1) = ? || '/')",
+    )
+    .bind(user_id)
+    .bind(from)
+    .bind(from)
+    .bind(from)
+    .fetch_all(&mut *tx)
+    .await?;
+    for (id, folder) in &docs {
+        let rest = &folder[from.len()..]; // "" or "/sub"
+        let moved = format!("{to}{rest}");
+        let moved = moved.trim_start_matches('/');
+        if moved.chars().count() > crate::paths::MAX_FOLDER_CHARS {
+            return Ok(Err(format!(
+                "{moved:?} would be longer than {} characters",
+                crate::paths::MAX_FOLDER_CHARS
+            )));
+        }
+        sqlx::query("UPDATE documents SET folder = ? WHERE id = ?")
+            .bind(moved)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(Ok(docs.len() as u64))
 }
 
 pub async fn delete_document(db: &Db, user_id: i64, slug: &str) -> Result<bool> {

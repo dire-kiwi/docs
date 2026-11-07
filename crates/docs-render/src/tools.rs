@@ -8,6 +8,8 @@ use serde_json::{Value, json};
 pub const INSTRUCTIONS: &str = "Docs hosts Markdown documents for people to read and respond to: reports, plans, research. \
 Publish with `publish_document` (one or more pages; nested paths like `plan/phase-1` make a nested menu). \
 Every publish creates a new version, so you can revise freely. \
+Documents are organised in folders: when you create one, set `folder` to the name of the project or repository you are working in (e.g. \"docs\"), \
+optionally with a subfolder (\"docs/plans\"). Later versions stay in whatever folder the document is in; use `move_document` only when the user asks to move one. \
 Use format \"mdx\" to add form fields (call `list_components` for the list) when you need a decision or input from the reader, \
 then call `get_feedback` later to read their answers and any text they selected and commented on. \
 Documents are private to the user you act for; use `share_document` to share one with other people (by username) or to get a share link. \
@@ -18,18 +20,24 @@ pub fn tool_definitions() -> Value {
     let slug =
         json!({ "type": "string", "description": "Document slug, as returned by publish_document or list_documents." });
     let version = json!({ "type": "integer", "description": "Version number. Defaults to the latest." });
+    let folder = json!({
+        "type": "string",
+        "description": "Folder for a new document: the name of the project or repository you are working in, e.g. \"docs\", \
+    optionally with subfolders separated by '/' (\"docs/plans\"). Only used when the document is created; \
+    new versions keep the folder the document is in. Omit for the top level.",
+    });
     json!([
         {
             "name": "list_documents",
             "title": "List documents",
-            "description": "List the documents you can see (yours and those shared with you) with their latest version and URL.",
+            "description": "List the documents you can see (yours and those shared with you) with their folder, latest version and URL.",
             "inputSchema": { "type": "object", "properties": {} },
             "annotations": { "readOnlyHint": true },
         },
         {
             "name": "get_document",
             "title": "Get document",
-            "description": "Get a document's pages (paths, titles, URLs) and its version history.",
+            "description": "Get a document's folder, pages (paths, titles, URLs) and its version history.",
             "inputSchema": { "type": "object", "properties": { "slug": slug, "version": version }, "required": ["slug"] },
             "annotations": { "readOnlyHint": true },
         },
@@ -58,6 +66,7 @@ pub fn tool_definitions() -> Value {
                 "properties": {
                     "slug": { "type": "string", "description": "Existing document to update, or the slug for a new one. Omit to create a new document with a slug derived from the title." },
                     "title": { "type": "string", "description": "Document title. Defaults to the title of the index (or first) page for new documents." },
+                    "folder": folder,
                     "message": { "type": "string", "description": "What changed in this version." },
                     "pages": {
                         "type": "array",
@@ -77,6 +86,22 @@ pub fn tool_definitions() -> Value {
                 },
                 "required": ["pages"],
             },
+        },
+        {
+            "name": "move_document",
+            "title": "Move document",
+            "description": "Move one of your documents to another folder, e.g. when the user asks you to. \
+    Folders are '/'-separated paths (\"docs/plans\"); \"\" is the top level. A folder exists while it has documents in it. \
+    Moving a document does not change its URL. Only the owner can move a document.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "slug": slug,
+                    "folder": { "type": "string", "description": "The folder to move it to, e.g. \"docs/plans\", or \"\" for the top level." },
+                },
+                "required": ["slug", "folder"],
+            },
+            "annotations": { "idempotentHint": true },
         },
         {
             "name": "get_feedback",

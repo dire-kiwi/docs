@@ -60,6 +60,8 @@ pub fn router(state: AppState) -> Router {
         .route("/d/{slug}/-/versions", get(pages::versions_page))
         .route("/d/{slug}/-/feedback", get(pages::feedback_page))
         .route("/d/{slug}/-/share", get(pages::share_page).post(pages::share_update))
+        .route("/d/{slug}/-/move", post(pages::move_document))
+        .route("/folders/rename", post(pages::rename_folder))
         .route("/s/{token}", get(pages::share_link))
         .route("/d/{slug}/-/v/{n}/", get(pages::version_root))
         .route("/d/{slug}/-/v/{n}/{*path}", get(pages::version_page))

@@ -94,6 +94,10 @@ fn main() {
             Ok(v) => json!({ "ok": v }),
             Err(e) => json!({ "error": e }),
         }).collect::<Vec<_>>(),
+        "folders": strs("folders").iter().map(|f| match paths::normalize_folder(f) {
+            Ok(v) => json!({ "ok": v }),
+            Err(e) => json!({ "error": e }),
+        }).collect::<Vec<_>>(),
         "links": cases["links"].as_array().unwrap().iter().map(|l| {
             paths::resolve_link(l[0].as_str().unwrap(), l[1].as_str().unwrap())
                 .map(|(path, suffix)| json!({ "path": path, "suffix": suffix }))
