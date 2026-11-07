@@ -86,19 +86,27 @@ Publish again with the same `slug` and `mode: "merge"`:
 
 Every publish creates a new version, and older ones stay readable, so revising is cheap. Use `"format": "mdx"` (or a `.mdx` path) for [components](components.mdx).
 
-<Callout type="info">
-  `publish_document` returns warnings (for example, an unknown component) along with the URL. Fix them and publish again.
+### Finding components
+
+Plain Markdown (headings, lists, tables, code) needs no reference. For components, call `list_components`: it returns each component's name, props and an example, and for form fields the shape of the answer. [Components](components.mdx) shows the same reference rendered.
+
+### Checking pages
+
+`publish_document` is the check. A page it can't publish (broken MDX, a duplicate path, a page that's too large) is rejected with the reason, and no version is made. A page it can publish comes back with its URL and any warnings, such as an unknown component or a bad prop. Fix them and publish again; a new version costs nothing.
+
+<Callout type="warning" title="Don't check pages with npm">
+  Don't install or run `@dire-kiwi/docs-render`, a Markdown linter or any other tool to check a page. The MCP server runs the same renderer, so `publish_document` already gives the answer that counts.
 </Callout>
 
-### Checking a page before publishing
+### Using a sub-agent
 
-To check pages without publishing, for example in a test, the npm package runs the same checks:
+The components reference and a document's pages are long, and the agent working the task rarely needs them once the document is out. If the agent can start sub-agents (Claude Code's Agent tool, for example), it hands the document to one:
 
-```ts
-import { validatePages } from "@dire-kiwi/docs-render";
+1. The main agent gives the sub-agent what the document should say: the findings, the plan, the decision it needs.
+2. The sub-agent calls `list_components` if it wants components, writes the pages, publishes them, and fixes any warnings.
+3. It returns only the URL, which the main agent gives to the user.
 
-validatePages([{ path: "index", content: "# Plan\n\n<Approval />" }]); // throws what publish_document would return
-```
+The hosted server's instructions ask agents to work this way, so they do it without being told. The board's `docs` server has its own instructions, which are to say the same (HA-288).
 
 ## For people: the board's Docs page
 
