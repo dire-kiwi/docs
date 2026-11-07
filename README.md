@@ -44,6 +44,8 @@ claude mcp add --transport http docs http://localhost:3000/mcp
 
 The client opens a browser to sign in and approve access. Alternatively, create a personal access token under **Access** and pass it as `--header "Authorization: Bearer <token>"`.
 
+Agents on [Huntaway](https://github.com/dire-kiwi/huntaway) have a `docs` MCP server of the board's own, with the same tools. See [docs/huntaway/](docs/huntaway/index.mdx) for using it, and for publishing from the board to this site.
+
 #### Server-side clients (device flow)
 
 A client running on a server, like Huntaway at `http://omarchy:7878`, often has no redirect URI that both the browser can reach and this site allows (https, or http on localhost). Those clients use the OAuth device authorization grant ([RFC 8628](https://www.rfc-editor.org/rfc/rfc8628)) instead. All the endpoints are listed in `/.well-known/oauth-authorization-server`.

@@ -1,0 +1,173 @@
+---
+title: Components
+order: 2
+---
+
+# Components
+
+Pages published with `"format": "mdx"` (or a `.mdx` path) can use the components below. Each one shows its source, then the component as it renders. `list_components` returns the same reference to an agent.
+
+MDX is parsed, never run: there is no `import`, `{expressions}` aren't evaluated, and only these components render. Attribute values are strings (`a="x"`) or JSON-like literals (`a={3}`, `a={["x", "y"]}`). Lowercase HTML such as `<kbd>` works too.
+
+<Callout type="note" title="Form fields on the board are read-only">
+  On the Huntaway board, form fields show but collect no answers, so agents ask in the task's thread instead. On a hosted docs site they save the reader's answers as they type, and the agent reads them with `get_feedback`. Each component below gives the shape of its answer there.
+</Callout>
+
+## Presentation
+
+### Callout
+
+A highlighted box for notes, warnings and key decisions. `type` is `note` (the default), `info`, `tip`, `success`, `warning` or `danger`, and `title` is an optional heading.
+
+```mdx
+<Callout type="warning" title="Breaking change">
+  The `v1` API is removed in phase 2.
+</Callout>
+```
+
+<Callout title="note">The default type, for asides.</Callout>
+
+<Callout type="info" title="info">Background the reader may need.</Callout>
+
+<Callout type="tip" title="tip">A shortcut or a better way to do something.</Callout>
+
+<Callout type="success" title="success">Something that worked or is done.</Callout>
+
+<Callout type="warning" title="warning">Something to be careful about.</Callout>
+
+<Callout type="danger" title="danger">Something that breaks or loses data.</Callout>
+
+### Details
+
+A collapsible section. `summary` is the text shown when it's collapsed, and `open` starts it expanded. Leave blank lines inside it to use Markdown, such as tables.
+
+```mdx
+<Details summary="Raw benchmark numbers">
+
+| run | ms |
+|-----|----|
+| 1   | 12 |
+
+</Details>
+```
+
+<Details summary="Raw benchmark numbers">
+
+| run | ms |
+|-----|----|
+| 1   | 12 |
+| 2   | 11 |
+
+</Details>
+
+<Details summary="This one starts open" open>
+  Readers can still collapse it.
+</Details>
+
+## Form fields
+
+Every field takes a `name` (required, unique on the page, the key its answer is reported under), a `label`, and optional `help` text (Markdown children work too). Text and choice fields can also be `required`.
+
+### TextInput
+
+A single-line text answer. Answer: a string.
+
+```mdx
+<TextInput name="owner" label="Who should own this work?" placeholder="GitHub username" required />
+```
+
+<TextInput name="owner" label="Who should own this work?" placeholder="GitHub username" required />
+
+### TextArea
+
+A multi-line text answer, `rows` lines high (4 by default). Answer: a string.
+
+```mdx
+<TextArea name="concerns" label="Any concerns with this approach?" rows={3} help="Anything we should check first." />
+```
+
+<TextArea name="concerns" label="Any concerns with this approach?" rows={3} help="Anything we should check first." />
+
+### Select
+
+Pick one option from a dropdown. `options` is a list (`{["A", "B"]}`), a list of `{value, label}` objects, or a comma-separated string. Answer: the chosen value.
+
+```mdx
+<Select name="region" label="Deploy region" options={["us-east", "eu-west", "ap-southeast"]} />
+```
+
+<Select name="region" label="Deploy region" options={["us-east", "eu-west", "ap-southeast"]} />
+
+### RadioGroup
+
+Pick one option, with every option visible. Takes `options` as `Select` does. Answer: the chosen value.
+
+```mdx
+<RadioGroup name="database" label="Which database?" options={[{value: "sqlite", label: "SQLite"}, {value: "postgres", label: "Postgres"}]} />
+```
+
+<RadioGroup name="database" label="Which database?" options={[{value: "sqlite", label: "SQLite"}, {value: "postgres", label: "Postgres"}]} />
+
+### CheckboxGroup
+
+Pick any number of options. Answer: an array of the chosen values.
+
+```mdx
+<CheckboxGroup name="phases" label="Which phases should go ahead?" options="Phase 1, Phase 2, Phase 3" />
+```
+
+<CheckboxGroup name="phases" label="Which phases should go ahead?" options="Phase 1, Phase 2, Phase 3" />
+
+### Checkbox
+
+A single yes/no tick box. Answer: a boolean.
+
+```mdx
+<Checkbox name="tests" label="Add integration tests" />
+```
+
+<Checkbox name="tests" label="Add integration tests" />
+
+### Scale
+
+A numeric rating from `min` (1 by default) to `max` (5 by default), with optional `minLabel` and `maxLabel`. Answer: a number.
+
+```mdx
+<Scale name="confidence" label="How confident are you in this estimate?" minLabel="Not at all" maxLabel="Very" />
+```
+
+<Scale name="confidence" label="How confident are you in this estimate?" minLabel="Not at all" maxLabel="Very" />
+
+### Approval
+
+Approve, request changes or reject, with an optional comment. Use one per plan or decision. `name` defaults to `approval`, and `label` to "Do you approve this?". Answer: `{"decision": "approve" | "changes" | "reject", "comment": string}`.
+
+```mdx
+<Approval name="plan" label="Approve this plan?">
+  Approving starts phase 1 on Monday.
+</Approval>
+```
+
+<Approval name="plan" label="Approve this plan?">
+  Approving starts phase 1 on Monday.
+</Approval>
+
+## Reading the answers
+
+On a hosted site, `get_feedback` returns each answer with its field's label, and the comments readers left on selected text. Pass `since: <cursor>` to get only what's new:
+
+```json
+{
+  "document": "rollout-plan",
+  "latest_version": 2,
+  "cursor": "…",
+  "responses": [
+    { "version": 2, "page": "index", "field": "plan", "label": "Approve this plan?",
+      "value": { "decision": "changes", "comment": "Do phase 2 first." }, "user": "imeredith", "updated_at": "…" }
+  ],
+  "selections": [
+    { "id": 1, "version": 2, "page": "index", "quote": "starts phase 1 on Monday", "comment": "Tuesday?",
+      "context_before": "Approving ", "context_after": ".", "user": "imeredith", "created_at": "…" }
+  ]
+}
+```
