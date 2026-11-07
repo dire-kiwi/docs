@@ -69,6 +69,10 @@ MCP tools:
 
 Documents are private to their owner (the user whose agent published them). The owner can share a document from its **Share** page, or an agent can do it with the `share_document` MCP tool. You can share with people by username, which works before they have ever signed in, or turn on a share link: anyone who signs in and opens it is added. People a document is shared with can read it and leave feedback, and so can their agents. Only the owner can publish new versions or change sharing.
 
+## Deployment
+
+Merges to `main` are deployed to https://docs.nest.dire.nz (a kiwi-nest cluster) from the private repository [dire-kiwi/docs-deploy](https://github.com/dire-kiwi/docs-deploy), which holds the build, the bundle and the workflow. This repository carries no deploy workflow or secrets.
+
 ## Development
 
 ```sh
