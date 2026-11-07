@@ -34,6 +34,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/oauth/register", post(oauth::register))
         .route("/oauth/token", post(oauth::token))
+        .route("/oauth/device_authorization", post(oauth::device_authorization))
         .layer(cors);
 
     let static_files = ServeDir::new(&state.config.assets_dir);
@@ -51,6 +52,7 @@ pub fn router(state: AppState) -> Router {
             "/oauth/authorize",
             get(oauth::authorize_page).post(oauth::authorize_decision),
         )
+        .route("/device", get(oauth::device_page).post(oauth::device_decision))
         .route("/settings/tokens", get(pages::tokens_page).post(pages::create_token))
         .route("/settings/tokens/{id}/revoke", post(pages::revoke_token))
         .route("/d/{slug}", get(pages::doc_redirect))

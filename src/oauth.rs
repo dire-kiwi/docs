@@ -1,8 +1,11 @@
 //! OAuth 2.1 authorization server for MCP clients
-//! (authorization code + PKCE, dynamic client registration, refresh tokens).
+//! (authorization code + PKCE, device authorization, dynamic client registration,
+//! refresh tokens).
 //!
 //! See the MCP authorization spec: protected resource metadata (RFC 9728),
 //! authorization server metadata (RFC 8414) and dynamic registration (RFC 7591).
+//! The device grant (RFC 8628) is for server-side clients that have no redirect URI
+//! a browser can reach, such as one on a LAN address over plain http.
 
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
@@ -21,6 +24,7 @@ use crate::web::auth::Viewer;
 use crate::web::layout;
 
 pub const SCOPE: &str = "docs";
+pub const DEVICE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
 
 pub fn resource_metadata_url(base: &str) -> String {
     format!("{base}/.well-known/oauth-protected-resource/mcp")
@@ -44,8 +48,9 @@ pub async fn authorization_server(State(state): State<AppState>) -> Json<Value> 
         "authorization_endpoint": format!("{base}/oauth/authorize"),
         "token_endpoint": format!("{base}/oauth/token"),
         "registration_endpoint": format!("{base}/oauth/register"),
+        "device_authorization_endpoint": format!("{base}/oauth/device_authorization"),
         "response_types_supported": ["code"],
-        "grant_types_supported": ["authorization_code", "refresh_token"],
+        "grant_types_supported": ["authorization_code", DEVICE_GRANT, "refresh_token"],
         "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": ["none"],
         "scopes_supported": [SCOPE],
@@ -82,10 +87,29 @@ pub struct Registration {
     redirect_uris: Vec<String>,
     #[serde(default)]
     token_endpoint_auth_method: Option<String>,
+    #[serde(default)]
+    grant_types: Option<Vec<String>>,
 }
 
 pub async fn register(State(state): State<AppState>, Json(reg): Json<Registration>) -> Response {
-    if reg.redirect_uris.is_empty() || reg.redirect_uris.len() > 10 {
+    // Every client gets refresh tokens; the other grants are what it asked for.
+    let mut grant_types: Vec<&str> = match &reg.grant_types {
+        Some(asked) => ["authorization_code", DEVICE_GRANT]
+            .into_iter()
+            .filter(|g| asked.iter().any(|a| a == g))
+            .collect(),
+        None => vec!["authorization_code"],
+    };
+    if grant_types.is_empty() {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_client_metadata",
+            &format!("grant_types must include authorization_code or {DEVICE_GRANT}"),
+        );
+    }
+    let uses_code = grant_types.contains(&"authorization_code");
+    grant_types.push("refresh_token");
+    if (uses_code && reg.redirect_uris.is_empty()) || reg.redirect_uris.len() > 10 {
         return oauth_error(
             StatusCode::BAD_REQUEST,
             "invalid_redirect_uri",
@@ -120,8 +144,8 @@ pub async fn register(State(state): State<AppState>, Json(reg): Json<Registratio
                 "client_name": name,
                 "redirect_uris": reg.redirect_uris,
                 "token_endpoint_auth_method": "none",
-                "grant_types": ["authorization_code", "refresh_token"],
-                "response_types": ["code"],
+                "grant_types": grant_types,
+                "response_types": if uses_code { vec!["code"] } else { vec![] },
                 "client_id_issued_at": db::now(),
             })),
         )
@@ -324,6 +348,7 @@ pub struct TokenRequest {
     client_id: Option<String>,
     code_verifier: Option<String>,
     refresh_token: Option<String>,
+    device_code: Option<String>,
 }
 
 pub fn pkce_challenge(verifier: &str) -> String {
@@ -386,11 +411,34 @@ async fn issue(state: &AppState, t: TokenRequest) -> anyhow::Result<Response> {
             }
             (user_id, client_id)
         }
+        DEVICE_GRANT => {
+            let Some(device_code) = t.device_code.as_deref() else {
+                return Ok(oauth_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request",
+                    "device_code is required",
+                ));
+            };
+            let pending = |error: &str, d: &str| Ok(oauth_error(StatusCode::BAD_REQUEST, error, d));
+            match db::poll_device_code(&state.db, device_code).await? {
+                db::DevicePoll::Approved { user_id, client_id } => {
+                    if t.client_id.as_deref().is_some_and(|id| id != client_id) {
+                        return invalid_grant("device code was issued to another client");
+                    }
+                    (user_id, client_id)
+                }
+                db::DevicePoll::Pending => return pending("authorization_pending", "waiting for the user to approve"),
+                db::DevicePoll::SlowDown => return pending("slow_down", "polling too often; wait 5 more seconds"),
+                db::DevicePoll::Denied => return pending("access_denied", "the user denied access"),
+                db::DevicePoll::Expired => return pending("expired_token", "the device code expired; start again"),
+                db::DevicePoll::Unknown => return invalid_grant("unknown device code"),
+            }
+        }
         _ => {
             return Ok(oauth_error(
                 StatusCode::BAD_REQUEST,
                 "unsupported_grant_type",
-                "use authorization_code or refresh_token",
+                &format!("use authorization_code, {DEVICE_GRANT} or refresh_token"),
             ));
         }
     };
@@ -429,6 +477,179 @@ async fn issue(state: &AppState, t: TokenRequest) -> anyhow::Result<Response> {
         .into_response())
 }
 
+#[derive(Deserialize)]
+pub struct DeviceAuthorizationRequest {
+    client_id: Option<String>,
+    #[allow(dead_code)]
+    scope: Option<String>,
+}
+
+/// RFC 8628 3.1: start a device authorization. The client shows the user code and
+/// link, then polls the token endpoint with the device code.
+pub async fn device_authorization(
+    State(state): State<AppState>,
+    Form(r): Form<DeviceAuthorizationRequest>,
+) -> Response {
+    let result = async {
+        let Some(client_id) = r.client_id.as_deref() else {
+            return Ok(oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "client_id is required",
+            ));
+        };
+        if db::get_client(&state.db, client_id).await?.is_none() {
+            return Ok(oauth_error(
+                StatusCode::UNAUTHORIZED,
+                "invalid_client",
+                "unknown client; register it first",
+            ));
+        }
+        let (device_code, user_code) = db::create_device_code(&state.db, client_id).await?;
+        let user_code = display_user_code(&user_code);
+        let verification_uri = format!("{}/device", state.config.base_url);
+        anyhow::Ok(
+            (
+                [("cache-control", "no-store")],
+                Json(json!({
+                    "device_code": device_code,
+                    "user_code": user_code,
+                    "verification_uri": verification_uri,
+                    "verification_uri_complete": format!("{verification_uri}?user_code={user_code}"),
+                    "expires_in": db::DEVICE_CODE_TTL,
+                    "interval": db::DEVICE_POLL_INTERVAL,
+                })),
+            )
+                .into_response(),
+        )
+    };
+    result.await.unwrap_or_else(|e| {
+        tracing::error!("{e:#}");
+        oauth_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "server_error",
+            "device authorization failed",
+        )
+    })
+}
+
+/// `BCDFGHJK` → `BCDF-GHJK`.
+fn display_user_code(code: &str) -> String {
+    let code = db::normalize_user_code(code);
+    match code.len() {
+        8 => format!("{}-{}", &code[..4], &code[4..]),
+        _ => code,
+    }
+}
+
+#[derive(Deserialize)]
+pub struct DeviceQuery {
+    user_code: Option<String>,
+}
+
+/// Where the user enters the code shown by the client, then approves it by name.
+pub async fn device_page(
+    State(state): State<AppState>,
+    viewer: Viewer,
+    Query(q): Query<DeviceQuery>,
+) -> AppResult<Response> {
+    let user = viewer.require()?;
+    let entered = q.user_code.as_deref().filter(|c| !c.trim().is_empty());
+    let client = match entered {
+        Some(code) => db::pending_device_client(&state.db, code).await?,
+        None => None,
+    };
+    let body = match (entered, client) {
+        (Some(code), Some(client)) => {
+            let code = display_user_code(code);
+            html! {
+                h1 { "Connect " (client.client_name) "?" }
+                p { strong { (client.client_name) } " wants to act as " strong { (user.login) } " on this site. It will be able to:" }
+                ul {
+                    li { "read your documents and the ones shared with you" }
+                    li { "publish new documents and versions, and share them" }
+                    li { "read the answers and comments people leave" }
+                }
+                p { "Only allow it if " strong { (client.client_name) } " is showing you the code " code { (code) } "." }
+                p.muted { "You can revoke access at any time under " a href="/settings/tokens" { "Access" } "." }
+                form method="post" action="/device" {
+                    input type="hidden" name="csrf" value=(viewer.csrf);
+                    input type="hidden" name="user_code" value=(code);
+                    div.row {
+                        button.primary type="submit" name="decision" value="allow" { "Allow" }
+                        button type="submit" name="decision" value="deny" { "Deny" }
+                    }
+                }
+            }
+        }
+        (entered, _) => html! {
+            h1 { "Connect a device" }
+            @if entered.is_some() {
+                p { "That code is not valid. It may have expired or already been used; check it, or start again on the device." }
+            } @else {
+                p { "Enter the code shown by the app you are connecting." }
+            }
+            form method="get" action="/device" {
+                div.row {
+                    input type="text" name="user_code" placeholder="BCDF-GHJK" required autofocus
+                        autocomplete="off" autocapitalize="characters" spellcheck="false";
+                    button.primary type="submit" { "Continue" }
+                }
+            }
+        },
+    };
+    Ok(layout::simple(
+        "Connect a device",
+        Some(user),
+        &viewer.csrf,
+        html! { div.card.narrow { (body) } },
+    )
+    .into_response())
+}
+
+#[derive(Deserialize)]
+pub struct DeviceDecision {
+    csrf: String,
+    decision: String,
+    user_code: String,
+}
+
+pub async fn device_decision(
+    State(state): State<AppState>,
+    viewer: Viewer,
+    Form(d): Form<DeviceDecision>,
+) -> AppResult<Response> {
+    viewer.check_csrf(&d.csrf)?;
+    let user = viewer.require()?;
+    let client = db::pending_device_client(&state.db, &d.user_code).await?;
+    let allow = d.decision == "allow";
+    let (Some(client), true) = (
+        client,
+        db::decide_device_code(&state.db, &d.user_code, user.id, allow).await?,
+    ) else {
+        return Err(AppError::BadRequest(
+            "That code is not valid. It may have expired or already been used.".into(),
+        ));
+    };
+    Ok(layout::simple(
+        "Connect a device",
+        Some(user),
+        &viewer.csrf,
+        html! {
+            div.card.narrow {
+                @if allow {
+                    h1 { (client.client_name) " is connected" }
+                    p { "You can close this tab; " (client.client_name) " will finish signing in on its own." }
+                } @else {
+                    h1 { "Access denied" }
+                    p { (client.client_name) " was not connected. You can close this tab." }
+                }
+            }
+        },
+    )
+    .into_response())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -450,5 +671,12 @@ mod tests {
         assert!(!valid_redirect_uri("http://evil.com/cb"));
         assert!(!valid_redirect_uri("javascript:alert(1)"));
         assert!(!valid_redirect_uri("not a url"));
+    }
+
+    #[test]
+    fn user_codes_are_forgiving() {
+        assert_eq!(display_user_code("bcdf-ghjk"), "BCDF-GHJK");
+        assert_eq!(display_user_code(" BCDF GHJK "), "BCDF-GHJK");
+        assert_eq!(db::normalize_user_code("bcdf-ghjk"), "BCDFGHJK");
     }
 }
