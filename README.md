@@ -53,19 +53,19 @@ A client running on a server, like Huntaway at `http://omarchy:7878`, often has 
    curl -s https://docs.nest.dire.nz/oauth/register -H 'content-type: application/json' \
      -d '{"client_name": "Huntaway (omarchy)", "grant_types": ["urn:ietf:params:oauth:grant-type:device_code", "refresh_token"]}'
    ```
-   The response includes a `client_id`. The user sees the `client_name` when they approve, so make it recognisable.
+   The response includes a `client_id`. The user sees the `client_name` when they approve, so make it recognisable. A client can only use the grants it registered: include `authorization_code` (and redirect URIs) too if it also needs the browser flow.
 2. Start a sign-in:
    ```sh
    curl -s https://docs.nest.dire.nz/oauth/device_authorization -d client_id=$CLIENT_ID
    ```
-   The response has a `device_code` (keep it secret), a `user_code` like `BCDF-GHJK`, a `verification_uri` and a `verification_uri_complete`, plus `expires_in` (600 seconds) and `interval` (5 seconds).
+   If too many sign-ins are already waiting, this returns HTTP 503 with `"error": "temporarily_unavailable"`; try again later. Otherwise the response has a `device_code` (keep it secret), a `user_code` like `BCDF-GHJK`, a `verification_uri` and a `verification_uri_complete`, plus `expires_in` (600 seconds) and `interval` (5 seconds).
 3. Show the user the link to `verification_uri_complete` and the code. They sign in, check that the code matches, and choose **Allow** or **Deny**. (They can also open `/device` and type the code.)
 4. Meanwhile poll the token endpoint, waiting `interval` seconds between requests:
    ```sh
    curl -s https://docs.nest.dire.nz/oauth/token -d grant_type=urn:ietf:params:oauth:grant-type:device_code \
      -d device_code=$DEVICE_CODE -d client_id=$CLIENT_ID
    ```
-   Until the user decides, this returns HTTP 400 with `"error": "authorization_pending"`. `slow_down` means you polled too soon: add 5 seconds to the interval. Stop on `access_denied` (the user said no) or `expired_token` (start again at step 2). Once the user approves, you get `access_token` and `refresh_token`, as with the browser flow.
+   `client_id` is required. Until the user decides, this returns HTTP 400 with `"error": "authorization_pending"`. `slow_down` means you polled too soon: add 5 seconds to the interval. Stop on `access_denied` (the user said no) or `expired_token` (start again at step 2). Once the user approves, you get `access_token` and `refresh_token`, as with the browser flow.
 5. Call `/mcp` with `Authorization: Bearer <access_token>`, for example the `publish_document` tool. Access tokens last an hour. Renew them with `grant_type=refresh_token`. Refresh tokens rotate on every use, so save the new one each time. The grant appears under **Access**, where the user can revoke it.
 
 Device and user codes can be used only once. As with the browser flow, `DOCS_ALLOWED_USERS` is checked again when the tokens are issued and on every refresh.

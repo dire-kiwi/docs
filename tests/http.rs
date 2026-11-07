@@ -465,6 +465,20 @@ async fn oauth_authorization_code_flow() {
             .body(Body::from(body))
             .unwrap()
     };
+    // Naming another client doesn't use up the code.
+    let other_client = t
+        .send(token_req(
+            serde_urlencoded::to_string([
+                ("grant_type", "authorization_code"),
+                ("code", code.as_str()),
+                ("client_id", "client_other"),
+                ("code_verifier", verifier),
+            ])
+            .unwrap(),
+        ))
+        .await;
+    assert_eq!(other_client.status, StatusCode::BAD_REQUEST);
+    assert_eq!(other_client.json()["error"], "invalid_grant");
     let wrong = t
         .send(token_req(
             serde_urlencoded::to_string([
@@ -478,6 +492,11 @@ async fn oauth_authorization_code_flow() {
         .await;
     assert_eq!(wrong.status, StatusCode::BAD_REQUEST);
     assert_eq!(wrong.json()["error"], "invalid_grant");
+    assert_eq!(
+        wrong.json()["error_description"],
+        "PKCE verification failed",
+        "the code survived the other client's attempt"
+    );
 
     // The code was consumed by the failed attempt, so get a fresh one.
     let user = db::upsert_user(&t.state.db, "dev", "carol", "carol", None, None)
@@ -563,9 +582,14 @@ async fn removing_a_user_from_the_allowlist_revokes_access() {
     let user = db::upsert_user(&t.state.db, "dev", "erin", "erin", None, None)
         .await
         .unwrap();
-    let client_id = db::register_client(&t.state.db, "Agent", &["http://localhost:1/cb".to_string()])
-        .await
-        .unwrap();
+    let client_id = db::register_client(
+        &t.state.db,
+        "Agent",
+        &["http://localhost:1/cb".to_string()],
+        &["authorization_code", "refresh_token"],
+    )
+    .await
+    .unwrap();
     let refresh = db::create_token(
         &t.state.db,
         "refresh",
@@ -925,6 +949,8 @@ async fn oauth_device_flow_publishes_as_the_user() {
         )
         .await;
     assert!(typed.body.contains("Connect Huntaway?"));
+    assert!(typed.body.contains("it is not verified"), "{}", typed.body);
+    assert!(typed.body.contains("It registered <time"), "{}", typed.body);
     let wrong = t.get("/device?user_code=BBBB-BBBB", &cookie).await;
     assert!(wrong.body.contains("That code is not valid"));
 
@@ -992,6 +1018,21 @@ async fn oauth_device_flow_denial_expiry_and_slow_down() {
         "invalid_grant",
         "issued to another client"
     );
+    let anonymous = t
+        .post_form(
+            "/oauth/token",
+            "",
+            &[("grant_type", DEVICE_GRANT), ("device_code", device_code)],
+        )
+        .await;
+    assert_eq!(error_of(&anonymous), "invalid_request", "client_id is required");
+    let ok = t.poll(&client_id, device_code).await;
+    assert_eq!(
+        ok.status,
+        StatusCode::OK,
+        "the wrong client didn't use up the approval: {}",
+        ok.body
+    );
 
     // Denied.
     let start = t.start_device(&client_id).await;
@@ -1003,13 +1044,18 @@ async fn oauth_device_flow_denial_expiry_and_slow_down() {
     assert_eq!(error_of(&t.poll(&client_id, device_code).await), "access_denied");
     assert_eq!(error_of(&t.poll(&client_id, device_code).await), "invalid_grant");
 
-    // Expired.
+    // Expired, and still reported as expired after another client starts.
     let start = t.start_device(&client_id).await;
     let device_code = start["device_code"].as_str().unwrap();
-    sqlx::query("UPDATE oauth_device_codes SET expires_at = 0")
-        .execute(&t.state.db)
-        .await
-        .unwrap();
+    let expire = |ago: i64| {
+        sqlx::query("UPDATE oauth_device_codes SET expires_at = ? WHERE hash = ?")
+            .bind(db::now() - ago)
+            .bind(db::hash_token(device_code))
+            .execute(&t.state.db)
+    };
+    expire(60).await.unwrap();
+    t.start_device(&client_id).await;
+    assert_eq!(db::purge_device_codes(&t.state.db).await.unwrap(), 0);
     assert_eq!(error_of(&t.poll(&client_id, device_code).await), "expired_token");
     let late = t
         .get(
@@ -1018,6 +1064,10 @@ async fn oauth_device_flow_denial_expiry_and_slow_down() {
         )
         .await;
     assert!(late.body.contains("That code is not valid"));
+    // Long expired codes are purged.
+    expire(db::DEVICE_CODE_GRACE + 1).await.unwrap();
+    assert_eq!(db::purge_device_codes(&t.state.db).await.unwrap(), 1);
+    assert_eq!(error_of(&t.poll(&client_id, device_code).await), "invalid_grant");
 
     // Approved, but the user has since been removed from DOCS_ALLOWED_USERS.
     let start = t.start_device(&client_id).await;
@@ -1055,4 +1105,85 @@ async fn oauth_device_flow_denial_expiry_and_slow_down() {
         .await;
     assert_eq!(useless.status, StatusCode::BAD_REQUEST);
     assert_eq!(useless.json()["error"], "invalid_client_metadata");
+}
+
+#[tokio::test]
+async fn oauth_clients_only_use_the_grants_they_registered() {
+    let t = TestApp::new().await;
+    let (cookie, _) = t.user("hana").await;
+    let code_only = t
+        .send(
+            Request::post("/oauth/register")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({ "client_name": "Web Agent", "redirect_uris": ["http://localhost:4444/cb"] }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .json();
+    assert_eq!(code_only["grant_types"], json!(["authorization_code", "refresh_token"]));
+    let code_only = code_only["client_id"].as_str().unwrap();
+    let res = t
+        .post_form("/oauth/device_authorization", "", &[("client_id", code_only)])
+        .await;
+    assert_eq!(error_of(&res), "unauthorized_client");
+
+    // A device-only client is turned away from /oauth/authorize, even with a redirect URI.
+    let reg = t
+        .send(
+            Request::post("/oauth/register")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({ "grant_types": [DEVICE_GRANT], "redirect_uris": ["http://localhost:4444/cb"] }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .json();
+    assert_eq!(reg["grant_types"], json!([DEVICE_GRANT, "refresh_token"]));
+    let authorize = t
+        .get(
+            &format!(
+                "/oauth/authorize?response_type=code&client_id={}&redirect_uri=http%3A%2F%2Flocalhost%3A4444%2Fcb&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256",
+                reg["client_id"].as_str().unwrap()
+            ),
+            &cookie,
+        )
+        .await;
+    assert_eq!(authorize.status, StatusCode::BAD_REQUEST);
+    assert!(
+        authorize
+            .body
+            .contains("did not register for the authorization code grant")
+    );
+}
+
+#[tokio::test]
+async fn pending_device_authorizations_are_capped() {
+    let t = TestApp::new().await;
+    let client_id = t.device_client().await;
+    sqlx::query(
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?)
+         INSERT INTO oauth_device_codes (hash, user_code, client_id, interval, expires_at)
+         SELECT 'h' || i, 'U' || i, ?, 5, ? FROM n",
+    )
+    .bind(db::MAX_PENDING_DEVICE_CODES)
+    .bind(&client_id)
+    .bind(db::now() + 600)
+    .execute(&t.state.db)
+    .await
+    .unwrap();
+    let full = t
+        .post_form("/oauth/device_authorization", "", &[("client_id", &client_id)])
+        .await;
+    assert_eq!(full.status, StatusCode::SERVICE_UNAVAILABLE, "{}", full.body);
+    assert_eq!(full.json()["error"], "temporarily_unavailable");
+
+    // Expired ones don't count.
+    sqlx::query("UPDATE oauth_device_codes SET expires_at = 0 WHERE hash = 'h1'")
+        .execute(&t.state.db)
+        .await
+        .unwrap();
+    t.start_device(&client_id).await;
 }

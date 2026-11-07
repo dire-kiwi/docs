@@ -136,7 +136,7 @@ pub async fn register(State(state): State<AppState>, Json(reg): Json<Registratio
         .chars()
         .take(100)
         .collect();
-    match db::register_client(&state.db, &name, &reg.redirect_uris).await {
+    match db::register_client(&state.db, &name, &reg.redirect_uris, &grant_types).await {
         Ok(client_id) => (
             StatusCode::CREATED,
             Json(json!({
@@ -191,6 +191,11 @@ async fn validate(state: &AppState, p: &AuthorizeParams) -> AppResult<Result<Aut
     let client = db::get_client(&state.db, client_id)
         .await?
         .ok_or_else(|| AppError::BadRequest("unknown client; register it first".into()))?;
+    if !client.allows("authorization_code") {
+        return Err(AppError::BadRequest(
+            "this client did not register for the authorization code grant".into(),
+        ));
+    }
     let redirect_uri = match p.redirect_uri.as_deref() {
         Some(u) if client.redirect_uris.iter().any(|r| r == u) => u.to_string(),
         None if client.redirect_uris.len() == 1 => client.redirect_uris[0].clone(),
@@ -254,33 +259,54 @@ pub async fn authorize_page(
         ("state", p.state.as_deref()),
         ("scope", p.scope.as_deref()),
     ];
+    let hidden: Vec<_> = hidden.into_iter().filter_map(|(k, v)| Some((k, v?))).collect();
+    let consent = consent(
+        &req.client,
+        &user.login,
+        &viewer.csrf,
+        "/oauth/authorize",
+        &hidden,
+        html! { p.muted { "You will be sent back to " code { (host) } "." } },
+    );
     Ok(layout::simple(
         "Authorize",
         Some(user),
         &viewer.csrf,
-        html! {
-            div.card.narrow {
-                h1 { "Connect " (req.client.client_name) "?" }
-                p { strong { (req.client.client_name) } " wants to act as " strong { (user.login) } " on this site. It will be able to:" }
-                ul {
-                    li { "read your documents and the ones shared with you" }
-                    li { "publish new documents and versions, and share them" }
-                    li { "read the answers and comments people leave" }
-                }
-                p.muted { "You will be sent back to " code { (host) } ". You can revoke access at any time under "
-                    a href="/settings/tokens" { "Access" } "." }
-                form method="post" action="/oauth/authorize" {
-                    input type="hidden" name="csrf" value=(viewer.csrf);
-                    @for (k, v) in hidden { @if let Some(v) = v { input type="hidden" name=(k) value=(v); } }
-                    div.row {
-                        button.primary type="submit" name="decision" value="allow" { "Allow" }
-                        button type="submit" name="decision" value="deny" { "Deny" }
-                    }
-                }
-            }
-        },
+        html! { div.card.narrow { (consent) } },
     )
     .into_response())
+}
+
+/// The consent prompt `/oauth/authorize` and `/device` share: what the client will be
+/// able to do, then `notes`, then Allow and Deny buttons posting `hidden` to `action`.
+fn consent(
+    client: &db::Client,
+    login: &str,
+    csrf: &str,
+    action: &str,
+    hidden: &[(&str, &str)],
+    notes: maud::Markup,
+) -> maud::Markup {
+    let name = &client.client_name;
+    html! {
+        h1 { "Connect " (name) "?" }
+        p { strong { (name) } " wants to act as " strong { (login) } " on this site. It will be able to:" }
+        ul {
+            li { "read your documents and the ones shared with you" }
+            li { "publish new documents and versions, and share them" }
+            li { "read the answers and comments people leave" }
+        }
+        (notes)
+        p.muted { "You can revoke access at any time under " a href="/settings/tokens" { "Access" } "." }
+        form method="post" action=(action) {
+            input type="hidden" name="csrf" value=(csrf);
+            @for (k, v) in hidden { input type="hidden" name=(k) value=(v); }
+            div.row {
+                button.primary type="submit" name="decision" value="allow" { "Allow" }
+                button type="submit" name="decision" value="deny" { "Deny" }
+            }
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -380,12 +406,9 @@ async fn issue(state: &AppState, t: TokenRequest) -> anyhow::Result<Response> {
                     "code and code_verifier are required",
                 ));
             };
-            let Some(c) = db::take_code(&state.db, code).await? else {
-                return invalid_grant("unknown or expired code");
+            let Some(c) = db::take_code(&state.db, code, t.client_id.as_deref()).await? else {
+                return invalid_grant("unknown or expired code, or issued to another client");
             };
-            if t.client_id.as_deref().is_some_and(|id| id != c.client_id) {
-                return invalid_grant("code was issued to another client");
-            }
             if t.redirect_uri.as_deref().is_some_and(|u| u != c.redirect_uri) {
                 return invalid_grant("redirect_uri does not match");
             }
@@ -412,25 +435,24 @@ async fn issue(state: &AppState, t: TokenRequest) -> anyhow::Result<Response> {
             (user_id, client_id)
         }
         DEVICE_GRANT => {
-            let Some(device_code) = t.device_code.as_deref() else {
+            // RFC 8628 3.4: public clients must say who they are.
+            let (Some(device_code), Some(client_id)) = (t.device_code.as_deref(), t.client_id) else {
                 return Ok(oauth_error(
                     StatusCode::BAD_REQUEST,
                     "invalid_request",
-                    "device_code is required",
+                    "device_code and client_id are required",
                 ));
             };
-            let pending = |error: &str, d: &str| Ok(oauth_error(StatusCode::BAD_REQUEST, error, d));
-            match db::poll_device_code(&state.db, device_code).await? {
-                db::DevicePoll::Approved { user_id, client_id } => {
-                    if t.client_id.as_deref().is_some_and(|id| id != client_id) {
-                        return invalid_grant("device code was issued to another client");
-                    }
-                    (user_id, client_id)
+            let poll_error = |error: &str, d: &str| Ok(oauth_error(StatusCode::BAD_REQUEST, error, d));
+            match db::poll_device_code(&state.db, device_code, &client_id).await? {
+                db::DevicePoll::Approved { user_id } => (user_id, client_id),
+                db::DevicePoll::Pending => {
+                    return poll_error("authorization_pending", "waiting for the user to approve");
                 }
-                db::DevicePoll::Pending => return pending("authorization_pending", "waiting for the user to approve"),
-                db::DevicePoll::SlowDown => return pending("slow_down", "polling too often; wait 5 more seconds"),
-                db::DevicePoll::Denied => return pending("access_denied", "the user denied access"),
-                db::DevicePoll::Expired => return pending("expired_token", "the device code expired; start again"),
+                db::DevicePoll::SlowDown => return poll_error("slow_down", "polling too often; wait 5 more seconds"),
+                db::DevicePoll::Denied => return poll_error("access_denied", "the user denied access"),
+                db::DevicePoll::Expired => return poll_error("expired_token", "the device code expired; start again"),
+                db::DevicePoll::WrongClient => return invalid_grant("device code was issued to another client"),
                 db::DevicePoll::Unknown => return invalid_grant("unknown device code"),
             }
         }
@@ -498,14 +520,27 @@ pub async fn device_authorization(
                 "client_id is required",
             ));
         };
-        if db::get_client(&state.db, client_id).await?.is_none() {
+        let Some(client) = db::get_client(&state.db, client_id).await? else {
             return Ok(oauth_error(
                 StatusCode::UNAUTHORIZED,
                 "invalid_client",
                 "unknown client; register it first",
             ));
+        };
+        if !client.allows(DEVICE_GRANT) {
+            return Ok(oauth_error(
+                StatusCode::BAD_REQUEST,
+                "unauthorized_client",
+                &format!("this client did not register for {DEVICE_GRANT}"),
+            ));
         }
-        let (device_code, user_code) = db::create_device_code(&state.db, client_id).await?;
+        let Some((device_code, user_code)) = db::create_device_code(&state.db, client_id).await? else {
+            return Ok(oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily_unavailable",
+                "too many device authorizations are pending; try again later",
+            ));
+        };
         let user_code = display_user_code(&user_code);
         let verification_uri = format!("{}/device", state.config.base_url);
         anyhow::Ok(
@@ -562,25 +597,21 @@ pub async fn device_page(
     let body = match (entered, client) {
         (Some(code), Some(client)) => {
             let code = display_user_code(code);
-            html! {
-                h1 { "Connect " (client.client_name) "?" }
-                p { strong { (client.client_name) } " wants to act as " strong { (user.login) } " on this site. It will be able to:" }
-                ul {
-                    li { "read your documents and the ones shared with you" }
-                    li { "publish new documents and versions, and share them" }
-                    li { "read the answers and comments people leave" }
-                }
-                p { "Only allow it if " strong { (client.client_name) } " is showing you the code " code { (code) } "." }
-                p.muted { "You can revoke access at any time under " a href="/settings/tokens" { "Access" } "." }
-                form method="post" action="/device" {
-                    input type="hidden" name="csrf" value=(viewer.csrf);
-                    input type="hidden" name="user_code" value=(code);
-                    div.row {
-                        button.primary type="submit" name="decision" value="allow" { "Allow" }
-                        button type="submit" name="decision" value="deny" { "Deny" }
-                    }
-                }
-            }
+            // RFC 8628 5.4: anyone can register a client under any name and send you a code.
+            let notes = html! {
+                p { "Only allow it if you started connecting an app yourself and it is showing you the code "
+                    code { (code) } "." }
+                p.muted { "The name " strong { (client.client_name) } " is what the app called itself; it is not verified. "
+                    "It registered " (layout::time(client.created_at)) "." }
+            };
+            consent(
+                &client,
+                &user.login,
+                &viewer.csrf,
+                "/device",
+                &[("user_code", &code)],
+                notes,
+            )
         }
         (entered, _) => html! {
             h1 { "Connect a device" }
