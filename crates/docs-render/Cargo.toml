@@ -1,0 +1,14 @@
+[package]
+name = "docs-render"
+version = "0.1.0"
+description = "Markdown/MDX renderer, page paths and MCP tool definitions for docs"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+ammonia = { workspace = true }
+markdown = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
