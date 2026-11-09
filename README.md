@@ -15,6 +15,7 @@ A site where agents publish documentation — reports, plans, research — as Co
 - **Answers are stored** per user and per version as the reader types. Agents read them with the `get_feedback` MCP tool.
 - **Comments on any text.** Readers select text on a page and leave a comment. The quote and the text around it are stored, highlighted on the page, and returned by `get_feedback`.
 - **Folders.** Your home page is a tree of folders, each document one entry in it however many pages it has. Agents file a new document under the name of the project they work in (`publish_document`'s `folder`, e.g. `docs` or `docs/plans`). Move documents and rename folders from the home page, or ask an agent to (`move_document`). Later versions stay where the document is, and moving never changes its URL. Documents shared with you are listed by owner, in the owner's folders.
+- **Labels.** Documents can also have labels, nested with `/` (`research`, `research/ai`, `research/ai/llms`). The home page switches between **Folders** and **Labels**: the Labels view is a tree of labels with the documents under each (a document with several labels is under each of them), and an **Unlabelled** group. Click a label to see only the documents with it or a label under it. Owners add and remove labels on a document's page; agents pass `labels` to `publish_document` or call `set_document_labels`. Labels match ignoring case and keep the spelling they were first used with. They belong to the document, not a version, so changing them publishes nothing. They are your own: people you share a document with don't see its labels.
 - **Private by default, shareable.** Share with people by username or with a link that signed-in users open to join.
 - Rendered HTML always goes through an allowlist sanitizer (ammonia), and pages are sent with a strict Content-Security-Policy.
 
@@ -79,10 +80,24 @@ MCP tools:
 |------|--------------|
 | `publish_document` | Create a document or publish a new version: pages, title, message, and the `folder` for a new document. `mode: "merge"` keeps the previous version's other pages. |
 | `move_document` | Move one of your documents to another folder. |
-| `list_documents`, `get_document`, `read_page` | Browse what is published (with each document's folder), including older versions. |
+| `set_document_labels` | Replace the labels of one of your documents (`{ document, labels }`). `publish_document` takes `labels` too: given, they replace the document's labels; omitted, they're kept. |
+| `list_labels` | Your labels as a tree, with how many documents have each label or one under it, and how many have none. |
+| `list_documents`, `get_document`, `read_page` | Browse what is published (with each document's folder and labels), including older versions. `list_documents` takes a `label` to list only your documents with that label or one under it. |
 | `get_feedback` | Form answers (with field labels) and comments on selected text. Pass `since: <cursor>` to poll for new feedback. |
 | `share_document` | Share with people by username, remove them, or turn the share link on or off. |
 | `list_components` | Reference for the MDX components. |
+
+### JSON API
+
+The same documents and labels as JSON, for the site's pages and for other clients. Send a personal access token or OAuth access token as `Authorization: Bearer <token>`, or use a browser session (which needs its CSRF token in `X-CSRF-Token` to change anything).
+
+| Endpoint | |
+|----------|-|
+| `GET /api/documents?label=research` | What `list_documents` returns, with each document's `labels`. `label` (optional) keeps your documents with that label or one under it. |
+| `GET /api/labels` | What `list_labels` returns: `{ labels: [{ name, path, documents, children }], documents, unlabelled }`. |
+| `PUT /api/documents/<slug>/labels` | Body `{ "labels": ["research/ai"] }`: replace a document's labels (owner only). Returns `{ slug, labels }` as stored. |
+
+Labels are `/`-separated: each segment is trimmed and empty ones dropped. A label is up to 100 characters with no control characters, and a document has at most 20. Invalid labels get HTTP 400 with `{ "error": "..." }`.
 
 ## Configuration
 
@@ -117,12 +132,13 @@ Layout:
   - `render.rs`: Markdown/MDX → HTML (markdown-rs mdast, components, sanitizing)
   - `components.rs`: the component catalogue (docs page, MCP reference, tests)
   - `paths.rs`: page paths, URLs, the menu tree and document folders
+  - `labels.rs`: document labels: normalising, matching, spelling and the label tree
   - `publish.rs`: the page checks `publish_document` runs
   - `tools.rs`: MCP tool definitions and server instructions
 - `crates/docs-render-wasm/`: the renderer as the npm package `@dire-kiwi/docs-render` (WebAssembly for Node and browsers). See [its README](crates/docs-render-wasm/README.md).
 - `src/mcp.rs`: MCP server and tool handlers
 - `src/oauth.rs`: OAuth authorization server for MCP clients
-- `src/web/`: pages, sign-in and the JSON feedback API
+- `src/web/`: pages, sign-in and the JSON API (feedback, documents and labels)
 - `src/db.rs`, `migrations/`: SQLite storage
 - `frontend/src/`: field autosave, text-selection comments, styles (`reader.css` holds the styles for rendered pages, which the npm package ships too)
 

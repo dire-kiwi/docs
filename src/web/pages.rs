@@ -287,16 +287,15 @@ async fn render_home(state: &AppState, viewer: &Viewer, view: &HomeView, error: 
             }
         }
     }
-    let (mine, shared): (Vec<_>, Vec<_>) = docs.iter().partition(|d| d.owner_id == user.id);
-    let label_nodes = labels::label_tree(&mine.iter().map(|d| d.labels.as_slice()).collect::<Vec<_>>());
-    let unlabelled = sorted(mine.iter().copied().filter(|d| d.labels.is_empty()));
+    let (my_docs, shared): (Vec<_>, Vec<_>) = docs.iter().partition(|d| d.owner_id == user.id);
+    let label_nodes = labels::label_tree(&my_docs.iter().map(|d| d.labels.as_slice()).collect::<Vec<_>>());
+    let unlabelled = sorted(my_docs.iter().copied().filter(|d| d.labels.is_empty()));
     let labelled_view = TreeView {
         key: "labels",
         editable: true,
         csrf: &viewer.csrf,
     };
-    let labelled = &mine;
-    let mine = Folder::build(mine.iter().copied());
+    let mine = Folder::build(my_docs.iter().copied());
     let mut folder_paths = Vec::new();
     mine.paths("", &mut folder_paths);
     let mut by_owner: BTreeMap<&str, Vec<&DocumentSummary>> = BTreeMap::new();
@@ -344,7 +343,7 @@ async fn render_home(state: &AppState, viewer: &Viewer, view: &HomeView, error: 
                         span { "Title" } span { "Pages" } span { "Version" } span { "Updated" }
                     }
                     @if view.labels {
-                        (label_tree_view(&label_nodes, labelled, 0, &labelled_view))
+                        (label_tree_view(&label_nodes, &my_docs, 0, &labelled_view))
                         @if !unlabelled.is_empty() {
                             ul.tree {
                                 li.tree-folder {

@@ -1,6 +1,8 @@
 {
   "paths": ["./Plan/Phase 1.md", "index.mdx", "/", "plan/index.md", "../etc/passwd", "a/<b>", "-/versions", "Notes/Ünïcode"],
   "folders": ["", " / ", " Huntaway//plans/ ", "docs/ my notes ", "a/../b", "./a", "a\u0007b", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"],
+  "labels": [" Research // AI /", "needs review", " / ", "", "a\u0007b", "Ünïcode/Ä"],
+  "labelTree": [["Research/AI", "ops"], ["research/ai/llms"], ["research"], []],
   "links": [
     ["plan/phase-1", "phase-2.md"],
     ["plan/index", "phase-2.md#x"],

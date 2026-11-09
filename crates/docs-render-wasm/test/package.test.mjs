@@ -57,6 +57,15 @@ test("paths match native", () => {
   );
   assert.equal(docs.normalizeFolder(" docs//plans/ "), "docs/plans");
   assert.deepEqual(
+    cases.labels.map((l) => attempt(() => ({ ok: docs.normalizeLabel(l) }))),
+    native.labels,
+  );
+  assert.deepEqual(docs.labelTree(cases.labelTree), native.labelTree);
+  assert.deepEqual(docs.normalizeLabels(["Research", "research ", "x/ y"]), ["Research", "x/y"]);
+  assert.equal(docs.labelMatches("Research/AI", "research"), true);
+  assert.equal(docs.labelMatches("researchers", "research"), false);
+  assert.equal(docs.withKnownCase("research/x", ["Research/AI"]), "Research/x");
+  assert.deepEqual(
     cases.links.map(([from, href]) => docs.resolveLink(from, href)),
     native.links,
   );
@@ -79,6 +88,10 @@ test("sanitize, references and tool definitions match native", () => {
   assert.deepEqual(docs.toolDefinitions(), native.toolDefinitions);
   const tools = Object.fromEntries(docs.toolDefinitions().map((t) => [t.name, t]));
   assert.deepEqual(tools.move_document.inputSchema.required, ["slug", "folder"]);
+  assert.deepEqual(tools.set_document_labels.inputSchema.required, ["document", "labels"]);
+  assert.equal(tools.publish_document.inputSchema.properties.labels.type, "array");
+  assert.equal(tools.list_documents.inputSchema.properties.label.type, "string");
+  assert.ok(tools.list_labels);
   assert.equal(tools.publish_document.inputSchema.properties.folder.type, "string");
   assert.match(docs.serverInstructions(), /`folder`/);
   assert.equal(docs.serverInstructions(), native.serverInstructions);
@@ -116,6 +129,9 @@ test("missing arguments use the defaults or throw strings", () => {
     "normalizePath()": () => docs.normalizePath(),
     "normalizePath(3)": () => docs.normalizePath(3),
     "normalizeFolder()": () => docs.normalizeFolder(),
+    "normalizeLabel()": () => docs.normalizeLabel(),
+    "normalizeLabels()": () => docs.normalizeLabels(),
+    "labelTree()": () => docs.labelTree(),
     "resolveLink(from)": () => docs.resolveLink("index"),
     "titleFromPath()": () => docs.titleFromPath(),
     "urlSuffix()": () => docs.urlSuffix(),
