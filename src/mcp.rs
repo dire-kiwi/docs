@@ -12,7 +12,8 @@ use serde_json::{Value, json};
 
 use crate::AppState;
 use crate::components;
-use crate::db::{self, User};
+use crate::db::{self, DocumentSummary, User};
+use crate::labels;
 use crate::oauth;
 use crate::paths;
 use crate::render::{self, Format, Options};
@@ -102,7 +103,7 @@ struct Server<'a> {
 }
 
 /// A tool failure reported to the model (as opposed to a protocol error).
-struct ToolError(String);
+pub(crate) struct ToolError(pub String);
 
 impl<E: std::fmt::Display> From<E> for ToolError {
     fn from(e: E) -> Self {
@@ -148,7 +149,9 @@ impl Server<'_> {
                 let name = params.get("name").and_then(Value::as_str).unwrap_or("");
                 let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
                 let outcome = match name {
-                    "list_documents" => self.list_documents().await,
+                    "list_documents" => self.list_documents(arguments).await,
+                    "list_labels" => self.list_labels().await,
+                    "set_document_labels" => self.set_labels(arguments).await,
                     "get_document" => self.get_document(arguments).await,
                     "read_page" => self.read_page(arguments).await,
                     "publish_document" => self.publish(arguments).await,
@@ -199,20 +202,42 @@ impl Server<'_> {
         })
     }
 
-    async fn list_documents(&self) -> ToolResult {
+    async fn list_documents(&self, a: Value) -> ToolResult {
+        #[derive(Deserialize)]
+        struct A {
+            label: Option<String>,
+        }
+        let a: A = args(a)?;
+        let docs = list_documents(&self.state.db, self.user, a.label.as_deref()).await?;
+        Ok(documents_json(&self.state.config.base_url, self.user, &docs))
+    }
+
+    async fn list_labels(&self) -> ToolResult {
         let docs = db::list_documents(&self.state.db, self.user).await?;
+        Ok(labels_json(self.user, &docs))
+    }
+
+    async fn set_labels(&self, a: Value) -> ToolResult {
+        #[derive(Deserialize)]
+        struct A {
+            #[serde(alias = "slug")]
+            document: String,
+            labels: Vec<String>,
+        }
+        let a: A = args(a)?;
+        let doc = self.doc(&a.document).await?;
+        if doc.owner_id != self.user.id {
+            return Err(ToolError(format!(
+                "only the owner ({}) can label {:?}",
+                doc.owner, doc.slug
+            )));
+        }
+        let wanted = labels::normalize_labels(&a.labels).map_err(ToolError)?;
+        let stored = db::set_labels(&self.state.db, self.user.id, &doc.slug, &wanted).await?;
         Ok(json!({
-            "documents": docs.iter().map(|d| json!({
-                "slug": d.slug,
-                "title": d.title,
-                "folder": d.folder,
-                "url": self.url(&d.slug, None, "index").trim_end_matches('/').to_string() + "/",
-                "latest_version": d.latest_version,
-                "pages": d.page_count,
-                "owner": d.owner,
-                "shared_with_you": d.owner_id != self.user.id,
-                "updated_at": d.updated_at,
-            })).collect::<Vec<_>>()
+            "slug": doc.slug,
+            "labels": stored.unwrap_or_default(),
+            "url": self.url(&doc.slug, None, "index"),
         }))
     }
 
@@ -237,6 +262,7 @@ impl Server<'_> {
             "slug": doc.slug,
             "title": doc.title,
             "folder": doc.folder,
+            "labels": doc.labels,
             "owner": doc.owner,
             "url": self.url(&doc.slug, None, "index"),
             "version": version,
@@ -286,6 +312,7 @@ impl Server<'_> {
             slug: Option<String>,
             title: Option<String>,
             folder: Option<String>,
+            labels: Option<Vec<String>>,
             message: Option<String>,
             #[serde(default)]
             pages: Vec<PageInput>,
@@ -303,6 +330,12 @@ impl Server<'_> {
             return Err(ToolError("pass at least one page".into()));
         }
         let folder = paths::normalize_folder(a.folder.as_deref().unwrap_or("")).map_err(ToolError)?;
+        let labels = a
+            .labels
+            .as_deref()
+            .map(labels::normalize_labels)
+            .transpose()
+            .map_err(ToolError)?;
         let (valid, warnings) = publish::validate_pages(a.pages).map_err(ToolError)?;
         let pages: Vec<db::NewPage> = valid
             .into_iter()
@@ -336,6 +369,7 @@ impl Server<'_> {
                 slug: a.slug.as_deref(),
                 title: title.as_deref(),
                 folder: &folder,
+                labels: labels.as_deref(),
                 message: a.message.as_deref(),
                 pages,
                 merge,
@@ -356,6 +390,7 @@ impl Server<'_> {
         Ok(json!({
             "slug": slug,
             "folder": doc.folder,
+            "labels": doc.labels,
             "note": note,
             "version": number,
             "url": self.url(&slug, None, "index"),
@@ -515,4 +550,52 @@ impl Server<'_> {
             "hint": "Pass `since: cursor` next time to get only feedback that is new or changed (items may repeat within the same second).",
         }))
     }
+}
+
+/// Documents `user` can see, only those with `label` or a label under it when given.
+/// An invalid `label` is an error for the caller to show.
+pub(crate) async fn list_documents(
+    db: &db::Db,
+    user: &User,
+    label: Option<&str>,
+) -> Result<Vec<DocumentSummary>, ToolError> {
+    let filter = label.map(labels::normalize_label).transpose().map_err(ToolError)?;
+    let mut docs = db::list_documents(db, user).await?;
+    if let Some(f) = &filter {
+        docs.retain(|d| d.labels.iter().any(|l| labels::label_matches(l, f)));
+    }
+    Ok(docs)
+}
+
+/// The `list_documents` result (also `GET /api/documents`).
+pub fn documents_json(base_url: &str, user: &User, docs: &[DocumentSummary]) -> Value {
+    json!({
+        "documents": docs.iter().map(|d| json!({
+            "slug": d.slug,
+            "title": d.title,
+            "folder": d.folder,
+            "labels": d.labels,
+            "url": format!("{base_url}{}", doc_base(&d.slug, None)),
+            "latest_version": d.latest_version,
+            "pages": d.page_count,
+            "owner": d.owner,
+            "shared_with_you": d.owner_id != user.id,
+            "updated_at": d.updated_at,
+        })).collect::<Vec<_>>()
+    })
+}
+
+/// The `list_labels` result (also `GET /api/labels`): the tree of `user`'s labels.
+pub fn labels_json(user: &User, docs: &[DocumentSummary]) -> Value {
+    let own: Vec<&[String]> = docs
+        .iter()
+        .filter(|d| d.owner_id == user.id)
+        .map(|d| d.labels.as_slice())
+        .collect();
+    let tree = labels::label_tree(&own);
+    json!({
+        "labels": tree,
+        "documents": own.len(),
+        "unlabelled": own.iter().filter(|l| l.is_empty()).count(),
+    })
 }

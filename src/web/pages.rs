@@ -3,8 +3,9 @@
 use std::collections::{BTreeMap, HashMap};
 
 use axum::Form;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::response::{IntoResponse, Redirect, Response};
+use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use maud::{Markup, PreEscaped, html};
 use serde::Deserialize;
 
@@ -12,9 +13,10 @@ use crate::AppState;
 use crate::components::COMPONENTS;
 use crate::db::{self, DocumentSummary, User, Version};
 use crate::error::{AppError, AppResult};
+use crate::labels::{self, LabelNode};
 use crate::paths::{self, NavNode};
 use crate::render::{self, Format, Options};
-use crate::web::auth::Viewer;
+use crate::web::auth::{Viewer, safe_next};
 use crate::web::layout::{self, Shell, shell, time};
 
 pub fn doc_base(slug: &str, version: Option<i64>) -> String {
@@ -33,8 +35,77 @@ fn mcp_help(base: &str) -> Markup {
     }
 }
 
-pub async fn home(State(state): State<AppState>, viewer: Viewer) -> AppResult<Markup> {
-    render_home(&state, &viewer, None).await
+const VIEW_COOKIE: &str = "docs_view";
+
+#[derive(Deserialize)]
+pub struct HomeQuery {
+    /// `folders` or `labels`; remembered in a cookie.
+    view: Option<String>,
+    /// Only documents with this label or one under it.
+    label: Option<String>,
+}
+
+/// How the home page shows your documents.
+#[derive(Default)]
+struct HomeView {
+    /// The Labels view instead of the Folders view.
+    labels: bool,
+    label: Option<String>,
+}
+
+impl HomeView {
+    fn saved(jar: &CookieJar) -> Self {
+        HomeView {
+            labels: jar.get(VIEW_COOKIE).is_some_and(|c| c.value() == "labels"),
+            label: None,
+        }
+    }
+
+    /// The home page URL for `view` (`folders` or `labels`), keeping the label filter.
+    fn href(&self, view: &str) -> String {
+        match &self.label {
+            Some(l) => format!("/?view={view}&label={}", encode(l)),
+            None => format!("/?view={view}"),
+        }
+    }
+}
+
+fn encode(s: &str) -> String {
+    url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
+}
+
+/// The home page, showing only documents with `label` (and labels under it).
+pub fn label_href(label: &str) -> String {
+    format!("/?label={}", encode(label))
+}
+
+pub async fn home(
+    State(state): State<AppState>,
+    viewer: Viewer,
+    jar: CookieJar,
+    Query(q): Query<HomeQuery>,
+) -> AppResult<Response> {
+    let mut view = HomeView::saved(&jar);
+    let jar = match q.view.as_deref() {
+        Some(v @ ("folders" | "labels")) => {
+            view.labels = v == "labels";
+            jar.add(
+                Cookie::build((VIEW_COOKIE, v.to_string()))
+                    .path("/")
+                    .same_site(SameSite::Lax)
+                    .max_age(time::Duration::days(365))
+                    .build(),
+            )
+        }
+        _ => jar,
+    };
+    let mut error = None;
+    match q.label.as_deref().map(labels::normalize_label) {
+        Some(Ok(l)) => view.label = Some(l),
+        Some(Err(e)) => error = Some(e),
+        None => {}
+    }
+    Ok((jar, render_home(&state, &viewer, &view, error).await?).into_response())
 }
 
 /// A folder on the home page, with its subfolders and documents.
@@ -92,8 +163,7 @@ struct TreeView<'a> {
 fn folder_tree(folder: &Folder, path: &str, depth: usize, view: &TreeView) -> Markup {
     let mut folders: Vec<_> = folder.folders.iter().collect();
     folders.sort_by_key(|(name, _)| (name.to_lowercase(), name.to_string()));
-    let mut docs = folder.docs.clone();
-    docs.sort_by_key(|d| (d.title.to_lowercase(), d.slug.clone()));
+    let docs = sorted(folder.docs.iter().copied());
     let indent = format!("--depth: {depth}");
     html! {
         ul.tree {
@@ -125,25 +195,69 @@ fn folder_tree(folder: &Folder, path: &str, depth: usize, view: &TreeView) -> Ma
                     }
                 }
             }
-            @for d in docs {
-                li.tree-doc {
-                    span.tree-title style=(indent) {
-                        a href=(doc_base(&d.slug, None)) { (d.title) }
-                        " " small.muted { (d.slug) }
+            @for d in docs { (doc_row(d, &indent, view)) }
+        }
+    }
+}
+
+/// Label chips, each a link to the documents with that label.
+fn label_chips(labels: &[String]) -> Markup {
+    html! {
+        @if !labels.is_empty() {
+            span.labels {
+                @for l in labels { a.label-chip href=(label_href(l)) { (l) } }
+            }
+        }
+    }
+}
+
+/// A document in a tree on the home page.
+fn doc_row(d: &DocumentSummary, indent: &str, view: &TreeView) -> Markup {
+    html! {
+        li.tree-doc {
+            span.tree-title style=(indent) {
+                a href=(doc_base(&d.slug, None)) { (d.title) }
+                " " small.muted { (d.slug) }
+                (label_chips(&d.labels))
+            }
+            span.tree-pages { (d.page_count) " " (if d.page_count == 1 { "page" } else { "pages" }) }
+            a.tree-version href={ "/d/" (d.slug) "/-/versions" } { "v" (d.latest_version) }
+            span.tree-updated { (time(d.updated_at)) }
+            @if view.editable {
+                details.tree-edit {
+                    summary { "Move" }
+                    form method="post" action={ "/d/" (d.slug) "/-/move" } {
+                        input type="hidden" name="csrf" value=(view.csrf);
+                        label { "Move " strong { (d.title) } " to the folder" }
+                        input type="text" name="folder" value=(d.folder) list="folder-options" maxlength="200"
+                            placeholder="Top level" aria-label={ "Folder for " (d.title) };
+                        p.muted.small { "Type a new path like " code { "docs/plans" } " to make a folder." }
+                        button.primary type="submit" { "Move" }
                     }
-                    span.tree-pages { (d.page_count) " " (if d.page_count == 1 { "page" } else { "pages" }) }
-                    a.tree-version href={ "/d/" (d.slug) "/-/versions" } { "v" (d.latest_version) }
-                    span.tree-updated { (time(d.updated_at)) }
-                    @if view.editable {
-                        details.tree-edit {
-                            summary { "Move" }
-                            form method="post" action={ "/d/" (d.slug) "/-/move" } {
-                                input type="hidden" name="csrf" value=(view.csrf);
-                                label { "Move " strong { (d.title) } " to the folder" }
-                                input type="text" name="folder" value=(d.folder) list="folder-options" maxlength="200"
-                                    placeholder="Top level" aria-label={ "Folder for " (d.title) };
-                                p.muted.small { "Type a new path like " code { "docs/plans" } " to make a folder." }
-                                button.primary type="submit" { "Move" }
+                }
+            }
+        }
+    }
+}
+
+/// The Labels view: labels (collapsible, nested) with the documents that have each,
+/// so a document with several labels is under each of them.
+fn label_tree_view(nodes: &[LabelNode], docs: &[&DocumentSummary], depth: usize, view: &TreeView) -> Markup {
+    let indent = format!("--depth: {depth}");
+    html! {
+        ul.tree {
+            @for n in nodes {
+                li.tree-folder {
+                    details.folder open data-folder-key={ (view.key) ":" (n.path) } {
+                        summary style=(indent) {
+                            span.folder-name { (n.name) }
+                            " " span.muted.small { (n.documents) }
+                            " " a.label-filter href=(label_href(&n.path)) title={ "Only documents labelled " (n.path) } { "Filter" }
+                        }
+                        (label_tree_view(&n.children, docs, depth + 1, view))
+                        @if !n.docs.is_empty() {
+                            ul.tree {
+                                @for d in sorted(n.docs.iter().map(|&i| docs[i])) { (doc_row(d, &format!("--depth: {}", depth + 1), view)) }
                             }
                         }
                     }
@@ -153,11 +267,36 @@ fn folder_tree(folder: &Folder, path: &str, depth: usize, view: &TreeView) -> Ma
     }
 }
 
-async fn render_home(state: &AppState, viewer: &Viewer, error: Option<String>) -> AppResult<Markup> {
+fn sorted<'a>(docs: impl IntoIterator<Item = &'a DocumentSummary>) -> Vec<&'a DocumentSummary> {
+    let mut docs: Vec<_> = docs.into_iter().collect();
+    docs.sort_by_key(|d| (d.title.to_lowercase(), d.slug.clone()));
+    docs
+}
+
+async fn render_home(state: &AppState, viewer: &Viewer, view: &HomeView, error: Option<String>) -> AppResult<Markup> {
     let user = viewer.require()?;
-    let docs = db::list_documents(&state.db, user).await?;
+    let mut docs = db::list_documents(&state.db, user).await?;
+    let any_mine = docs.iter().any(|d| d.owner_id == user.id);
+    if let Some(f) = &view.label {
+        // Labels are your own, so a filter shows only your documents. In the Labels
+        // view each is shown only under the labels the filter matches.
+        docs.retain(|d| d.owner_id == user.id && d.labels.iter().any(|l| labels::label_matches(l, f)));
+        if view.labels {
+            for d in &mut docs {
+                d.labels.retain(|l| labels::label_matches(l, f));
+            }
+        }
+    }
     let (mine, shared): (Vec<_>, Vec<_>) = docs.iter().partition(|d| d.owner_id == user.id);
-    let mine = Folder::build(mine);
+    let label_nodes = labels::label_tree(&mine.iter().map(|d| d.labels.as_slice()).collect::<Vec<_>>());
+    let unlabelled = sorted(mine.iter().copied().filter(|d| d.labels.is_empty()));
+    let labelled_view = TreeView {
+        key: "labels",
+        editable: true,
+        csrf: &viewer.csrf,
+    };
+    let labelled = &mine;
+    let mine = Folder::build(mine.iter().copied());
     let mut folder_paths = Vec::new();
     mine.paths("", &mut folder_paths);
     let mut by_owner: BTreeMap<&str, Vec<&DocumentSummary>> = BTreeMap::new();
@@ -176,25 +315,59 @@ async fn render_home(state: &AppState, viewer: &Viewer, error: Option<String>) -
         html! {
             h1 { "Documents" }
             @if let Some(e) = &error { div.render-error { (e) } }
-            @if mine.count() == 0 {
+            @if any_mine {
+                nav.view-toggle aria-label="Show documents by" {
+                    a href=(view.href("folders")) aria-current=[(!view.labels).then_some("true")] { "Folders" }
+                    a href=(view.href("labels")) aria-current=[view.labels.then_some("true")] { "Labels" }
+                }
+            }
+            @if let Some(l) = &view.label {
+                p.label-filter-bar {
+                    "Documents labelled " a.label-chip href=(label_href(l)) { (l) } " or a label under it. "
+                    a href="/" { "Show all documents" }
+                }
+            }
+            @if !any_mine {
                 div.card {
                     p { strong { "Nothing of yours here yet." } }
                     (mcp_help(&state.config.base_url))
                 }
+            } @else if mine.count() == 0 {
+                p.muted { "None of your documents have this label." }
             } @else {
                 datalist #folder-options {
                     @for p in &folder_paths { option value=(p) {} }
                 }
-                div.doc-tree {
+                div.doc-tree data-tree-store=(if view.labels { "docs.closedLabels" } else { "docs.closedFolders" })
+                    data-tree-partial=[view.label.as_ref().map(|_| "")] {
                     div.tree-head {
                         span { "Title" } span { "Pages" } span { "Version" } span { "Updated" }
                     }
-                    (folder_tree(&mine, "", 0, &own))
+                    @if view.labels {
+                        (label_tree_view(&label_nodes, labelled, 0, &labelled_view))
+                        @if !unlabelled.is_empty() {
+                            ul.tree {
+                                li.tree-folder {
+                                    details.folder open data-folder-key="unlabelled" {
+                                        summary style="--depth: 0" {
+                                            span.folder-name.muted { "Unlabelled" }
+                                            " " span.muted.small { (unlabelled.len()) }
+                                        }
+                                        ul.tree {
+                                            @for d in &unlabelled { (doc_row(d, "--depth: 1", &labelled_view)) }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } @else {
+                        (folder_tree(&mine, "", 0, &own))
+                    }
                 }
             }
             @if !by_owner.is_empty() {
                 h2 { "Shared with you" }
-                div.doc-tree.shared {
+                div.doc-tree.shared data-tree-store="docs.closedShared" {
                     ul.tree {
                         @for (owner, docs) in &by_owner {
                             @let key = format!("shared:{owner}");
@@ -215,7 +388,7 @@ async fn render_home(state: &AppState, viewer: &Viewer, error: Option<String>) -
                     }
                 }
             }
-            @if mine.count() > 0 || !by_owner.is_empty() {
+            @if any_mine || !by_owner.is_empty() {
                 details.connect {
                     summary { "Connect an agent" }
                     (mcp_help(&state.config.base_url))
@@ -236,6 +409,7 @@ pub struct MoveForm {
 pub async fn move_document(
     State(state): State<AppState>,
     viewer: Viewer,
+    jar: CookieJar,
     Path(slug): Path<String>,
     Form(f): Form<MoveForm>,
 ) -> AppResult<Response> {
@@ -247,7 +421,9 @@ pub async fn move_document(
             db::move_document(&state.db, user.id, &doc.slug, &folder).await?;
             Ok(Redirect::to("/").into_response())
         }
-        Err(e) => Ok(render_home(&state, &viewer, Some(e)).await?.into_response()),
+        Err(e) => Ok(render_home(&state, &viewer, &HomeView::saved(&jar), Some(e))
+            .await?
+            .into_response()),
     }
 }
 
@@ -263,6 +439,7 @@ pub struct RenameFolderForm {
 pub async fn rename_folder(
     State(state): State<AppState>,
     viewer: Viewer,
+    jar: CookieJar,
     Form(f): Form<RenameFolderForm>,
 ) -> AppResult<Response> {
     viewer.check_csrf(&f.csrf)?;
@@ -273,7 +450,9 @@ pub async fn rename_folder(
     };
     match renamed {
         Ok(_) => Ok(Redirect::to("/").into_response()),
-        Err(e) => Ok(render_home(&state, &viewer, Some(e)).await?.into_response()),
+        Err(e) => Ok(render_home(&state, &viewer, &HomeView::saved(&jar), Some(e))
+            .await?
+            .into_response()),
     }
 }
 
@@ -424,6 +603,11 @@ async fn show_page(
     );
     let is_latest = number.is_none() || number == Some(doc.latest_version);
     let title = format!("{} · {}", page.title, doc.title);
+    let known_labels = if doc.owner_id == user.id {
+        db::owner_labels(&state.db, user.id).await?
+    } else {
+        Vec::new()
+    };
 
     let body = html! {
         div.doc-layout {
@@ -432,6 +616,9 @@ async fn show_page(
                 a.version-link href={ "/d/" (doc.slug) "/-/versions" } {
                     "Version " (version.number)
                     @if is_latest { " (latest)" }
+                }
+                @if doc.owner_id == user.id {
+                    (labels_editor(&doc, &known_labels, &viewer.csrf, &format!("{base}{canonical}")))
                 }
                 (nav_list(&nav, &base, &page.path))
                 div.doc-links {
@@ -510,6 +697,75 @@ async fn show_page(
         body,
     )
     .into_response())
+}
+
+/// The document's labels, which its owner can add to and remove from (with
+/// suggestions from the labels they already use).
+fn labels_editor(doc: &DocumentSummary, known: &[String], csrf: &str, next: &str) -> Markup {
+    let action = format!("/d/{}/-/labels", doc.slug);
+    html! {
+        div.doc-labels {
+            @for l in &doc.labels {
+                span.label-chip {
+                    a href=(label_href(l)) { (l) }
+                    form.inline method="post" action=(action) {
+                        input type="hidden" name="csrf" value=(csrf);
+                        input type="hidden" name="next" value=(next);
+                        input type="hidden" name="action" value="remove";
+                        input type="hidden" name="label" value=(l);
+                        button.link.label-remove type="submit" aria-label={ "Remove label " (l) } title="Remove" { "×" }
+                    }
+                }
+            }
+            form.label-add method="post" action=(action) {
+                input type="hidden" name="csrf" value=(csrf);
+                input type="hidden" name="next" value=(next);
+                input type="hidden" name="action" value="add";
+                input type="text" name="label" list="label-options" required maxlength=(labels::MAX_LABEL_CHARS)
+                    placeholder="Add a label" aria-label="Add a label";
+                button type="submit" { "Add" }
+            }
+            datalist #label-options {
+                @for l in known { option value=(l) {} }
+            }
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct LabelForm {
+    csrf: String,
+    action: String,
+    #[serde(default)]
+    label: String,
+    next: Option<String>,
+}
+
+/// `POST /d/{slug}/-/labels`: add a label to one of your documents, or remove one.
+pub async fn update_labels(
+    State(state): State<AppState>,
+    viewer: Viewer,
+    Path(slug): Path<String>,
+    Form(f): Form<LabelForm>,
+) -> AppResult<Redirect> {
+    viewer.check_csrf(&f.csrf)?;
+    let user = viewer.require()?;
+    let doc = owned_doc(&state, &slug, user, "Only the owner can change this document's labels.").await?;
+    let mut wanted = doc.labels.clone();
+    match f.action.as_str() {
+        "add" => wanted.push(labels::normalize_label(&f.label).map_err(AppError::BadRequest)?),
+        "remove" => {
+            let key = labels::label_key(&labels::normalize_label(&f.label).unwrap_or_default());
+            wanted.retain(|l| labels::label_key(l) != key);
+        }
+        _ => return Err(AppError::BadRequest("unknown action".into())),
+    }
+    let wanted = labels::normalize_labels(&wanted).map_err(AppError::BadRequest)?;
+    db::set_labels(&state.db, user.id, &doc.slug, &wanted).await?;
+    Ok(Redirect::to(&match f.next {
+        Some(n) => safe_next(Some(&n)),
+        None => doc_base(&doc.slug, None),
+    }))
 }
 
 fn nav_list(nodes: &[NavNode], base: &str, current: &str) -> Markup {

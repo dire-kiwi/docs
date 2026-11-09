@@ -8,7 +8,7 @@ pub mod mcp;
 pub mod oauth;
 pub mod web;
 
-pub use docs_render::{components, paths, render};
+pub use docs_render::{components, labels, paths, render};
 
 use std::sync::{Arc, OnceLock};
 

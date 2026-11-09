@@ -13,6 +13,8 @@ Publish with `publish_document` (one or more pages; nested paths like `plan/phas
 Every publish creates a new version, so you can revise freely. \
 Documents are organised in folders: when you create one, set `folder` to the name of the project or repository you are working in (e.g. \"docs\"), \
 optionally with a subfolder (\"docs/plans\"). Later versions stay in whatever folder the document is in; use `move_document` only when the user asks to move one. \
+Documents can also have labels, nested with '/' (\"research/ai\"): pass `labels` to `publish_document` or call `set_document_labels`, \
+and call `list_labels` to reuse the labels that already exist rather than inventing near-duplicates. \
 Plain Markdown needs no reference. For components (callouts, collapsible sections, form fields), call `list_components` \
 for their names, props and examples, and use format \"mdx\". \
 `publish_document` is the check: it rejects a page it can't publish and says why, and returns warnings (an unknown component, a bad prop) with the URL; \
@@ -33,18 +35,32 @@ pub fn tool_definitions() -> Value {
     optionally with subfolders separated by '/' (\"docs/plans\"). Only used when the document is created; \
     new versions keep the folder the document is in. Omit for the top level.",
     });
+    let labels = |what: &str| {
+        json!({
+            "type": "array",
+            "items": { "type": "string" },
+            "description": format!("{what} Labels nest with '/' (e.g. [\"research/ai\", \"needs-review\"]) and match ignoring case; \
+        a label keeps the spelling it was first used with. At most 20, each up to 100 characters."),
+        })
+    };
     json!([
         {
             "name": "list_documents",
             "title": "List documents",
-            "description": "List the documents you can see (yours and those shared with you) with their folder, latest version and URL.",
-            "inputSchema": { "type": "object", "properties": {} },
+            "description": "List the documents you can see (yours and those shared with you) with their folder, labels, latest version and URL. \
+    Labels are yours alone: documents shared with you are listed without their owner's labels.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "label": { "type": "string", "description": "Only your documents with this label or one nested under it (\"research\" includes \"research/ai\")." },
+                },
+            },
             "annotations": { "readOnlyHint": true },
         },
         {
             "name": "get_document",
             "title": "Get document",
-            "description": "Get a document's folder, pages (paths, titles, URLs) and its version history.",
+            "description": "Get a document's folder, labels, pages (paths, titles, URLs) and its version history.",
             "inputSchema": { "type": "object", "properties": { "slug": slug, "version": version }, "required": ["slug"] },
             "annotations": { "readOnlyHint": true },
         },
@@ -74,6 +90,7 @@ pub fn tool_definitions() -> Value {
                     "slug": { "type": "string", "description": "Existing document to update, or the slug for a new one. Omit to create a new document with a slug derived from the title." },
                     "title": { "type": "string", "description": "Document title. Defaults to the title of the index (or first) page for new documents." },
                     "folder": folder,
+                    "labels": labels("The document's labels. When given they replace its labels; when omitted its labels are kept. Labels belong to the document, not to a version."),
                     "message": { "type": "string", "description": "What changed in this version." },
                     "pages": {
                         "type": "array",
@@ -109,6 +126,29 @@ pub fn tool_definitions() -> Value {
                 "required": ["slug", "folder"],
             },
             "annotations": { "idempotentHint": true },
+        },
+        {
+            "name": "set_document_labels",
+            "title": "Set document labels",
+            "description": "Replace the labels of one of your documents (pass [] to remove them all). \
+    This doesn't publish a new version. Only the owner can label a document. Returns the labels as stored.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "document": slug,
+                    "labels": labels("The document's new labels."),
+                },
+                "required": ["document", "labels"],
+            },
+            "annotations": { "idempotentHint": true },
+        },
+        {
+            "name": "list_labels",
+            "title": "List labels",
+            "description": "Your labels as a tree, with how many of your documents have each label or one nested under it, \
+    and how many have no labels. Reuse these labels when you label a document.",
+            "inputSchema": { "type": "object", "properties": {} },
+            "annotations": { "readOnlyHint": true },
         },
         {
             "name": "get_feedback",

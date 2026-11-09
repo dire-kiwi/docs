@@ -676,3 +676,100 @@ form.inline {
     display: none;
   }
 }
+
+/* ---------- labels ---------- */
+
+.view-toggle {
+  display: inline-flex;
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.view-toggle a {
+  padding: 4px 14px;
+  color: var(--fg);
+  text-decoration: none;
+}
+
+.view-toggle a + a {
+  border-left: 1px solid var(--border);
+}
+
+.view-toggle a[aria-current="true"] {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+.labels {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-left: 8px;
+  vertical-align: baseline;
+}
+
+.label-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: normal;
+  line-height: 1.6;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg));
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--bg));
+  text-decoration: none;
+}
+
+.label-chip a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.label-chip a:hover,
+a.label-chip:hover {
+  text-decoration: underline;
+}
+
+.label-remove {
+  font-size: 1em;
+  line-height: 1;
+}
+
+.label-filter {
+  font-size: 0.8em;
+  font-weight: normal;
+}
+
+.label-filter-bar {
+  margin: 0 0 12px;
+}
+
+.doc-labels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 8px 0 12px;
+}
+
+.label-add {
+  display: flex;
+  gap: 4px;
+  width: 100%;
+}
+
+.label-add input {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.85em;
+  padding: 2px 6px;
+}
+
+.label-add button {
+  font-size: 0.85em;
+  padding: 2px 8px;
+}
