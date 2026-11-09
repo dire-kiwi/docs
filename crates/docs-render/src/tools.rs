@@ -15,6 +15,10 @@ Documents are organised in folders: when you create one, set `folder` to the nam
 optionally with a subfolder (\"docs/plans\"). Later versions stay in whatever folder the document is in; use `move_document` only when the user asks to move one. \
 Documents can also have labels, nested with '/' (\"research/ai\"): pass `labels` to `publish_document` or call `set_document_labels`, \
 and call `list_labels` to reuse the labels that already exist rather than inventing near-duplicates. \
+Pages can show images: pass them in `publish_document`'s `images` (`{ name, data }`, base64) and refer to them by name (`![chart](images/chart.png)`), \
+or inline them as `data:image/png;base64,...` URIs. PNG, JPEG, WebP, GIF (first frame) and AVIF are accepted, not SVG. \
+Every image is converted to AVIF and must be at most 500 KB (512000 bytes) after conversion, so downscale big screenshots and photos; \
+the originals aren't kept. Image data doesn't count towards a page's size. \
 Plain Markdown needs no reference. For components (callouts, collapsible sections, form fields), call `list_components` \
 for their names, props and examples, and use format \"mdx\". \
 `publish_document` is the check: it rejects a page it can't publish and says why, and returns warnings (an unknown component, a bad prop) with the URL; \
@@ -60,7 +64,7 @@ pub fn tool_definitions() -> Value {
         {
             "name": "get_document",
             "title": "Get document",
-            "description": "Get a document's folder, labels, pages (paths, titles, URLs) and its version history.",
+            "description": "Get a document's folder, labels, pages (paths, titles, URLs), images (names, URLs, sizes) and its version history.",
             "inputSchema": { "type": "object", "properties": { "slug": slug, "version": version }, "required": ["slug"] },
             "annotations": { "readOnlyHint": true },
         },
@@ -83,7 +87,12 @@ pub fn tool_definitions() -> Value {
     Paths may be nested (\"plan/phase-1\"); \"index\" is the landing page and \"plan/index\" the page for the \"plan\" folder. \
     Pages are listed in the order given, unless their YAML frontmatter has `order: <n>`; the title comes from `title`, the frontmatter, or the first # heading. \
     Relative links between pages (\"phase-2.md\", \"../index.md\") work like links between files. \
-    Returns the URL to give to the reader, plus any rendering warnings.",
+    Images: pass them in `images` and refer to them by name (`![chart](images/chart.png)`, resolved against the page's folder, then the document root), \
+    or inline them in a page as `data:image/png;base64,...` URIs (each is stored as an image and the URI replaced with its name). \
+    PNG, JPEG, WebP, GIF (first frame) and AVIF are accepted; SVG isn't. Every image is converted to AVIF, \
+    and the publish is rejected if one is over 500 KB (512000 bytes) after conversion: downscale or crop it. \
+    The originals aren't kept. At most 200 images per version; image data doesn't count towards a page's 1,000,000-byte limit. \
+    Returns the URL to give to the reader, the version's images, and any rendering warnings.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -105,7 +114,20 @@ pub fn tool_definitions() -> Value {
                             "required": ["path", "content"],
                         },
                     },
-                    "mode": { "type": "string", "enum": ["replace", "merge"], "description": "replace (default): the new version has exactly these pages. merge: keep the previous version's other pages." },
+                    "images": {
+                        "type": "array",
+                        "description": "Images for the pages, converted to AVIF (at most 500 KB each after conversion; originals aren't kept).",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": { "type": "string", "description": "Relative path pages refer to it by, e.g. \"images/chart.png\" (letters, digits, '.', '_' and '-', separated by '/')." },
+                                "data": { "type": "string", "description": "The image bytes in base64 (PNG, JPEG, WebP, GIF or AVIF; not SVG), without a data: prefix." },
+                            },
+                            "required": ["name", "data"],
+                        },
+                    },
+                    "mode": { "type": "string", "enum": ["replace", "merge"], "description": "replace (default): the new version has exactly these pages, and only the images given or inlined in this publish. \
+    merge: keep the previous version's other pages, and its images that a page of the new version refers to (an image given again with the same name replaces it)." },
                     "delete_paths": { "type": "array", "items": { "type": "string" }, "description": "With mode merge, pages to drop from the previous version." },
                 },
                 "required": ["pages"],

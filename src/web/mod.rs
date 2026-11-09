@@ -4,6 +4,7 @@ pub mod layout;
 pub mod pages;
 
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::http::{HeaderValue, header};
 use axum::routing::{delete, get, post, put};
 use tower_http::cors::CorsLayer;
@@ -22,7 +23,13 @@ pub fn router(state: AppState) -> Router {
         .allow_headers(tower_http::cors::Any)
         .expose_headers([header::WWW_AUTHENTICATE, "mcp-session-id".parse().unwrap()]);
     let public_api = Router::new()
-        .route("/mcp", post(mcp::handle).get(mcp::not_allowed).delete(mcp::not_allowed))
+        .route(
+            "/mcp",
+            post(mcp::handle)
+                .layer(DefaultBodyLimit::max(mcp::MAX_REQUEST_BYTES))
+                .get(mcp::not_allowed)
+                .delete(mcp::not_allowed),
+        )
         .route("/.well-known/oauth-protected-resource", get(oauth::protected_resource))
         .route(
             "/.well-known/oauth-protected-resource/mcp",
@@ -62,6 +69,7 @@ pub fn router(state: AppState) -> Router {
         .route("/d/{slug}/-/share", get(pages::share_page).post(pages::share_update))
         .route("/d/{slug}/-/move", post(pages::move_document))
         .route("/d/{slug}/-/labels", post(pages::update_labels))
+        .route("/d/{slug}/-/images/{file}", get(pages::document_image))
         .route("/folders/rename", post(pages::rename_folder))
         .route("/s/{token}", get(pages::share_link))
         .route("/d/{slug}/-/v/{n}/", get(pages::version_root))

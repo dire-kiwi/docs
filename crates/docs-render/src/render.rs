@@ -43,6 +43,9 @@ pub struct Options<'a> {
     pub base_url: &'a str,
     /// Saved answers of the current viewer, keyed by field name.
     pub answers: &'a HashMap<String, Value>,
+    /// The version's images: name (`images/chart.png`) → URL to serve it from.
+    /// `<img src>`s that resolve to one of them (see [`crate::images::candidates`]) point there.
+    pub images: &'a HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -66,6 +69,8 @@ pub struct Rendered {
     pub has_h1: bool,
     pub fields: Vec<FieldInfo>,
     pub warnings: Vec<String>,
+    /// Relative `<img src>`s in the page, each once: what may name one of the document's images.
+    pub image_srcs: Vec<String>,
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -148,8 +153,52 @@ pub fn render_tree(root: &Node, opts: &Options) -> Rendered {
     r.node(root);
     r.footnotes();
     let mut res = r.res;
-    res.html = sanitize(&r.out);
+    res.html = rewrite_images(sanitize(&r.out), opts, &mut res.image_srcs);
     res
+}
+
+/// Point `<img src>`s that name one of the document's images at its URL, and collect the
+/// relative srcs. Runs on sanitized HTML, whose attributes are always double-quoted.
+fn rewrite_images(html: String, opts: &Options, srcs: &mut Vec<String>) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut last = 0;
+    let mut from = 0;
+    while let Some(i) = html[from..].find("<img ").map(|i| i + from) {
+        // The tag ends at the first `>` outside an attribute value (values may contain `>`).
+        let mut quoted = false;
+        let tag_end = html[i..]
+            .bytes()
+            .position(|b| {
+                quoted ^= b == b'"';
+                b == b'>' && !quoted
+            })
+            .map_or(html.len(), |e| e + i);
+        from = tag_end;
+        let Some(a) = html[i..tag_end].find(" src=\"").map(|a| a + i + 6) else {
+            continue;
+        };
+        let Some(b) = html[a..tag_end].find('"').map(|b| b + a) else {
+            continue;
+        };
+        let src = html[a..b].replace("&amp;", "&");
+        let names = crate::images::candidates(opts.page_path, &src);
+        if names.is_empty() {
+            continue;
+        }
+        if !srcs.contains(&src) {
+            srcs.push(src);
+        }
+        if let Some(url) = names.iter().find_map(|n| opts.images.get(n)) {
+            out.push_str(&html[last..a]);
+            out.push_str(&escape(url));
+            last = b;
+        }
+    }
+    if last == 0 {
+        return html;
+    }
+    out.push_str(&html[last..]);
+    out
 }
 
 struct Renderer<'a> {
@@ -1003,6 +1052,7 @@ mod tests {
             page_path: "plan/phase-1",
             base_url: "/d/x/",
             answers: &answers,
+            images: &HashMap::new(),
         };
         render(src, format, &opts).unwrap()
     }
@@ -1035,6 +1085,41 @@ mod tests {
         assert!(!r.html.contains("javascript:"));
         assert!(!r.html.contains("onclick"));
         assert!(!r.html.contains("<form"));
+    }
+
+    #[test]
+    fn points_images_at_their_urls() {
+        let answers = HashMap::new();
+        let images = HashMap::from([
+            ("images/a.png".to_string(), "/d/x/-/images/aa.avif".to_string()),
+            ("plan/b.png".to_string(), "/d/x/-/images/bb.avif".to_string()),
+        ]);
+        let opts = Options {
+            page_path: "plan/phase-1",
+            base_url: "/d/x/",
+            answers: &answers,
+            images: &images,
+        };
+        let src = "![a](images/a.png) ![b](b.png \"t\") ![c](c.png) ![r](https://e.com/r.png) ![d](data:image/png;base64,AAAA)\n\n\
+                   <img alt=\"x>y\" src=\"../images/a.png\" width=\"10\">\n";
+        let r = render(src, Format::Md, &opts).unwrap();
+        assert!(
+            r.html.contains("<img src=\"/d/x/-/images/aa.avif\" alt=\"a\""),
+            "{}",
+            r.html
+        );
+        assert!(r.html.contains("<img src=\"/d/x/-/images/bb.avif\" alt=\"b\""));
+        assert!(r.html.contains("<img src=\"c.png\""));
+        assert!(r.html.contains("<img src=\"https://e.com/r.png\""));
+        assert!(
+            r.html.contains("src=\"/d/x/-/images/aa.avif\" width=\"10\">"),
+            "{}",
+            r.html
+        );
+        assert!(!r.html.contains("data:"), "data: URIs are still stripped");
+        assert_eq!(r.image_srcs, ["images/a.png", "b.png", "c.png", "../images/a.png"]);
+        let mdx = render("<img src=\"b.png\" />", Format::Mdx, &opts).unwrap();
+        assert!(mdx.html.contains("/d/x/-/images/bb.avif"), "{}", mdx.html);
     }
 
     #[test]
@@ -1093,6 +1178,7 @@ order: 2
             page_path: "index",
             base_url: "/d/x/",
             answers: &answers,
+            images: &HashMap::new(),
         };
         let r = render(
             "<Select name=\"db\" options=\"SQLite, Postgres\" />\n\n<Checkbox name=\"ok\" label=\"OK\" />",
@@ -1122,6 +1208,7 @@ order: 2
             page_path: "index",
             base_url: "/d/x/",
             answers: &answers,
+            images: &HashMap::new(),
         };
         assert!(render("<Callout>\n\nunclosed", Format::Mdx, &opts).is_err());
     }

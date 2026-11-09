@@ -26,8 +26,10 @@ wasm-bindgen --target web --out-dir "$out" --out-name docs_render \
 # wasm-bindgen drops the `?` from Option parameters that have an explicit TypeScript type.
 dts="$out/docs_render.d.ts"
 sed -i -e 's/options: RenderOptions | null)/options?: RenderOptions | null)/' \
-  -e 's/format: Format | null, path: string | null)/format?: Format | null, path?: string | null)/' "$dts"
-grep -q 'options?: RenderOptions' "$dts" && grep -q 'path?: string | null)' "$dts" || {
+  -e 's/format: Format | null, path: string | null)/format?: Format | null, path?: string | null)/' \
+  -e 's/content: string, format: Format, path: string | null)/content: string, format: Format, path?: string | null)/' "$dts"
+grep -q 'options?: RenderOptions' "$dts" && grep -q 'format?: Format | null, path?: string | null)' "$dts" \
+  && grep -q 'format: Format, path?: string | null)' "$dts" || {
   echo "build.sh: could not mark the optional parameters in $dts" >&2
   exit 1
 }

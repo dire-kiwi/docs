@@ -5,6 +5,7 @@
 //! (`crates/docs-render-wasm`, published as `@dire-kiwi/docs-render`).
 
 pub mod components;
+pub mod images;
 pub mod labels;
 pub mod paths;
 pub mod publish;
