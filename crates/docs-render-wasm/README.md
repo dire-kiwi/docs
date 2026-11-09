@@ -63,7 +63,7 @@ Errors are thrown as plain strings: the same messages the hosted server reports.
 
 | Function | |
 |---|---|
-| `render(source, format, { pagePath, baseUrl, answers? }?)` | → `{ html, toc, hasH1, fields, warnings }`. `format` is `"md"` or `"mdx"`. Relative links are rewritten against `baseUrl` (ending in `/`). Without options, the page is `index` and `baseUrl` is `/`. `answers` (field name → saved answer) prefills form fields. Throws if the source cannot be parsed (e.g. an unclosed MDX tag). |
+| `render(source, format, { pagePath, baseUrl, answers?, images? }?)` | → `{ html, toc, hasH1, fields, warnings, imageSrcs }`. `format` is `"md"` or `"mdx"`. Relative links are rewritten against `baseUrl` (ending in `/`). Without options, the page is `index` and `baseUrl` is `/`. `answers` (field name → saved answer) prefills form fields. `images` (image name → URL) points each `<img src>` that refers to one of the version's images at its URL; `imageSrcs` lists the page's relative `<img src>`s. `data:` URIs are always stripped. Throws if the source cannot be parsed (e.g. an unclosed MDX tag). |
 | `meta(source, format)` | → `{ title, order }` from YAML frontmatter `title:` / `order:`, else the first `# heading`. |
 | `normalizePath(raw)` | `./Plan/Phase 1.md` → `plan/phase-1`. Throws for invalid paths. |
 | `urlSuffix(path)`, `pathCandidates(suffix)` | Page path ↔ URL: `plan/index` ↔ `plan/`, `index` ↔ `` . |
@@ -76,7 +76,10 @@ Errors are thrown as plain strings: the same messages the hosted server reports.
 | `titleFromPath(path)` | `plan/phase-1` → `Phase 1`, `index` → `Overview`. |
 | `navTree([[path, title], ...])` | → nested `{ segment, title, page, children }[]` for the menu. |
 | `validatePage(source, format?, path = "index")` | → `{ path, format, title, position, warnings }`, the checks `publish_document` runs on one page. Without `format`, it is inferred as publishing does (extension, then content). Throws what `publish_document` would return. |
-| `validatePages(pages)` | `pages` as given to `publish_document` (`{ path, content, format?, title? }[]`) → `{ pages, warnings }`. Adds the whole-publish checks: at most 500 pages, no duplicate paths. |
+| `validatePages(pages)` | `pages` as given to `publish_document` (`{ path, content, format?, title? }[]`) → `{ pages, warnings }`. Adds the whole-publish checks: at most 500 pages, no duplicate paths. Inline `data:image/...;base64,` images are taken out first (each page's `source` refers to them by name) and don't count towards the page size. |
+| `extractInlineImages(content, format, path = "index")` | → `{ content, images: { name, data }[] }`: the inline base64 images `publish_document` takes out of a page (not those in code), each once, named `images/inline-<16 hex of the SHA-256 of the bytes>.avif`, with `data` the original bytes in base64 for you to convert. Throws for invalid base64 or a format other than PNG, JPEG, WebP, GIF or AVIF (SVG included). |
+| `normalizeImageName(raw)`, `imageCandidates(pagePath, src)` | Image names as `publish_document` takes them (`./images/a.png` → `images/a.png`), and the names an `<img src>` in a page may refer to: relative to the page's folder, then to the document root. |
+| `imageLimits()`, `imageTooLargeError(subject, avifBytes)` | `{ maxImageBytes: 512000, maxImages: 200, maxPageBytes: 1000000 }`, and the message for an image over the limit after AVIF conversion (`subject` is `image "<name>"` or `inline image <n> on page "<path>"`). Converting to AVIF is up to you: the package doesn't encode images. |
 | `componentsReference()` | The `list_components` text (Markdown). |
 | `components()` | The component catalogue: name, summary, props, answer shape and example. |
 | `toolDefinitions()` | The MCP `tools/list` entries the hosted server advertises (name, title, description, inputSchema, annotations). |

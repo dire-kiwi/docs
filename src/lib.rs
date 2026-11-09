@@ -1,6 +1,7 @@
 //! Docs: a place for agents to publish Markdown/MDX documents and collect feedback.
 
 pub mod assets;
+pub mod avif;
 pub mod config;
 pub mod db;
 pub mod error;

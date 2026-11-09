@@ -18,6 +18,7 @@ struct Resp {
     status: StatusCode,
     headers: HeaderMap,
     body: String,
+    bytes: Vec<u8>,
 }
 
 impl Resp {
@@ -52,6 +53,7 @@ impl TestApp {
             status,
             headers,
             body: String::from_utf8_lossy(&bytes).into_owned(),
+            bytes: bytes.to_vec(),
         }
     }
 
@@ -1845,4 +1847,378 @@ async fn labels_organise_documents() {
         .map(|t| t["name"].as_str().unwrap())
         .collect();
     assert!(names.contains(&"set_document_labels") && names.contains(&"list_labels"));
+}
+
+// ---------- images ----------
+
+fn b64(data: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(data)
+}
+
+/// A gradient with noise of ±`noise`: the more noise, the bigger the PNG (and the AVIF).
+fn noisy(w: u32, h: u32, noise: u32) -> image::RgbImage {
+    let mut seed: u32 = w ^ (noise << 16);
+    image::RgbImage::from_fn(w, h, |x, y| {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let n = (seed >> 24) % (2 * noise + 1);
+        let v = |b: u32| ((b + n) as i32 - noise as i32).clamp(0, 255) as u8;
+        image::Rgb([v(x * 255 / w), v(y * 255 / h), v(128)])
+    })
+}
+
+fn encoded(img: &image::RgbImage, format: image::ImageFormat) -> Vec<u8> {
+    let mut out = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut out, format).unwrap();
+    out.into_inner()
+}
+
+fn png(w: u32, h: u32) -> Vec<u8> {
+    encoded(&noisy(w, h, 2), image::ImageFormat::Png)
+}
+
+async fn stored_images(t: &TestApp) -> Vec<Vec<u8>> {
+    sqlx::query_scalar("SELECT data FROM images ORDER BY sha256")
+        .fetch_all(&t.state.db)
+        .await
+        .unwrap()
+}
+
+fn is_avif(data: &[u8]) -> bool {
+    docs_render::images::sniff("x", data) == Ok(docs_render::images::ImageFormat::Avif)
+}
+
+#[tokio::test]
+async fn images_are_converted_to_avif_and_served() {
+    let t = TestApp::new().await;
+    let (cookie, token) = t.user("alice").await;
+    let (bob_cookie, _) = t.user("bob").await;
+
+    let chart = png(64, 48);
+    let photo = encoded(&noisy(80, 60, 20), image::ImageFormat::Jpeg);
+    // An image whose base64 alone is over the 1,000,000-byte page limit.
+    let big = encoded(&noisy(800, 800, 6), image::ImageFormat::Png);
+    assert!(b64(&big).len() > 1_000_000);
+    let inline_page = format!(
+        "# Inline\n\n![big](data:image/png;base64,{})\n\n`data:image/png;base64,{}` stays in code.\n",
+        b64(&big),
+        b64(&chart)
+    );
+    let published = t
+        .tool(
+            &token,
+            "publish_document",
+            json!({
+                "slug": "pictures",
+                "pages": [
+                    { "path": "index", "content": "# Pictures\n\n![chart](images/chart.png)\n\n<img src=\"./photo.jpg\" alt=\"photo\">\n\n![remote](https://example.com/x.png)" },
+                    { "path": "plan/inline", "content": inline_page },
+                    { "path": "plan/sub", "content": "![chart](../images/chart.png) ![missing](images/nope.png)" },
+                ],
+                "images": [
+                    { "name": "images/chart.png", "data": b64(&chart) },
+                    { "name": "./photo.jpg", "data": b64(&photo) },
+                ],
+            }),
+        )
+        .await;
+    assert_eq!(
+        published["warnings"],
+        json!([{ "page": "plan/sub", "warning": "image \"images/nope.png\" isn't one of this version's images; pass it in `images` or inline it as a data: URI" }])
+    );
+    let images = published["images"].as_array().unwrap();
+    let names: Vec<&str> = images.iter().map(|i| i["name"].as_str().unwrap()).collect();
+    let inline_name = docs_render::images::inline_name(&big);
+    assert_eq!(names, ["images/chart.png", inline_name.as_str(), "photo.jpg"]);
+
+    // Only AVIFs are stored: none of the originals.
+    let stored = stored_images(&t).await;
+    assert_eq!(stored.len(), 3);
+    assert!(stored.iter().all(|d| is_avif(d) && d.len() <= 512_000));
+    for original in [&chart, &photo, &big] {
+        assert!(!stored.contains(original));
+    }
+
+    // The page source refers to the inline image by name; code keeps its data URI.
+    let read = t
+        .tool(
+            &token,
+            "read_page",
+            json!({ "slug": "pictures", "path": "plan/inline" }),
+        )
+        .await;
+    let content = read["content"].as_str().unwrap();
+    assert!(content.contains(&format!("![big]({inline_name})")));
+    assert!(content.contains(&format!("`data:image/png;base64,{}`", b64(&chart))));
+
+    // Rendered pages point at the served AVIFs.
+    let url_of = |name: &str| {
+        images.iter().find(|i| i["name"] == name).unwrap()["url"]
+            .as_str()
+            .unwrap()
+            .strip_prefix("http://docs.test")
+            .unwrap()
+            .to_string()
+    };
+    let chart_url = url_of("images/chart.png");
+    assert!(chart_url.starts_with("/d/pictures/-/images/") && chart_url.ends_with(".avif"));
+    let index = t.get("/d/pictures/", &cookie).await;
+    assert!(index.body.contains(&format!("src=\"{chart_url}\"")), "{}", index.body);
+    assert!(index.body.contains(&format!("src=\"{}\"", url_of("photo.jpg"))));
+    assert!(index.body.contains("src=\"https://example.com/x.png\""));
+    let sub = t.get("/d/pictures/plan/sub", &cookie).await;
+    assert!(sub.body.contains(&format!("src=\"{chart_url}\"")));
+    let inline = t.get("/d/pictures/plan/inline", &cookie).await;
+    assert!(inline.body.contains(&format!("src=\"{}\"", url_of(&inline_name))));
+    assert!(!inline.body.contains("src=\"data:"));
+
+    let served = t.get(&chart_url, &cookie).await;
+    assert_eq!(served.status, StatusCode::OK);
+    assert_eq!(served.headers[header::CONTENT_TYPE], "image/avif");
+    assert_eq!(
+        served.headers[header::CACHE_CONTROL],
+        "private, max-age=31536000, immutable"
+    );
+    assert!(is_avif(&served.bytes) && stored.contains(&served.bytes));
+    // Not for people the document isn't shared with, nor through another document.
+    assert_eq!(t.get(&chart_url, &bob_cookie).await.status, StatusCode::NOT_FOUND);
+    t.tool(
+        &token,
+        "publish_document",
+        json!({ "slug": "other", "pages": [{ "path": "index", "content": "x" }] }),
+    )
+    .await;
+    let elsewhere = chart_url.replace("/d/pictures/", "/d/other/");
+    assert_eq!(t.get(&elsewhere, &cookie).await.status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        t.get("/d/pictures/-/images/nothing.avif", &cookie).await.status,
+        StatusCode::NOT_FOUND
+    );
+
+    let doc = t.tool(&token, "get_document", json!({ "slug": "pictures" })).await;
+    assert_eq!(doc["images"].as_array().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn images_that_cant_be_published() {
+    let t = TestApp::new().await;
+    let (_, token) = t.user("alice").await;
+    let publish = |images: Value, content: &str| json!({ "slug": "x", "pages": [{ "path": "index", "content": content }], "images": images });
+    let svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\"/>";
+    let err = t
+        .tool_error(
+            &token,
+            "publish_document",
+            publish(json!([{ "name": "a.svg", "data": b64(svg) }]), "x"),
+        )
+        .await;
+    assert_eq!(
+        err,
+        "image \"a.svg\" is SVG, which isn't supported: images must be PNG, JPEG, WebP, GIF or AVIF"
+    );
+    let inline_svg = format!("![](data:image/svg+xml;base64,{})", b64(svg));
+    let err = t
+        .tool_error(&token, "publish_document", publish(json!([]), &inline_svg))
+        .await;
+    assert_eq!(
+        err,
+        "inline image 1 on page \"index\" is SVG, which isn't supported: images must be PNG, JPEG, WebP, GIF or AVIF"
+    );
+    let err = t
+        .tool_error(
+            &token,
+            "publish_document",
+            publish(json!([{ "name": "a.bmp", "data": b64(b"BM....") }]), "x"),
+        )
+        .await;
+    assert_eq!(err, "image \"a.bmp\" isn't PNG, JPEG, WebP, GIF or AVIF");
+    let err = t
+        .tool_error(
+            &token,
+            "publish_document",
+            publish(json!([{ "name": "a.png", "data": "not base64!" }]), "x"),
+        )
+        .await;
+    assert_eq!(err, "image \"a.png\" isn't valid base64");
+    let truncated = &png(10, 10)[..40];
+    let err = t
+        .tool_error(
+            &token,
+            "publish_document",
+            publish(json!([{ "name": "a.png", "data": b64(truncated) }]), "x"),
+        )
+        .await;
+    assert!(err.starts_with("image \"a.png\" couldn't be read: "), "{err}");
+    let two = json!([{ "name": "a.png", "data": b64(&png(4, 4)) }, { "name": "./a.png", "data": b64(&png(4, 4)) }]);
+    let err = t.tool_error(&token, "publish_document", publish(two, "x")).await;
+    assert_eq!(err, "image \"a.png\" is given more than once");
+    let err = t
+        .tool_error(
+            &token,
+            "publish_document",
+            publish(json!([{ "name": "../a.png", "data": "" }]), "x"),
+        )
+        .await;
+    assert!(
+        err.starts_with("image name \"../a.png\" isn't a relative path"),
+        "{err}"
+    );
+
+    // Over 500 KB once converted: rejected, naming the image, its size and the limit.
+    let noise = encoded(&noisy(1100, 1100, 127), image::ImageFormat::Png);
+    let err = t
+        .tool_error(
+            &token,
+            "publish_document",
+            publish(json!([{ "name": "noise.png", "data": b64(&noise) }]), "x"),
+        )
+        .await;
+    let size: usize = err
+        .strip_prefix("image \"noise.png\" is ")
+        .and_then(|r| r.split(' ').next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("{err}"));
+    assert!(size > 512_000);
+    assert_eq!(
+        err,
+        format!(
+            "image \"noise.png\" is {size} bytes after conversion to AVIF, over the limit of 512000 bytes (500 KB): downscale or crop it and publish again"
+        )
+    );
+    assert!(
+        stored_images(&t).await.is_empty(),
+        "nothing is stored when a publish fails"
+    );
+
+    // The page limit still applies to the text.
+    let long = "a".repeat(1_000_001);
+    let err = t
+        .tool_error(&token, "publish_document", publish(json!([]), &long))
+        .await;
+    assert_eq!(
+        err,
+        "page \"index\" is larger than 1000000 bytes (not counting its images)"
+    );
+}
+
+#[tokio::test]
+async fn merge_keeps_the_images_its_pages_use() {
+    let t = TestApp::new().await;
+    let (cookie, token) = t.user("alice").await;
+    let (a, b) = (png(20, 20), png(30, 30));
+    let names = |v: &Value| -> Vec<String> {
+        v["images"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let v1 = t
+        .tool(
+            &token,
+            "publish_document",
+            json!({
+                "slug": "m",
+                "pages": [
+                    { "path": "index", "content": "![a](a.png)" },
+                    { "path": "other", "content": "![b](b.png)" },
+                ],
+                "images": [{ "name": "a.png", "data": b64(&a) }, { "name": "b.png", "data": b64(&b) }, { "name": "unused.png", "data": b64(&a) }],
+            }),
+        )
+        .await;
+    assert_eq!(names(&v1), ["a.png", "b.png", "unused.png"]);
+
+    // A merge keeps the images of the pages it keeps (and drops ones no page uses).
+    let v2 = t
+        .tool(
+            &token,
+            "publish_document",
+            json!({ "slug": "m", "mode": "merge", "pages": [{ "path": "new", "content": "![a again](a.png)" }] }),
+        )
+        .await;
+    assert_eq!(names(&v2), ["a.png", "b.png"]);
+    assert_eq!(v2["warnings"], json!([]));
+    let other = t.get("/d/m/other", &cookie).await;
+    assert!(other.body.contains("/-/images/"), "{}", other.body);
+
+    // Deleting the page that used b.png drops it; a new upload replaces a kept name.
+    let v3 = t
+        .tool(
+            &token,
+            "publish_document",
+            json!({ "slug": "m", "mode": "merge", "pages": [], "delete_paths": ["other"], "images": [{ "name": "a.png", "data": b64(&b) }] }),
+        )
+        .await;
+    assert_eq!(names(&v3), ["a.png"]);
+    let url = |v: &Value| v["images"][0]["url"].as_str().unwrap().to_string();
+    let v2_a = v2["images"][0]["url"].as_str().unwrap().to_string();
+    assert_ne!(url(&v3), v2_a);
+    // Old versions keep their images.
+    let old = t.get("/d/m/-/v/2/", &cookie).await;
+    assert!(old.body.contains(v2_a.strip_prefix("http://docs.test").unwrap()));
+
+    // Replace keeps only the images given in that publish.
+    let v4 = t
+        .tool(
+            &token,
+            "publish_document",
+            json!({ "slug": "m", "pages": [{ "path": "index", "content": "![a](a.png)" }] }),
+        )
+        .await;
+    assert_eq!(names(&v4), Vec::<String>::new());
+    assert_eq!(v4["warnings"][0]["page"], "index");
+}
+
+#[tokio::test]
+async fn avif_and_other_formats_are_accepted() {
+    let t = TestApp::new().await;
+    let (_, token) = t.user("alice").await;
+    let img = noisy(40, 30, 5);
+    let avif = ravif::Encoder::new()
+        .with_speed(10)
+        .encode_rgb(ravif::Img::new(
+            &img.pixels().map(|p| ravif::RGB8::from(p.0)).collect::<Vec<_>>()[..],
+            40,
+            30,
+        ))
+        .unwrap()
+        .avif_file;
+    let gif = encoded(&img, image::ImageFormat::Gif);
+    let webp = encoded(&img, image::ImageFormat::WebP);
+    let published = t
+        .tool(
+            &token,
+            "publish_document",
+            json!({
+                "slug": "formats",
+                "pages": [{ "path": "index", "content": "![](a.avif) ![](g.gif) ![](w.webp)" }],
+                "images": [
+                    { "name": "a.avif", "data": b64(&avif) },
+                    { "name": "g.gif", "data": b64(&gif) },
+                    { "name": "w.webp", "data": b64(&webp) },
+                ],
+            }),
+        )
+        .await;
+    assert_eq!(published["images"].as_array().unwrap().len(), 3);
+    let stored = stored_images(&t).await;
+    assert!(stored.contains(&avif), "a valid AVIF is stored as it is");
+    assert!(stored.iter().all(|d| is_avif(d)));
+    assert!(!stored.contains(&gif) && !stored.contains(&webp));
+
+    let mut broken = avif.clone();
+    broken.truncate(40);
+    let err = t
+        .tool_error(
+            &token,
+            "publish_document",
+            json!({ "slug": "formats", "pages": [{ "path": "index", "content": "x" }], "images": [{ "name": "b.avif", "data": b64(&broken) }] }),
+        )
+        .await;
+    assert!(
+        err.starts_with("image \"b.avif\" couldn't be read: not a valid AVIF file"),
+        "{err}"
+    );
 }

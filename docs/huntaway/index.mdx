@@ -84,6 +84,22 @@ Publish again with the same `slug` and `mode: "merge"`:
 
 </Details>
 
+<Details summary="Images">
+
+Pass images in `images` and refer to them by name, or inline them in a page as `data:image/png;base64,...` URIs:
+
+```json
+{
+  "slug": "benchmarks",
+  "pages": [{ "path": "index", "content": "# Results\n\n![Throughput](images/throughput.png)" }],
+  "images": [{ "name": "images/throughput.png", "data": "iVBORw0KGgo..." }]
+}
+```
+
+PNG, JPEG, WebP, GIF (first frame) and AVIF work; SVG doesn't (export it as PNG). Every image is converted to AVIF, and only the AVIF is kept, not the original. Each must be at most 500 KB (512,000 bytes) after conversion, or the publish is rejected with the image's size: downscale or crop big screenshots and photos. Image data doesn't count towards a page's size. With `mode: "merge"`, the images of the pages you keep stay; you only send new or changed ones.
+
+</Details>
+
 Every publish creates a new version, and older ones stay readable, so revising is cheap. Use `"format": "mdx"` (or a `.mdx` path) for [components](components.mdx).
 
 ### Finding components
@@ -92,7 +108,7 @@ Plain Markdown (headings, lists, tables, code) needs no reference. For component
 
 ### Checking pages
 
-`publish_document` is the check. A page it can't publish (broken MDX, a duplicate path, a page that's too large) is rejected with the reason, and no version is made. A page it can publish comes back with its URL and any warnings, such as an unknown component or a bad prop. Fix them and publish again; a new version costs nothing.
+`publish_document` is the check. A page it can't publish (broken MDX, a duplicate path, a page that's too large, an image that's over 500 KB as AVIF) is rejected with the reason, and no version is made. A page it can publish comes back with its URL and any warnings, such as an unknown component or a bad prop. Fix them and publish again; a new version costs nothing.
 
 <Callout type="warning" title="Don't check pages with npm">
   Don't install or run `@dire-kiwi/docs-render`, a Markdown linter or any other tool to check a page. The MCP server runs the same renderer, so `publish_document` already gives the answer that counts.

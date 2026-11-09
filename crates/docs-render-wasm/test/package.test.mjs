@@ -101,6 +101,37 @@ test("sanitize, references and tool definitions match native", () => {
   );
 });
 
+test("images: inline extraction, names and limits", () => {
+  const png = Buffer.concat([Buffer.from("\x89PNG\r\n\x1a\n", "latin1"), Buffer.alloc(10)]).toString("base64");
+  const source = `![a](data:image/png;base64,${png}) ![b](data:image/png;base64,${png})\n\n\`data:image/png;base64,${png}\`\n`;
+  const { content, images } = docs.extractInlineImages(source, "md", "plan/x");
+  assert.equal(images.length, 1);
+  assert.match(images[0].name, /^images\/inline-[0-9a-f]{16}\.avif$/);
+  assert.equal(images[0].data, png);
+  assert.equal(content, `![a](${images[0].name}) ![b](${images[0].name})\n\n\`data:image/png;base64,${png}\`\n`);
+  // validatePages takes them out too, and doesn't count them towards the page size.
+  const big = `![a](data:image/png;base64,${png}${"A".repeat(1_100_000)})`;
+  const { pages } = docs.validatePages([{ path: "a", content: big }]);
+  assert.match(pages[0].source, /^!\[a\]\(images\/inline-/);
+  assert.deepEqual(pages[0].imageSrcs, [pages[0].source.slice(5, -1)]);
+  assert.equal(
+    attempt(() => docs.extractInlineImages("![](data:image/svg+xml;base64,PHN2Zy8+)", "md")).error,
+    "inline image 1 on page \"index\" is SVG, which isn't supported: images must be PNG, JPEG, WebP, GIF or AVIF",
+  );
+  assert.equal(docs.normalizeImageName("./images/a.png"), "images/a.png");
+  assert.match(attempt(() => docs.normalizeImageName("../a.png")).error, /isn't a relative path/);
+  assert.deepEqual(docs.imageCandidates("plan/x", "images/a.png"), ["plan/images/a.png", "images/a.png"]);
+  assert.deepEqual(docs.imageLimits(), { maxImageBytes: 512000, maxImages: 200, maxPageBytes: 1000000 });
+  assert.equal(
+    docs.imageTooLargeError('image "a.png"', 600000),
+    'image "a.png" is 600000 bytes after conversion to AVIF, over the limit of 512000 bytes (500 KB): downscale or crop it and publish again',
+  );
+  const r = docs.render("![a](images/a.png)", "md", { pagePath: "index", baseUrl: "/", images: { "images/a.png": "/i/a.avif" } });
+  assert.match(r.html, /src="\/i\/a.avif"/);
+  assert.deepEqual(r.imageSrcs, ["images/a.png"]);
+  assert.ok(docs.toolDefinitions().find((t) => t.name === "publish_document").inputSchema.properties.images);
+});
+
 test("bad arguments throw strings", () => {
   assert.deepEqual(attempt(() => docs.render("x", "html", { pagePath: "index", baseUrl: "/" })), {
     error: 'format must be md or mdx, not "html"',

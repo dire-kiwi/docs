@@ -169,6 +169,7 @@ pub async fn save_response(
         page_path: &page.path,
         base_url: "/",
         answers: &answers,
+        images: &HashMap::new(),
     };
     let format = Format::parse(&page.format).unwrap_or(Format::Md);
     let fields = render::render(&page.source, format, &opts)

@@ -163,6 +163,7 @@ mod tests {
             page_path: "index",
             base_url: "/",
             answers: &answers,
+            images: &HashMap::new(),
         };
         for c in COMPONENTS {
             let r = render(c.example, Format::Mdx, &opts).unwrap_or_else(|e| panic!("{}: {e}", c.name));

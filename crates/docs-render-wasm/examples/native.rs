@@ -28,7 +28,14 @@ fn nav(nodes: &[paths::NavNode]) -> Value {
 fn publish(input: Vec<PageInput>) -> Value {
     match publish::validate_pages(input) {
         Ok((pages, warnings)) => json!({
-            "pages": pages.iter().map(|p| json!({ "path": p.path, "format": p.format.as_str(), "title": p.title, "position": p.position })).collect::<Vec<_>>(),
+            "pages": pages.iter().map(|p| json!({
+                "path": p.path,
+                "format": p.format.as_str(),
+                "title": p.title,
+                "position": p.position,
+                "source": p.source,
+                "imageSrcs": p.image_srcs,
+            })).collect::<Vec<_>>(),
             "warnings": warnings,
         }),
         Err(e) => json!({ "error": e }),
@@ -57,6 +64,7 @@ fn main() {
             page_path: "plan/phase-1",
             base_url: "/d/x/",
             answers: &answers,
+            images: &HashMap::new(),
         };
         let rendered = match render::render(&source, format, &opts) {
             Ok(r) => json!({
@@ -65,6 +73,7 @@ fn main() {
                 "hasH1": r.has_h1,
                 "fields": r.fields,
                 "warnings": r.warnings,
+                "imageSrcs": r.image_srcs,
             }),
             Err(e) => json!({ "error": e }),
         };

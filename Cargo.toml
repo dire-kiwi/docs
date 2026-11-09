@@ -8,10 +8,12 @@ repository = "https://github.com/dire-kiwi/docs"
 
 [workspace.dependencies]
 ammonia = "4.2.4"
+base64 = "0.22"
 docs-render = { path = "crates/docs-render" }
 markdown = "1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+sha2 = "0.10"
 
 [package]
 name = "docs"
@@ -23,17 +25,20 @@ publish = false
 
 [dependencies]
 anyhow = "1.0.104"
+avif-parse = "2"
 axum = "0.8"
 axum-extra = { version = "0.12.6", features = ["cookie"] }
-base64 = "0.22"
+base64 = { workspace = true }
 docs-render = { workspace = true }
 getrandom = "0.3"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 maud = { version = "0.27.0", features = ["axum"] }
+ravif = { version = "0.13", default-features = false, features = ["threading"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_urlencoded = "0.7.1"
-sha2 = "0.10"
+sha2 = { workspace = true }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate"] }
 time = { version = "0.3.55", features = ["formatting", "macros"] }
 tokio = { version = "1", features = ["full"] }
@@ -52,3 +57,12 @@ inherits = "release"
 opt-level = "s"
 lto = true
 codegen-units = 1
+
+# The AVIF encoder is unusably slow unoptimised (seconds per small image), so it is
+# optimised in debug builds and tests too.
+[profile.dev.package.rav1e]
+opt-level = 3
+[profile.dev.package.ravif]
+opt-level = 3
+[profile.dev.package.v_frame]
+opt-level = 3

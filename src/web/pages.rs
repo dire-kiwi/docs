@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use axum::Form;
 use axum::extract::{Path, Query, State};
+use axum::http::header;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use maud::{Markup, PreEscaped, html};
@@ -24,6 +25,11 @@ pub fn doc_base(slug: &str, version: Option<i64>) -> String {
         Some(n) => format!("/d/{slug}/-/v/{n}/"),
         None => format!("/d/{slug}/"),
     }
+}
+
+/// Where one of a document's images is served (by the SHA-256 of its AVIF, so it never changes).
+pub fn image_path(slug: &str, sha256: &str) -> String {
+    format!("/d/{slug}/-/images/{sha256}.avif")
 }
 
 fn mcp_help(base: &str) -> Markup {
@@ -461,6 +467,7 @@ pub async fn components_page(viewer: Viewer) -> Markup {
         page_path: "index",
         base_url: "/",
         answers: &answers,
+        images: &HashMap::new(),
     };
     layout::simple(
         "Components",
@@ -518,6 +525,34 @@ async fn load_doc(
         .await?
         .ok_or(AppError::NotFound)?;
     Ok((doc, version))
+}
+
+/// `/d/{slug}/-/images/{sha256}.avif`: an image of the document, for people who can see it.
+pub async fn document_image(
+    State(state): State<AppState>,
+    viewer: Viewer,
+    Path((slug, file)): Path<(String, String)>,
+) -> AppResult<Response> {
+    let user = viewer.require()?;
+    let sha256 = file.strip_suffix(".avif").ok_or(AppError::NotFound)?;
+    if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) {
+        return Err(AppError::NotFound);
+    }
+    let doc = db::get_document(&state.db, &slug, user)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let data = db::document_image(&state.db, doc.id, sha256)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "image/avif"),
+            // Private: only people who can see the document may fetch it.
+            (header::CACHE_CONTROL, "private, max-age=31536000, immutable"),
+        ],
+        data,
+    )
+        .into_response())
 }
 
 pub async fn doc_redirect(Path(slug): Path<String>) -> Redirect {
@@ -587,10 +622,16 @@ async fn show_page(
 
     let answers = db::user_answers(&state.db, version.id, &page.path, user.id).await?;
     let format = Format::parse(&page.format).unwrap_or(Format::Md);
+    let images: HashMap<String, String> = db::version_images(&state.db, version.id)
+        .await?
+        .into_iter()
+        .map(|i| (i.name, image_path(&doc.slug, &i.sha256)))
+        .collect();
     let opts = Options {
         page_path: &page.path,
         base_url: &base,
         answers: &answers,
+        images: &images,
     };
     let rendered = render::render(&page.source, format, &opts);
     let selections = db::page_selections(&state.db, version.id, &page.path).await?;

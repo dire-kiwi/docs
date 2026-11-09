@@ -872,6 +872,13 @@ pub struct NewPage {
     pub position: i64,
 }
 
+/// An image converted to AVIF, to store with a version.
+pub struct NewImage {
+    pub name: String,
+    pub sha256: String,
+    pub data: Vec<u8>,
+}
+
 pub struct Publish<'a> {
     pub user_id: i64,
     /// Document to add a version to; created when it does not exist yet.
@@ -887,6 +894,13 @@ pub struct Publish<'a> {
     /// Keep pages of the previous version that are not in `pages`.
     pub merge: bool,
     pub delete: Vec<String>,
+    /// Images uploaded with this publish.
+    pub images: Vec<NewImage>,
+    /// Images of the previous version to keep, `(name, sha256)`.
+    pub kept_images: Vec<(String, String)>,
+    /// The version number `kept_images` (and the pages a merge keeps) were worked out from:
+    /// the publish fails if another version was published since.
+    pub based_on: Option<i64>,
 }
 
 /// Create a new version (and the document if needed). Returns `(slug, version number)`.
@@ -951,6 +965,9 @@ pub async fn publish(db: &Db, p: Publish<'_>) -> Result<(String, i64)> {
             .bind(doc_id)
             .fetch_optional(&mut *tx)
             .await?;
+    if p.based_on.is_some() && p.based_on != prev.map(|(_, n)| n) {
+        bail!("another version of {slug:?} was published at the same time; publish again");
+    }
     let number = prev.map_or(1, |(_, n)| n + 1);
     let (version_id,): (i64,) = sqlx::query_as(
         "INSERT INTO versions (document_id, number, message, created_by, created_at) VALUES (?, ?, ?, ?, ?) RETURNING id",
@@ -1005,6 +1022,26 @@ pub async fn publish(db: &Db, p: Publish<'_>) -> Result<(String, i64)> {
     if count == 0 {
         bail!("a version needs at least one page");
     }
+    for image in &p.images {
+        sqlx::query(
+            "INSERT INTO images (owner_id, sha256, data, created_at) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
+        )
+        .bind(p.user_id)
+        .bind(&image.sha256)
+        .bind(&image.data)
+        .bind(ts)
+        .execute(&mut *tx)
+        .await?;
+    }
+    let names = p.images.iter().map(|i| (&i.name, &i.sha256));
+    for (name, sha256) in names.chain(p.kept_images.iter().map(|(n, s)| (n, s))) {
+        sqlx::query("INSERT INTO version_images (version_id, name, sha256) VALUES (?, ?, ?) ON CONFLICT DO NOTHING")
+            .bind(version_id)
+            .bind(name)
+            .bind(sha256)
+            .execute(&mut *tx)
+            .await?;
+    }
     if let Some(labels) = p.labels {
         store_labels(&mut tx, doc_id, labels).await?;
     }
@@ -1015,6 +1052,40 @@ pub async fn publish(db: &Db, p: Publish<'_>) -> Result<(String, i64)> {
         .await?;
     tx.commit().await?;
     Ok((slug, number))
+}
+
+#[derive(Debug, Clone, FromRow, Serialize)]
+pub struct VersionImage {
+    pub name: String,
+    pub sha256: String,
+    /// Size of the stored AVIF.
+    pub bytes: i64,
+}
+
+/// The images a version has, by name.
+pub async fn version_images(db: &Db, version_id: i64) -> Result<Vec<VersionImage>> {
+    Ok(sqlx::query_as::<_, VersionImage>(
+        "SELECT vi.name, vi.sha256, LENGTH(i.data) AS bytes FROM version_images vi
+         JOIN versions v ON v.id = vi.version_id JOIN documents d ON d.id = v.document_id
+         JOIN images i ON i.owner_id = d.owner_id AND i.sha256 = vi.sha256
+         WHERE vi.version_id = ? ORDER BY vi.name",
+    )
+    .bind(version_id)
+    .fetch_all(db)
+    .await?)
+}
+
+/// An image (AVIF bytes) that some version of the document has.
+pub async fn document_image(db: &Db, document_id: i64, sha256: &str) -> Result<Option<Vec<u8>>> {
+    Ok(sqlx::query_scalar(
+        "SELECT i.data FROM documents d JOIN images i ON i.owner_id = d.owner_id AND i.sha256 = ?
+         WHERE d.id = ? AND EXISTS (SELECT 1 FROM version_images vi JOIN versions v ON v.id = vi.version_id
+           WHERE v.document_id = d.id AND vi.sha256 = i.sha256)",
+    )
+    .bind(sha256)
+    .bind(document_id)
+    .fetch_optional(db)
+    .await?)
 }
 
 pub fn doc_slug(title: &str) -> String {
@@ -1082,11 +1153,23 @@ pub async fn rename_folder(db: &Db, user_id: i64, from: &str, to: &str) -> Resul
 }
 
 pub async fn delete_document(db: &Db, user_id: i64, slug: &str) -> Result<bool> {
+    let mut tx = db.begin().await?;
     let res = sqlx::query("DELETE FROM documents WHERE slug = ? AND owner_id = ?")
         .bind(slug)
         .bind(user_id)
-        .execute(db)
+        .execute(&mut *tx)
         .await?;
+    // Images are kept while any version of the owner's documents has them.
+    sqlx::query(
+        "DELETE FROM images WHERE owner_id = ? AND NOT EXISTS (
+           SELECT 1 FROM version_images vi JOIN versions v ON v.id = vi.version_id
+           JOIN documents d ON d.id = v.document_id
+           WHERE d.owner_id = images.owner_id AND vi.sha256 = images.sha256)",
+    )
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
     Ok(res.rows_affected() > 0)
 }
 

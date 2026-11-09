@@ -10,6 +10,7 @@
 
 use std::collections::HashMap;
 
+use docs_render::images;
 use docs_render::labels::{self, LabelNode};
 use docs_render::paths::{self, NavNode};
 use docs_render::publish::{self, PageInput};
@@ -30,6 +31,8 @@ export interface RenderOptions {
   baseUrl: string;
   /** Saved answers of the current reader, keyed by field name, to prefill form fields. */
   answers?: Record<string, unknown>;
+  /** The version's images, name ("images/chart.png") → URL: `<img src>`s that refer to one point at its URL. */
+  images?: Record<string, string>;
 }
 
 export interface TocEntry {
@@ -56,6 +59,8 @@ export interface RenderResult {
   fields: FieldInfo[];
   /** Problems that did not stop rendering, e.g. unknown components. */
   warnings: string[];
+  /** Relative `<img src>`s in the page, each once (see imageCandidates). */
+  imageSrcs: string[];
 }
 
 export interface PageMeta {
@@ -110,6 +115,34 @@ export interface ValidPage {
   title: string;
   /** Menu position: frontmatter `order`, else the page's index in the input. */
   position: number;
+  /** The source, with inline `data:image/...;base64,` URIs replaced by their image names. */
+  source: string;
+  /** Relative `<img src>`s in the page. */
+  imageSrcs: string[];
+}
+
+/** An image as passed to publish_document's `images`, or taken out of a page. */
+export interface ImageInput {
+  /** Relative path pages refer to it by, e.g. "images/chart.png". */
+  name: string;
+  /** Base64 of the image bytes. */
+  data: string;
+}
+
+export interface ExtractedImages {
+  /** The page source with each inline image's `data:` URI replaced by its name. */
+  content: string;
+  /** Each image once; `data` is base64 of the original bytes (to convert to AVIF). */
+  images: ImageInput[];
+}
+
+export interface ImageLimits {
+  /** Per image, after conversion to AVIF: 512000. */
+  maxImageBytes: number;
+  /** Per version: 200. */
+  maxImages: number;
+  /** Per page, not counting image data: 1000000. */
+  maxPageBytes: number;
 }
 
 export interface ValidatedPage extends ValidPage {
@@ -211,6 +244,8 @@ pub fn render(
         base_url: String,
         #[serde(default)]
         answers: Option<HashMap<String, Value>>,
+        #[serde(default)]
+        images: Option<HashMap<String, String>>,
     }
     let source = string(&source, "source")?;
     let format = self::format(&format)?;
@@ -220,13 +255,16 @@ pub fn render(
             page_path: "index".into(),
             base_url: "/".into(),
             answers: None,
+            images: None,
         },
     };
     let answers = o.answers.unwrap_or_default();
+    let images = o.images.unwrap_or_default();
     let opts = Options {
         page_path: &o.page_path,
         base_url: &o.base_url,
         answers: &answers,
+        images: &images,
     };
     let r = render::render(&source, format, &opts).map_err(err)?;
     Ok(to_js(&json!({
@@ -235,6 +273,7 @@ pub fn render(
         "hasH1": r.has_h1,
         "fields": r.fields,
         "warnings": r.warnings,
+        "imageSrcs": r.image_srcs,
     })))
 }
 
@@ -385,7 +424,14 @@ pub fn nav_tree(
 }
 
 fn valid_json(p: &publish::ValidPage) -> Value {
-    json!({ "path": p.path, "format": p.format.as_str(), "title": p.title, "position": p.position })
+    json!({
+        "path": p.path,
+        "format": p.format.as_str(),
+        "title": p.title,
+        "position": p.position,
+        "source": p.source,
+        "imageSrcs": p.image_srcs,
+    })
 }
 
 /// Check one page the way publish_document does. `format` defaults like it does (path extension,
@@ -418,6 +464,71 @@ pub fn validate_pages(#[wasm_bindgen(unchecked_param_type = "PageInput[]")] page
         "pages": pages.iter().map(valid_json).collect::<Vec<_>>(),
         "warnings": warnings,
     })))
+}
+
+/// Take the inline `data:image/<type>;base64,` images out of a page as publish_document does
+/// (not in code), replacing each URI with the image's name. Throws for invalid base64 and
+/// formats other than PNG, JPEG, WebP, GIF and AVIF (SVG included).
+#[wasm_bindgen(js_name = extractInlineImages, unchecked_return_type = "ExtractedImages")]
+pub fn extract_inline_images(
+    #[wasm_bindgen(unchecked_param_type = "string")] content: JsValue,
+    #[wasm_bindgen(unchecked_param_type = "Format")] format: JsValue,
+    #[wasm_bindgen(unchecked_param_type = "string | null")] path: Option<JsValue>,
+) -> JsResult<JsValue> {
+    use base64::Engine;
+    let content = string(&content, "content")?;
+    let format = self::format(&format)?;
+    let path = paths::normalize(&opt_string(path, "path")?.unwrap_or_else(|| "index".into())).map_err(err)?;
+    let (content, found) = publish::extract_page_images(&path, content, format).map_err(err)?;
+    let mut out = Vec::new();
+    for im in found {
+        images::sniff(&im.label, &im.data).map_err(err)?;
+        out.push(json!({ "name": im.name, "data": base64::engine::general_purpose::STANDARD.encode(&im.data) }));
+    }
+    Ok(to_js(&json!({ "content": content, "images": out })))
+}
+
+/// Normalise an image name as publish_document does (`./images/chart.png` → `images/chart.png`).
+#[wasm_bindgen(js_name = normalizeImageName)]
+pub fn normalize_image_name(#[wasm_bindgen(unchecked_param_type = "string")] raw: JsValue) -> JsResult<String> {
+    images::normalize_name(&string(&raw, "name")?).map_err(err)
+}
+
+/// The image names an `<img src>` in page `pagePath` may refer to, in the order to try them:
+/// relative to the page's folder, then the document root. Empty for absolute URLs.
+#[wasm_bindgen(js_name = imageCandidates)]
+pub fn image_candidates(
+    #[wasm_bindgen(unchecked_param_type = "string")] page_path: JsValue,
+    #[wasm_bindgen(unchecked_param_type = "string")] src: JsValue,
+) -> JsResult<Vec<String>> {
+    Ok(images::candidates(
+        &string(&page_path, "pagePath")?,
+        &string(&src, "src")?,
+    ))
+}
+
+/// The error publish_document reports for an image over the limit after conversion to AVIF.
+/// `subject` is `image "<name>"` or `inline image <n> on page "<path>"`.
+#[wasm_bindgen(js_name = imageTooLargeError)]
+pub fn image_too_large_error(
+    #[wasm_bindgen(unchecked_param_type = "string")] subject: JsValue,
+    #[wasm_bindgen(unchecked_param_type = "number")] avif_bytes: JsValue,
+) -> JsResult<String> {
+    let bytes = avif_bytes
+        .as_f64()
+        .filter(|n| *n >= 0.0)
+        .ok_or_else(|| err(format!("avifBytes must be a number, not {}", type_name(&avif_bytes))))?;
+    Ok(images::too_large_error(&string(&subject, "subject")?, bytes as usize))
+}
+
+/// The image limits publish_document applies.
+#[wasm_bindgen(js_name = imageLimits, unchecked_return_type = "ImageLimits")]
+pub fn image_limits() -> JsValue {
+    to_js(&json!({
+        "maxImageBytes": images::MAX_IMAGE_BYTES,
+        "maxImages": images::MAX_IMAGES,
+        "maxPageBytes": publish::MAX_PAGE_BYTES,
+    }))
 }
 
 /// Markdown reference for the MDX components: the text of the list_components tool.

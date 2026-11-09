@@ -1,6 +1,6 @@
 //! MCP server over Streamable HTTP (JSON responses, stateless).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use axum::Json;
 use axum::body::Bytes;
@@ -11,15 +11,21 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::AppState;
+use crate::avif;
 use crate::components;
 use crate::db::{self, DocumentSummary, User};
 use crate::labels;
 use crate::oauth;
 use crate::paths;
 use crate::render::{self, Format, Options};
-use crate::web::pages::doc_base;
-use docs_render::publish::{self, PageInput};
+use crate::web::pages::{doc_base, image_path};
+use docs_render::images;
+use docs_render::publish::{self, ImageInput, PageInput, PageWarning};
 use docs_render::tools::{INSTRUCTIONS, tool_definitions};
+
+/// The largest `/mcp` request: room for a publish whose images are uploaded at full size
+/// (only the AVIF, at most 500 KB each, is kept).
+pub const MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 
 const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 
@@ -251,6 +257,7 @@ impl Server<'_> {
         let doc = self.doc(&a.slug).await?;
         let version = self.version(&doc, a.version).await?;
         let pages = db::pages(&self.state.db, version.id).await?;
+        let version_images = self.images_json(&doc.slug, version.id).await?;
         let versions = db::versions(&self.state.db, doc.id).await?;
         let sharing = if doc.owner_id == self.user.id {
             Some(self.sharing(&doc).await?)
@@ -273,6 +280,7 @@ impl Server<'_> {
                 "format": p.format,
                 "url": self.url(&doc.slug, a.version, &p.path),
             })).collect::<Vec<_>>(),
+            "images": version_images,
             "versions": versions.iter().take(50).collect::<Vec<_>>(),
         }))
     }
@@ -319,6 +327,8 @@ impl Server<'_> {
             mode: Option<String>,
             #[serde(default)]
             delete_paths: Vec<String>,
+            #[serde(default)]
+            images: Vec<ImageInput>,
         }
         let a: A = args(a)?;
         let merge = match a.mode.as_deref().unwrap_or("replace") {
@@ -336,8 +346,46 @@ impl Server<'_> {
             .map(labels::normalize_labels)
             .transpose()
             .map_err(ToolError)?;
-        let (valid, warnings) = publish::validate_pages(a.pages).map_err(ToolError)?;
+        let delete: Vec<String> = a.delete_paths.iter().filter_map(|p| paths::normalize(p).ok()).collect();
+        let valid = publish::validate_publish(a.pages, a.images).map_err(ToolError)?;
+        let mut warnings = valid.warnings;
+        let uploaded: HashSet<String> = valid.images.iter().map(|i| i.name.clone()).collect();
+
+        // A merge keeps the previous version's images that the new version's pages refer to.
+        let (kept_images, based_on) = if merge {
+            self.kept_images(a.slug.as_deref(), &valid.pages, &delete, &uploaded)
+                .await?
+        } else {
+            (Vec::new(), None)
+        };
+        let count = uploaded.len() + kept_images.len();
+        if count > images::MAX_IMAGES {
+            return Err(ToolError(images::too_many_error(count)));
+        }
+        let have: HashSet<&str> = uploaded
+            .iter()
+            .chain(kept_images.iter().map(|(n, _)| n))
+            .map(String::as_str)
+            .collect();
+        for p in &valid.pages {
+            for src in &p.image_srcs {
+                if !images::candidates(&p.path, src)
+                    .iter()
+                    .any(|n| have.contains(n.as_str()))
+                {
+                    warnings.push(PageWarning {
+                        page: p.path.clone(),
+                        warning: format!(
+                            "image {src:?} isn't one of this version's images; pass it in `images` or inline it as a data: URI"
+                        ),
+                    });
+                }
+            }
+        }
+        let converted = avif::convert_all(valid.images).await.map_err(ToolError)?;
+
         let pages: Vec<db::NewPage> = valid
+            .pages
             .into_iter()
             .map(|p| db::NewPage {
                 position: p.position,
@@ -373,13 +421,24 @@ impl Server<'_> {
                 message: a.message.as_deref(),
                 pages,
                 merge,
-                delete: a.delete_paths.iter().filter_map(|p| paths::normalize(p).ok()).collect(),
+                delete,
+                images: converted
+                    .into_iter()
+                    .map(|c| db::NewImage {
+                        name: c.name,
+                        sha256: c.sha256,
+                        data: c.avif,
+                    })
+                    .collect(),
+                kept_images,
+                based_on,
             },
         )
         .await?;
         let doc = self.doc(&slug).await?;
         let version = self.version(&doc, Some(number)).await?;
         let all = db::pages(&self.state.db, version.id).await?;
+        let version_images = self.images_json(&slug, version.id).await?;
         // An existing document stays where it is, so a publish doesn't undo the user's move.
         let note = (a.folder.is_some() && doc.folder != folder).then(|| {
             format!(
@@ -396,8 +455,78 @@ impl Server<'_> {
             "url": self.url(&slug, None, "index"),
             "version_url": self.url(&slug, Some(number), "index"),
             "pages": all.iter().map(|p| json!({ "path": p.path, "title": p.title, "url": self.url(&slug, None, &p.path) })).collect::<Vec<_>>(),
+            "images": version_images,
             "warnings": warnings,
         }))
+    }
+
+    /// For a merge into `slug`: the previous version's images, `(name, sha256)`, that a page of
+    /// the new version refers to and that aren't uploaded again, and that version's number.
+    async fn kept_images(
+        &self,
+        slug: Option<&str>,
+        pages: &[publish::ValidPage],
+        delete: &[String],
+        uploaded: &HashSet<String>,
+    ) -> Result<(Vec<(String, String)>, Option<i64>), ToolError> {
+        let Some(slug) = slug else {
+            return Ok((Vec::new(), None));
+        };
+        let Some(doc) = db::get_document(&self.state.db, &db::doc_slug(slug), self.user).await? else {
+            return Ok((Vec::new(), None));
+        };
+        let Some(prev) = db::version(&self.state.db, doc.id, None).await? else {
+            return Ok((Vec::new(), None));
+        };
+        let old_images = db::version_images(&self.state.db, prev.id).await?;
+        if old_images.is_empty() {
+            return Ok((Vec::new(), Some(prev.number)));
+        }
+        let mut refs: HashSet<String> = HashSet::new();
+        for p in pages {
+            for src in &p.image_srcs {
+                refs.extend(images::candidates(&p.path, src));
+            }
+        }
+        let empty = HashMap::new();
+        let no_images = HashMap::new();
+        for old in db::all_pages(&self.state.db, prev.id).await? {
+            if pages.iter().any(|p| p.path == old.path) || delete.contains(&old.path) {
+                continue;
+            }
+            let opts = Options {
+                page_path: &old.path,
+                base_url: "/",
+                answers: &empty,
+                images: &no_images,
+            };
+            let format = Format::parse(&old.format).unwrap_or(Format::Md);
+            if let Ok(r) = render::render(&old.source, format, &opts) {
+                for src in &r.image_srcs {
+                    refs.extend(images::candidates(&old.path, src));
+                }
+            }
+        }
+        let kept = old_images
+            .into_iter()
+            .filter(|i| refs.contains(&i.name) && !uploaded.contains(&i.name))
+            .map(|i| (i.name, i.sha256))
+            .collect();
+        Ok((kept, Some(prev.number)))
+    }
+
+    /// A version's images with the URLs they are served from.
+    async fn images_json(&self, slug: &str, version_id: i64) -> Result<Value, ToolError> {
+        let list = db::version_images(&self.state.db, version_id).await?;
+        Ok(json!(
+            list.iter()
+                .map(|i| json!({
+                    "name": i.name,
+                    "url": format!("{}{}", self.state.config.base_url, image_path(slug, &i.sha256)),
+                    "bytes": i.bytes,
+                }))
+                .collect::<Vec<_>>()
+        ))
     }
 
     /// Who a document is shared with, and its share link.
@@ -515,6 +644,7 @@ impl Server<'_> {
                     page_path: &p.path,
                     base_url: "/",
                     answers: &empty,
+                    images: &HashMap::new(),
                 };
                 if let Ok(rendered) = render::render(&p.source, Format::parse(&p.format).unwrap_or(Format::Md), &opts) {
                     map = rendered.fields.into_iter().map(|f| (f.name, f.label)).collect();
