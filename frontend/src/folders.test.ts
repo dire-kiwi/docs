@@ -12,3 +12,11 @@ test("starts with every folder open when nothing is stored", () => {
   expect(closedFolders("not json", ["mine:docs"]).size).toBe(0);
   expect(closedFolders('{"a":1}', ["mine:docs"]).size).toBe(0);
 });
+
+test("keeps folders that aren't shown when the page shows only some", () => {
+  const stored = JSON.stringify(["labels:research", "labels:ops"]);
+  expect([...closedFolders(stored, ["labels:research"], true)]).toEqual([
+    "labels:research",
+    "labels:ops",
+  ]);
+});

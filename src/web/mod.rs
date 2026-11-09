@@ -5,7 +5,7 @@ pub mod pages;
 
 use axum::Router;
 use axum::http::{HeaderValue, header};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 use tower_http::set_header::SetResponseHeaderLayer;
@@ -61,11 +61,15 @@ pub fn router(state: AppState) -> Router {
         .route("/d/{slug}/-/feedback", get(pages::feedback_page))
         .route("/d/{slug}/-/share", get(pages::share_page).post(pages::share_update))
         .route("/d/{slug}/-/move", post(pages::move_document))
+        .route("/d/{slug}/-/labels", post(pages::update_labels))
         .route("/folders/rename", post(pages::rename_folder))
         .route("/s/{token}", get(pages::share_link))
         .route("/d/{slug}/-/v/{n}/", get(pages::version_root))
         .route("/d/{slug}/-/v/{n}/{*path}", get(pages::version_page))
         .route("/d/{slug}/{*path}", get(pages::doc_page))
+        .route("/api/documents", get(api::list_documents))
+        .route("/api/documents/{slug}/labels", put(api::set_labels))
+        .route("/api/labels", get(api::list_labels))
         .route("/api/responses", post(api::save_response))
         .route("/api/selections", post(api::add_selection))
         .route("/api/selections/{id}", delete(api::delete_selection))

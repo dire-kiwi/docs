@@ -1,5 +1,5 @@
 // Compiled (not run) by test.sh: the published types accept the documented calls.
-import init, { navTree, normalizeFolder, render, resolveLink, toolDefinitions, validatePage, validatePages } from "@dire-kiwi/docs-render";
+import init, { labelTree, navTree, normalizeFolder, normalizeLabels, render, resolveLink, toolDefinitions, validatePage, validatePages } from "@dire-kiwi/docs-render";
 
 await init();
 const full = render("x", "mdx", { pagePath: "plan/a", baseUrl: "/d/x/", answers: { q: 1 } });
@@ -14,4 +14,6 @@ const nav: (string | null)[] = navTree([["index", "Home"]]).map((n) => n.page);
 const suffix: string | undefined = resolveLink("a", "b")?.suffix;
 const schema: Record<string, unknown> = toolDefinitions()[0].inputSchema;
 const folder: string = normalizeFolder("docs/plans");
-export { html, fields, title, pages, warnings, nav, suffix, schema, folder };
+const labels: string[] = normalizeLabels(["research/ai"]);
+const counts: number[] = labelTree([labels]).map((n) => n.documents + n.docs.length);
+export { html, fields, title, pages, warnings, nav, suffix, schema, folder, labels, counts };

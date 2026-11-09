@@ -7,7 +7,7 @@ The renderer of [docs](https://github.com/dire-kiwi/docs) as WebAssembly, for No
 Each release attaches the package to a GitHub release, so it installs from a URL, without a registry or a token:
 
 ```sh
-pnpm add https://github.com/dire-kiwi/docs/releases/download/render-v0.2.0/dire-kiwi-docs-render-0.2.0.tgz
+pnpm add https://github.com/dire-kiwi/docs/releases/download/render-v0.3.0/dire-kiwi-docs-render-0.3.0.tgz
 ```
 
 ## Use it from Node
@@ -68,6 +68,10 @@ Errors are thrown as plain strings: the same messages the hosted server reports.
 | `normalizePath(raw)` | `./Plan/Phase 1.md` → `plan/phase-1`. Throws for invalid paths. |
 | `urlSuffix(path)`, `pathCandidates(suffix)` | Page path ↔ URL: `plan/index` ↔ `plan/`, `index` ↔ `` . |
 | `normalizeFolder(raw)` | ` docs//plans/ ` → `docs/plans`: the folder a document is filed in, as `publish_document` and `move_document` normalise it (`""` is the top level). Throws for `.`/`..` segments, control characters and folders over 200 characters. |
+| `normalizeLabel(raw)`, `normalizeLabels(raws)` | ` Research // AI ` → `Research/AI`: document labels as `publish_document` and `set_document_labels` normalise them (case is kept). `normalizeLabels` also drops duplicates, ignoring case, and allows at most 20. Throws for empty labels, control characters and labels over 100 characters. |
+| `labelMatches(label, filter)` | Whether `label` is `filter` or nested under it, ignoring case (`research/ai` is under `research`, `researchers` isn't). |
+| `withKnownCase(label, known)` | Spell a label the way a label set already does, so the first use wins: `("research/x", ["Research/AI"])` → `Research/x`. |
+| `labelTree(labelsPerDocument)` | → nested `{ name, path, documents, docs, children }[]`, as `list_labels` returns it. `documents` counts the documents with the label or one under it; `docs` are the indexes of those with exactly that label. |
 | `resolveLink(from, href)` | → `{ path, suffix }` for a relative link written in page `from`, or `null` for absolute URLs, `/root` links and `#fragments`. |
 | `titleFromPath(path)` | `plan/phase-1` → `Phase 1`, `index` → `Overview`. |
 | `navTree([[path, title], ...])` | → nested `{ segment, title, page, children }[]` for the menu. |

@@ -10,6 +10,7 @@
 
 use std::collections::HashMap;
 
+use docs_render::labels::{self, LabelNode};
 use docs_render::paths::{self, NavNode};
 use docs_render::publish::{self, PageInput};
 use docs_render::render::{self, Format, Options};
@@ -69,6 +70,18 @@ export interface ResolvedLink {
   path: string;
   /** Any `?query#fragment` from the link, including its leading character. */
   suffix: string;
+}
+
+export interface LabelNode {
+  /** The last segment, e.g. "ai". */
+  name: string;
+  /** The whole label, e.g. "research/ai". */
+  path: string;
+  /** How many documents have this label or one nested under it. */
+  documents: number;
+  /** Indexes (into labelTree's input) of the documents with exactly this label. */
+  docs: number[];
+  children: LabelNode[];
 }
 
 export interface NavNode {
@@ -248,6 +261,69 @@ pub fn normalize_path(#[wasm_bindgen(unchecked_param_type = "string")] raw: JsVa
 #[wasm_bindgen(js_name = normalizeFolder)]
 pub fn normalize_folder(#[wasm_bindgen(unchecked_param_type = "string")] raw: JsValue) -> JsResult<String> {
     paths::normalize_folder(&string(&raw, "folder")?).map_err(err)
+}
+
+/// Normalise one document label (` Research // AI ` → `Research/AI`; case is kept). Throws a string
+/// for empty labels, control characters and labels over 100 characters.
+#[wasm_bindgen(js_name = normalizeLabel)]
+pub fn normalize_label(#[wasm_bindgen(unchecked_param_type = "string")] raw: JsValue) -> JsResult<String> {
+    labels::normalize_label(&string(&raw, "label")?).map_err(err)
+}
+
+/// Normalise a document's labels as publish_document and set_document_labels do: each with
+/// normalizeLabel, duplicates (ignoring case) dropped, at most 20. Throws a string otherwise.
+#[wasm_bindgen(js_name = normalizeLabels)]
+pub fn normalize_labels(#[wasm_bindgen(unchecked_param_type = "string[]")] raw: JsValue) -> JsResult<Vec<String>> {
+    let raw: Vec<String> = from_js(&raw, "labels")?;
+    labels::normalize_labels(&raw).map_err(err)
+}
+
+/// Whether a label is `filter` or nested under it, ignoring case (`research/ai` is under `research`).
+#[wasm_bindgen(js_name = labelMatches)]
+pub fn label_matches(
+    #[wasm_bindgen(unchecked_param_type = "string")] label: JsValue,
+    #[wasm_bindgen(unchecked_param_type = "string")] filter: JsValue,
+) -> JsResult<bool> {
+    Ok(labels::label_matches(
+        &string(&label, "label")?,
+        &string(&filter, "filter")?,
+    ))
+}
+
+/// Spell a label the way a label set already does (its first use wins):
+/// `withKnownCase("research/x", ["Research/AI"])` → `Research/x`.
+#[wasm_bindgen(js_name = withKnownCase)]
+pub fn with_known_case(
+    #[wasm_bindgen(unchecked_param_type = "string")] label: JsValue,
+    #[wasm_bindgen(unchecked_param_type = "string[]")] known: JsValue,
+) -> JsResult<String> {
+    let known: Vec<String> = from_js(&known, "known labels")?;
+    Ok(labels::with_known_case(&string(&label, "label")?, &known))
+}
+
+fn label_json(nodes: &[LabelNode]) -> Value {
+    Value::Array(
+        nodes
+            .iter()
+            .map(|n| {
+                json!({
+                    "name": n.name,
+                    "path": n.path,
+                    "documents": n.documents,
+                    "docs": n.docs,
+                    "children": label_json(&n.children),
+                })
+            })
+            .collect(),
+    )
+}
+
+/// The labels of some documents (one array of normalised labels per document) as a tree,
+/// as list_labels returns it, plus the indexes of the documents with exactly each label.
+#[wasm_bindgen(js_name = labelTree, unchecked_return_type = "LabelNode[]")]
+pub fn label_tree(#[wasm_bindgen(unchecked_param_type = "string[][]")] docs: JsValue) -> JsResult<JsValue> {
+    let docs: Vec<Vec<String>> = from_js(&docs, "documents' labels")?;
+    Ok(to_js(&label_json(&labels::label_tree(&docs))))
 }
 
 /// URL suffix, relative to a version base ending in `/`, for a page path (`plan/index` → `plan/`, `index` → ``).

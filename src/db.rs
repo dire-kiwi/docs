@@ -10,6 +10,8 @@ use sha2::{Digest, Sha256};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{FromRow, SqlitePool};
 
+use crate::labels;
+
 pub type Db = SqlitePool;
 
 pub async fn connect(url: &str) -> Result<Db> {
@@ -557,6 +559,9 @@ pub struct DocumentSummary {
     pub owner_id: i64,
     /// The owner's folder for it (`""` is the top level).
     pub folder: String,
+    /// Its labels, sorted, if the viewer owns it: labels are the owner's alone.
+    #[sqlx(skip)]
+    pub labels: Vec<String>,
     pub latest_version: i64,
     pub page_count: i64,
     pub updated_at: i64,
@@ -574,25 +579,112 @@ const CAN_VIEW: &str =
 
 /// Documents `user` can see, most recently updated first.
 pub async fn list_documents(db: &Db, user: &User) -> Result<Vec<DocumentSummary>> {
-    Ok(
+    let mut docs =
         sqlx::query_as::<_, DocumentSummary>(&format!("{DOC_SUMMARY} WHERE {CAN_VIEW} ORDER BY d.updated_at DESC"))
             .bind(user.id)
             .bind(user.login.to_lowercase())
             .fetch_all(db)
-            .await?,
-    )
+            .await?;
+    attach_labels(db, user.id, &mut docs).await?;
+    Ok(docs)
 }
 
 /// A document, if `user` can see it.
 pub async fn get_document(db: &Db, slug: &str, user: &User) -> Result<Option<DocumentSummary>> {
-    Ok(
-        sqlx::query_as::<_, DocumentSummary>(&format!("{DOC_SUMMARY} WHERE d.slug = ? AND {CAN_VIEW}"))
-            .bind(slug)
-            .bind(user.id)
-            .bind(user.login.to_lowercase())
-            .fetch_optional(db)
-            .await?,
+    let doc = sqlx::query_as::<_, DocumentSummary>(&format!("{DOC_SUMMARY} WHERE d.slug = ? AND {CAN_VIEW}"))
+        .bind(slug)
+        .bind(user.id)
+        .bind(user.login.to_lowercase())
+        .fetch_optional(db)
+        .await?;
+    let mut docs = Vec::from_iter(doc);
+    attach_labels(db, user.id, &mut docs).await?;
+    Ok(docs.pop())
+}
+
+/// Fill in the labels of the documents `user_id` owns.
+async fn attach_labels(db: &Db, user_id: i64, docs: &mut [DocumentSummary]) -> Result<()> {
+    if !docs.iter().any(|d| d.owner_id == user_id) {
+        return Ok(());
+    }
+    let rows: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT l.document_id, l.label FROM document_labels l JOIN documents d ON d.id = l.document_id
+         WHERE d.owner_id = ? ORDER BY l.key",
     )
+    .bind(user_id)
+    .fetch_all(db)
+    .await?;
+    let mut by_doc: HashMap<i64, Vec<String>> = HashMap::new();
+    for (id, label) in rows {
+        by_doc.entry(id).or_default().push(label);
+    }
+    for d in docs.iter_mut().filter(|d| d.owner_id == user_id) {
+        d.labels = by_doc.remove(&d.id).unwrap_or_default();
+    }
+    Ok(())
+}
+
+/// Replace a document's labels (normalised with [`labels::normalize_labels`]). Each is
+/// spelled the way the owner's label set (this document's included) already spells it. Returns the labels as stored.
+async fn store_labels(conn: &mut sqlx::SqliteConnection, document_id: i64, labels: &[String]) -> Result<Vec<String>> {
+    let mut known: Vec<String> = sqlx::query_scalar(
+        "SELECT l.label FROM document_labels l JOIN documents d ON d.id = l.document_id
+         WHERE d.owner_id = (SELECT owner_id FROM documents WHERE id = ?)",
+    )
+    .bind(document_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    sqlx::query("DELETE FROM document_labels WHERE document_id = ?")
+        .bind(document_id)
+        .execute(&mut *conn)
+        .await?;
+    let mut stored = Vec::new();
+    for label in labels {
+        let label = labels::with_known_case(label, &known);
+        sqlx::query("INSERT INTO document_labels (document_id, key, label) VALUES (?, ?, ?) ON CONFLICT DO NOTHING")
+            .bind(document_id)
+            .bind(labels::label_key(&label))
+            .bind(&label)
+            .execute(&mut *conn)
+            .await?;
+        known.push(label.clone());
+        stored.push(label);
+    }
+    stored.sort_by_key(|l| labels::label_key(l));
+    Ok(stored)
+}
+
+/// Every label `user_id` uses, with the labels above them (`research` for `research/ai`),
+/// sorted ignoring case.
+pub async fn owner_labels(db: &Db, user_id: i64) -> Result<Vec<String>> {
+    let used: Vec<String> = sqlx::query_scalar(
+        "SELECT l.label FROM document_labels l JOIN documents d ON d.id = l.document_id WHERE d.owner_id = ?",
+    )
+    .bind(user_id)
+    .fetch_all(db)
+    .await?;
+    let mut all: std::collections::BTreeMap<String, String> = Default::default();
+    for label in &used {
+        for (i, _) in label.match_indices('/').chain([(label.len(), "")]) {
+            all.entry(labels::label_key(&label[..i]))
+                .or_insert_with(|| label[..i].to_string());
+        }
+    }
+    Ok(all.into_values().collect())
+}
+
+/// Replace the labels of one of `user_id`'s documents. `None` if they don't own it.
+pub async fn set_labels(db: &Db, user_id: i64, slug: &str, labels: &[String]) -> Result<Option<Vec<String>>> {
+    let mut tx = db.begin().await?;
+    let id: Option<i64> = sqlx::query_scalar("SELECT id FROM documents WHERE slug = ? AND owner_id = ?")
+        .bind(slug)
+        .bind(user_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let Some(id) = id else { return Ok(None) };
+    let stored = store_labels(&mut tx, id, labels).await?;
+    tx.commit().await?;
+    Ok(Some(stored))
 }
 
 /// Whether `user` can see the document a version belongs to.
@@ -788,6 +880,8 @@ pub struct Publish<'a> {
     pub title: Option<&'a str>,
     /// Normalised folder, used only when the document is created.
     pub folder: &'a str,
+    /// Normalised labels to replace the document's with; `None` keeps them.
+    pub labels: Option<&'a [String]>,
     pub message: Option<&'a str>,
     pub pages: Vec<NewPage>,
     /// Keep pages of the previous version that are not in `pages`.
@@ -910,6 +1004,9 @@ pub async fn publish(db: &Db, p: Publish<'_>) -> Result<(String, i64)> {
         .await?;
     if count == 0 {
         bail!("a version needs at least one page");
+    }
+    if let Some(labels) = p.labels {
+        store_labels(&mut tx, doc_id, labels).await?;
     }
     sqlx::query("UPDATE documents SET updated_at = ? WHERE id = ?")
         .bind(ts)

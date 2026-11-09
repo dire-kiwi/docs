@@ -1414,3 +1414,435 @@ async fn folders_organise_documents() {
         .collect();
     assert!(names.contains(&"move_document"));
 }
+
+impl TestApp {
+    /// A JSON request with a bearer token (or none).
+    async fn api(&self, method: &str, uri: &str, token: Option<&str>, body: Option<Value>) -> Resp {
+        let mut req = Request::builder().method(method).uri(uri);
+        if let Some(t) = token {
+            req = req.header(header::AUTHORIZATION, format!("Bearer {t}"));
+        }
+        let body = match body {
+            Some(b) => {
+                req = req.header(header::CONTENT_TYPE, "application/json");
+                Body::from(b.to_string())
+            }
+            None => Body::empty(),
+        };
+        self.send(req.body(body).unwrap()).await
+    }
+}
+
+fn labels_of(listed: &Value, slug: &str) -> Value {
+    listed["documents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["slug"] == slug)
+        .unwrap_or_else(|| panic!("{slug} not listed"))["labels"]
+        .clone()
+}
+
+fn slugs(listed: &Value) -> Vec<String> {
+    let mut s: Vec<String> = listed["documents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["slug"].as_str().unwrap().to_string())
+        .collect();
+    s.sort();
+    s
+}
+
+#[tokio::test]
+async fn labels_organise_documents() {
+    let t = TestApp::new().await;
+    let (alice_cookie, alice) = t.user("alice").await;
+    let (bob_cookie, bob) = t.user("bob").await;
+    let page = |content: &str| json!([{ "path": "index", "content": content }]);
+
+    // Labels are normalised, deduplicated ignoring case, and keep the first spelling.
+    let created = t
+        .tool(
+            &alice,
+            "publish_document",
+            json!({ "slug": "llm", "labels": [" Research / AI / LLMs ", "research/ai/llms", "ops"], "pages": page("# LLMs") }),
+        )
+        .await;
+    assert_eq!(created["labels"], json!(["ops", "Research/AI/LLMs"]));
+    let created = t
+        .tool(
+            &alice,
+            "publish_document",
+            json!({ "slug": "survey", "labels": ["RESEARCH/ai"], "pages": page("# Survey") }),
+        )
+        .await;
+    assert_eq!(
+        created["labels"],
+        json!(["Research/AI"]),
+        "spelled the way alice's other documents spell it"
+    );
+    t.tool(
+        &alice,
+        "publish_document",
+        json!({ "slug": "people", "labels": ["researchers"], "pages": page("# People") }),
+    )
+    .await;
+    t.tool(
+        &alice,
+        "publish_document",
+        json!({ "slug": "loose", "pages": page("# Loose") }),
+    )
+    .await;
+    t.tool(
+        &bob,
+        "publish_document",
+        json!({ "slug": "bobs", "labels": ["research/secret"], "pages": page("# Bob's") }),
+    )
+    .await;
+
+    // A new version keeps the labels unless it gives new ones; labels don't make versions.
+    let v2 = t
+        .tool(
+            &alice,
+            "publish_document",
+            json!({ "slug": "llm", "pages": page("# LLMs v2") }),
+        )
+        .await;
+    assert_eq!(v2["version"], 2);
+    assert_eq!(v2["labels"], json!(["ops", "Research/AI/LLMs"]));
+    let set = t
+        .tool(
+            &alice,
+            "set_document_labels",
+            json!({ "document": "llm", "labels": ["research/ai/llms", "Ops", "drafts"] }),
+        )
+        .await;
+    assert_eq!(set["labels"], json!(["drafts", "ops", "Research/AI/LLMs"]));
+    let got = t.tool(&alice, "get_document", json!({ "slug": "llm" })).await;
+    assert_eq!(got["latest_version"], 2, "setting labels doesn't publish a version");
+    assert_eq!(got["labels"], json!(["drafts", "ops", "Research/AI/LLMs"]));
+    let v3 = t
+        .tool(
+            &alice,
+            "publish_document",
+            json!({ "slug": "llm", "labels": ["research/ai/llms", "ops"], "pages": page("# LLMs v3") }),
+        )
+        .await;
+    assert_eq!(
+        v3["labels"],
+        json!(["ops", "Research/AI/LLMs"]),
+        "given labels replace them"
+    );
+
+    // Bad labels are rejected.
+    for bad in [json!([" / "]), json!(["a\u{7}b"]), json!(["x".repeat(101)])] {
+        let err = t
+            .tool_error(
+                &alice,
+                "set_document_labels",
+                json!({ "document": "llm", "labels": bad }),
+            )
+            .await;
+        assert!(err.starts_with("invalid label"), "{err}");
+    }
+    let many: Vec<String> = (0..21).map(|i| format!("l{i}")).collect();
+    let err = t
+        .tool_error(
+            &alice,
+            "publish_document",
+            json!({ "slug": "new", "labels": many, "pages": page("x") }),
+        )
+        .await;
+    assert!(err.contains("at most 20"), "{err}");
+    let err = t.tool_error(&alice, "get_document", json!({ "slug": "new" })).await;
+    assert!(err.contains("no document"), "nothing was published: {err}");
+
+    // Filtering by a label includes the labels under it, ignoring case, and nothing else.
+    let filter = |label: &str| t.tool(&alice, "list_documents", json!({ "label": label }));
+    assert_eq!(slugs(&filter("research").await), ["llm", "survey"]);
+    assert_eq!(slugs(&filter("RESEARCH/AI/").await), ["llm", "survey"]);
+    assert_eq!(slugs(&filter("research/ai/llms").await), ["llm"]);
+    assert_eq!(slugs(&filter("researchers").await), ["people"]);
+    assert!(slugs(&filter("nothing").await).is_empty());
+    let all = t.tool(&alice, "list_documents", json!({})).await;
+    assert_eq!(slugs(&all), ["llm", "loose", "people", "survey"]);
+    assert_eq!(labels_of(&all, "loose"), json!([]));
+
+    // The label tree, with parents implied and counts including labels under them.
+    let tree = t.tool(&alice, "list_labels", json!({})).await;
+    assert_eq!(
+        (tree["documents"].clone(), tree["unlabelled"].clone()),
+        (json!(4), json!(1))
+    );
+    let names: Vec<&str> = tree["labels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["ops", "Research", "researchers"]);
+    let research = &tree["labels"][1];
+    assert_eq!(research["documents"], 2);
+    assert_eq!(research["children"][0]["path"], "Research/AI");
+    assert_eq!(research["children"][0]["documents"], 2);
+    assert_eq!(research["children"][0]["children"][0]["name"], "LLMs");
+
+    // Labels are each user's own: bob's don't show up for alice, even on a document he shares.
+    t.tool(
+        &bob,
+        "share_document",
+        json!({ "slug": "bobs", "add_users": ["alice"] }),
+    )
+    .await;
+    let all = t.tool(&alice, "list_documents", json!({})).await;
+    assert_eq!(labels_of(&all, "bobs"), json!([]));
+    let tree = t.tool(&alice, "list_labels", json!({})).await;
+    assert!(!tree.to_string().contains("secret"));
+    assert!(slugs(&filter("research/secret").await).is_empty());
+    let got = t.tool(&alice, "get_document", json!({ "slug": "bobs" })).await;
+    assert_eq!(got["labels"], json!([]));
+    let err = t
+        .tool_error(
+            &alice,
+            "set_document_labels",
+            json!({ "document": "bobs", "labels": ["mine"] }),
+        )
+        .await;
+    assert!(err.contains("only the owner"), "{err}");
+    let err = t
+        .tool_error(
+            &alice,
+            "publish_document",
+            json!({ "slug": "bobs", "labels": ["mine"], "pages": page("x") }),
+        )
+        .await;
+    assert!(err.contains("taken by another user"), "{err}");
+    let bobs = t.tool(&bob, "list_documents", json!({ "label": "research" })).await;
+    assert_eq!(
+        slugs(&bobs),
+        ["bobs"],
+        "bob's labels are untouched and alice's are not his"
+    );
+    assert_eq!(labels_of(&bobs, "bobs"), json!(["research/secret"]));
+    let tree = t.tool(&bob, "list_labels", json!({})).await;
+    assert_eq!(tree["labels"][0]["path"], "research", "bob spells it his own way");
+    // A document bob can't see can't be labelled either.
+    t.tool(
+        &alice,
+        "publish_document",
+        json!({ "slug": "private", "pages": page("# P") }),
+    )
+    .await;
+    let err = t
+        .tool_error(
+            &bob,
+            "set_document_labels",
+            json!({ "document": "private", "labels": ["x"] }),
+        )
+        .await;
+    assert!(err.contains("no document"), "{err}");
+
+    // The JSON API does the same, with a bearer token or the session (and its CSRF token).
+    let res = t.api("GET", "/api/labels", Some(&alice), None).await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+    assert_eq!(res.json()["labels"][1]["path"], "Research");
+    let res = t
+        .api("GET", "/api/documents?label=research%2Fai", Some(&alice), None)
+        .await;
+    assert_eq!(slugs(&res.json()), ["llm", "survey"]);
+    assert_eq!(labels_of(&res.json(), "survey"), json!(["Research/AI"]));
+    let res = t.api("GET", "/api/documents?label=%20%2F", Some(&alice), None).await;
+    assert_eq!(res.status, StatusCode::BAD_REQUEST);
+    let res = t.api("GET", "/api/labels", None, None).await;
+    assert_eq!(res.status, StatusCode::UNAUTHORIZED);
+    let res = t.api("GET", "/api/labels", Some("dpat_wrong"), None).await;
+    assert_eq!(res.status, StatusCode::UNAUTHORIZED);
+    let res = t.get("/api/documents?label=ops", &alice_cookie).await;
+    assert_eq!(slugs(&res.json()), ["llm"]);
+    let res = t
+        .api(
+            "PUT",
+            "/api/documents/loose/labels",
+            Some(&alice),
+            Some(json!({ "labels": ["ops/oncall", "research/AI"] })),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+    assert_eq!(res.json()["labels"], json!(["ops/oncall", "Research/AI"]));
+    let res = t
+        .api(
+            "PUT",
+            "/api/documents/bobs/labels",
+            Some(&alice),
+            Some(json!({ "labels": ["x"] })),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::FORBIDDEN);
+    let res = t
+        .api(
+            "PUT",
+            "/api/documents/private/labels",
+            Some(&bob),
+            Some(json!({ "labels": ["x"] })),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::NOT_FOUND);
+    let res = t
+        .api(
+            "PUT",
+            "/api/documents/loose/labels",
+            Some(&alice),
+            Some(json!({ "labels": [""] })),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::BAD_REQUEST);
+    let home = t.get("/", &alice_cookie).await;
+    let csrf = csrf_of(&home.body);
+    let put = |csrf: &str| {
+        t.send(
+            Request::put("/api/documents/loose/labels")
+                .header(header::COOKIE, &alice_cookie)
+                .header("x-csrf-token", csrf)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json!({ "labels": [] }).to_string()))
+                .unwrap(),
+        )
+    };
+    assert_eq!(
+        put("wrong").await.status,
+        StatusCode::FORBIDDEN,
+        "the session needs CSRF"
+    );
+    let res = put(&csrf).await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+    assert_eq!(res.json()["labels"], json!([]));
+
+    // The home page: Folders by default, Labels when chosen, which is remembered.
+    assert!(home.body.contains(r#"href="/?view=labels""#));
+    assert!(
+        !home.body.contains(r#"data-folder-key="labels:"#),
+        "the Folders view by default"
+    );
+    assert!(home.body.contains(r#"class="label-chip" href="/?label=Research%2FAI""#));
+    let res = t.get("/?view=labels", &alice_cookie).await;
+    let cookie = res.headers[header::SET_COOKIE].to_str().unwrap().to_string();
+    assert!(cookie.starts_with("docs_view=labels"), "{cookie}");
+    let labels_cookie = format!("{alice_cookie}; docs_view=labels");
+    let home = t.get("/", &labels_cookie).await;
+    assert!(
+        home.body.contains(r#"data-folder-key="labels:Research""#),
+        "{}",
+        home.body
+    );
+    assert!(home.body.contains(r#"data-folder-key="labels:Research/AI/LLMs""#));
+    assert!(home.body.contains(r#"data-folder-key="unlabelled""#));
+    assert!(home.body.contains(r#"data-tree-store="docs.closedLabels""#));
+    // A document with several labels is under each of them.
+    assert_eq!(home.body.matches(r#"href="/d/llm/""#).count(), 2);
+    assert!(!home.body.contains("secret"));
+    let home = t.get("/?view=folders", &labels_cookie).await;
+    assert!(!home.body.contains(r#"data-folder-key="labels:"#));
+
+    // Clicking a label shows only documents with it (and labels under it).
+    let filtered = t.get("/?label=research/ai", &labels_cookie).await;
+    assert!(filtered.body.contains("Documents labelled"));
+    assert!(filtered.body.contains(r#"href="/d/survey/""#));
+    assert!(filtered.body.contains(r#"href="/d/llm/""#));
+    assert!(!filtered.body.contains(r#"href="/d/people/""#));
+    assert!(!filtered.body.contains(r#"href="/d/bobs/""#), "no shared documents");
+    assert_eq!(
+        filtered.body.matches(r#"href="/d/llm/""#).count(),
+        1,
+        "only under the labels the filter matches"
+    );
+    assert!(filtered.body.contains("data-tree-partial"));
+    let filtered = t.get("/?label=nope", &alice_cookie).await;
+    assert!(filtered.body.contains("None of your documents have this label."));
+
+    // The document page shows the labels, and its owner can add and remove them.
+    let doc = t.get("/d/survey/", &alice_cookie).await;
+    assert!(doc.body.contains(r#"action="/d/survey/-/labels""#));
+    assert!(
+        doc.body.contains(r#"<option value="Research">"#),
+        "parents are suggested"
+    );
+    assert!(doc.body.contains(r#"<option value="Research/AI/LLMs">"#));
+    let res = t
+        .post_form(
+            "/d/survey/-/labels",
+            &alice_cookie,
+            &[
+                ("csrf", &csrf),
+                ("action", "add"),
+                ("label", "OPS"),
+                ("next", "/d/survey/"),
+            ],
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::SEE_OTHER, "{}", res.body);
+    assert_eq!(res.location(), "/d/survey/");
+    let res = t
+        .post_form(
+            "/d/survey/-/labels",
+            &alice_cookie,
+            &[("csrf", &csrf), ("action", "remove"), ("label", "research/ai")],
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::SEE_OTHER);
+    let got = t.tool(&alice, "get_document", json!({ "slug": "survey" })).await;
+    assert_eq!(got["labels"], json!(["ops"]));
+    assert_eq!(got["latest_version"], 1);
+    let res = t
+        .post_form(
+            "/d/survey/-/labels",
+            &alice_cookie,
+            &[("csrf", &csrf), ("action", "add"), ("label", "//")],
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::BAD_REQUEST);
+    let res = t
+        .post_form(
+            "/d/survey/-/labels",
+            &alice_cookie,
+            &[("csrf", "wrong"), ("action", "add"), ("label", "x")],
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::FORBIDDEN);
+    let res = t
+        .post_form(
+            "/d/survey/-/labels",
+            &alice_cookie,
+            &[
+                ("csrf", &csrf),
+                ("action", "add"),
+                ("label", "x"),
+                ("next", "https://evil.example/"),
+            ],
+        )
+        .await;
+    assert_eq!(res.location(), "/", "only redirects on this site");
+    // Readers of a shared document don't see its owner's labels or the form.
+    let shared = t.get("/d/bobs/", &alice_cookie).await;
+    assert!(!shared.body.contains("secret"));
+    assert!(!shared.body.contains("/-/labels"));
+    let bob_csrf = csrf_of(&t.get("/", &bob_cookie).await.body);
+    let res = t
+        .post_form(
+            "/d/survey/-/labels",
+            &bob_cookie,
+            &[("csrf", &bob_csrf), ("action", "add"), ("label", "x")],
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::NOT_FOUND);
+
+    // The tools are advertised.
+    let tools = t.rpc(&alice, "tools/list", json!({})).await;
+    let names: Vec<&str> = tools["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"set_document_labels") && names.contains(&"list_labels"));
+}

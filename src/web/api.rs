@@ -1,16 +1,19 @@
-//! JSON endpoints used by the frontend to record feedback.
+//! JSON endpoints: feedback from the frontend, and documents and labels for the
+//! frontend and other clients (which sign in with a bearer token instead).
 
 use std::collections::HashMap;
 
 use axum::Json;
-use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{Path, Query, State};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::AppState;
 use crate::db::{self, User};
+use crate::labels;
+use crate::mcp::{self, ToolError};
 use crate::render::{self, Format, Options};
 use crate::web::auth::{Viewer, constant_time_eq};
 
@@ -47,6 +50,96 @@ fn authorize<'a>(viewer: &'a Viewer, headers: &HeaderMap) -> Result<&'a User, Ap
         ));
     }
     Ok(user)
+}
+
+/// The user of a bearer token (personal access token or OAuth access token), if one is sent.
+async fn bearer(state: &AppState, headers: &HeaderMap) -> Result<Option<User>, ApiError> {
+    let Some(token) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer ").or_else(|| v.strip_prefix("bearer ")))
+    else {
+        return Ok(None);
+    };
+    match db::bearer_user(&state.db, token.trim()).await? {
+        Some(u) if state.config.user_allowed(&u.login) => Ok(Some(u)),
+        _ => Err(ApiError(StatusCode::UNAUTHORIZED, "token is invalid or expired".into())),
+    }
+}
+
+/// A bearer token's user, or the signed-in user (who needs the CSRF token to change things).
+async fn api_user(state: &AppState, viewer: &Viewer, headers: &HeaderMap, write: bool) -> Result<User, ApiError> {
+    if let Some(u) = bearer(state, headers).await? {
+        return Ok(u);
+    }
+    if write {
+        return authorize(viewer, headers).cloned();
+    }
+    viewer
+        .user
+        .clone()
+        .ok_or_else(|| ApiError(StatusCode::UNAUTHORIZED, "sign in first".into()))
+}
+
+#[derive(Deserialize)]
+pub struct DocumentsQuery {
+    label: Option<String>,
+}
+
+/// `GET /api/documents[?label=research]`: what `list_documents` returns.
+pub async fn list_documents(
+    State(state): State<AppState>,
+    viewer: Viewer,
+    headers: HeaderMap,
+    Query(q): Query<DocumentsQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let user = api_user(&state, &viewer, &headers, false).await?;
+    let docs = match mcp::list_documents(&state.db, &user, q.label.as_deref()).await {
+        Ok(d) => d,
+        Err(ToolError(e)) => return Err(bad(e)),
+    };
+    Ok(Json(mcp::documents_json(&state.config.base_url, &user, &docs)))
+}
+
+/// `GET /api/labels`: what `list_labels` returns.
+pub async fn list_labels(
+    State(state): State<AppState>,
+    viewer: Viewer,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let user = api_user(&state, &viewer, &headers, false).await?;
+    let docs = db::list_documents(&state.db, &user).await?;
+    Ok(Json(mcp::labels_json(&user, &docs)))
+}
+
+#[derive(Deserialize)]
+pub struct SetLabels {
+    labels: Vec<String>,
+}
+
+/// `PUT /api/documents/{slug}/labels` with `{"labels": [...]}`: replace a document's labels.
+pub async fn set_labels(
+    State(state): State<AppState>,
+    viewer: Viewer,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+    Json(req): Json<SetLabels>,
+) -> Result<Json<Value>, ApiError> {
+    let user = api_user(&state, &viewer, &headers, true).await?;
+    let doc = db::get_document(&state.db, &slug, &user)
+        .await?
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "no such document".into()))?;
+    if doc.owner_id != user.id {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "only the owner can label this document".into(),
+        ));
+    }
+    let wanted = labels::normalize_labels(&req.labels).map_err(bad)?;
+    let stored = db::set_labels(&state.db, user.id, &doc.slug, &wanted)
+        .await?
+        .unwrap_or_default();
+    Ok(Json(json!({ "slug": doc.slug, "labels": stored })))
 }
 
 #[derive(Deserialize)]

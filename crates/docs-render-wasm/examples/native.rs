@@ -8,8 +8,15 @@ use std::path::Path;
 
 use docs_render::publish::{self, PageInput};
 use docs_render::render::{self, Format, Options};
-use docs_render::{components, paths, tools};
+use docs_render::{components, labels, paths, tools};
 use serde_json::{Value, json};
+
+fn label_json(nodes: &[labels::LabelNode]) -> Value {
+    nodes
+        .iter()
+        .map(|n| json!({ "name": n.name, "path": n.path, "documents": n.documents, "docs": n.docs, "children": label_json(&n.children) }))
+        .collect()
+}
 
 fn nav(nodes: &[paths::NavNode]) -> Value {
     nodes
@@ -98,6 +105,11 @@ fn main() {
             Ok(v) => json!({ "ok": v }),
             Err(e) => json!({ "error": e }),
         }).collect::<Vec<_>>(),
+        "labels": strs("labels").iter().map(|l| match labels::normalize_label(l) {
+            Ok(v) => json!({ "ok": v }),
+            Err(e) => json!({ "error": e }),
+        }).collect::<Vec<_>>(),
+        "labelTree": label_json(&labels::label_tree(&serde_json::from_value::<Vec<Vec<String>>>(cases["labelTree"].clone()).unwrap())),
         "links": cases["links"].as_array().unwrap().iter().map(|l| {
             paths::resolve_link(l[0].as_str().unwrap(), l[1].as_str().unwrap())
                 .map(|(path, suffix)| json!({ "path": path, "suffix": suffix }))
