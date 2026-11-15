@@ -1,0 +1,111 @@
+import { Effect, Schema } from "effect"
+import { pluginCall } from "@huntaway/plugin"
+import type { PluginCall } from "@huntaway/plugin"
+import type { Docs } from "./docs.ts"
+import { Comment } from "./repo.ts"
+import type { Hosted } from "./hosted.ts"
+
+// What the plugin's pages call (`huntaway.call(method, payload)` in their frames, over the board's `plugins.call`):
+// changing documents and comments, and the profile's connection to a hosted docs site. All need `operate`.
+
+const Where = { profile: Schema.String, slug: Schema.String }
+const Ok = Schema.Struct({ ok: Schema.Boolean })
+const ok = { ok: true }
+const Anything = Schema.Unknown
+
+/** Labels as the page's field gives them: comma-separated. */
+const labelsOf = (raw: string) =>
+  raw
+    .split(",")
+    .map((l) => l.trim())
+    .filter((l) => l !== "")
+
+export const makeCalls = (docs: Docs, hosted: Hosted): Readonly<Record<string, PluginCall>> => ({
+  "doc.labels": pluginCall({
+    scope: "operate",
+    payload: Schema.Struct({ ...Where, labels: Schema.String }),
+    success: Ok,
+    handle: ({ profile, slug, labels }) => Effect.as(docs.update(profile, slug, { labels: labelsOf(labels) }), ok),
+  }),
+  "doc.move": pluginCall({
+    scope: "operate",
+    payload: Schema.Struct({ ...Where, folder: Schema.String }),
+    success: Ok,
+    handle: ({ profile, slug, folder }) => Effect.as(docs.update(profile, slug, { folder }), ok),
+  }),
+  "doc.delete": pluginCall({
+    scope: "operate",
+    payload: Schema.Struct(Where),
+    success: Ok,
+    handle: ({ profile, slug }) => Effect.as(docs.delete(profile, slug), ok),
+  }),
+  "folder.rename": pluginCall({
+    scope: "operate",
+    payload: Schema.Struct({ profile: Schema.String, from: Schema.String, to: Schema.String }),
+    success: Schema.Struct({ moved: Schema.Array(Schema.String) }),
+    handle: ({ profile, from, to }) => docs.renameFolder(profile, from, to),
+  }),
+  "comment.add": pluginCall({
+    scope: "operate",
+    payload: Schema.Struct({
+      ...Where,
+      version: Schema.Int,
+      page: Schema.String,
+      quote: Schema.String,
+      prefix: Schema.String,
+      suffix: Schema.String,
+      comment: Schema.String,
+    }),
+    success: Comment,
+    handle: ({ profile, slug, ...c }) => docs.addComment(profile, slug, c),
+  }),
+  "comment.update": pluginCall({
+    scope: "operate",
+    payload: Schema.Struct({ ...Where, id: Schema.Int, comment: Schema.String }),
+    success: Comment,
+    handle: ({ profile, slug, id, comment }) => docs.updateComment(profile, slug, id, comment),
+  }),
+  "comment.delete": pluginCall({
+    scope: "operate",
+    payload: Schema.Struct({ ...Where, id: Schema.Int }),
+    success: Ok,
+    handle: ({ profile, slug, id }) => Effect.as(docs.deleteComment(profile, slug, id), ok),
+  }),
+  "comments.send": pluginCall({
+    scope: "operate",
+    payload: Schema.Struct(Where),
+    success: Schema.Struct({ sent: Schema.Int, task: Schema.Struct({ id: Schema.String, key: Schema.String, title: Schema.String }) }),
+    handle: ({ profile, slug }) => docs.sendComments(profile, slug),
+  }),
+  "site.start": pluginCall({
+    scope: "operate",
+    payload: Schema.Struct({ profile: Schema.String, site: Schema.String }),
+    success: Anything,
+    handle: ({ profile, site }) => Effect.andThen(docs.profileOf(profile), hosted.startDevice(profile, site)),
+  }),
+  "site.cancel": pluginCall({
+    scope: "operate",
+    payload: Schema.Struct({ profile: Schema.String }),
+    success: Anything,
+    handle: ({ profile }) => hosted.cancelDevice(profile),
+  }),
+  "site.token": pluginCall({
+    scope: "operate",
+    payload: Schema.Struct({ profile: Schema.String, site: Schema.String, token: Schema.String }),
+    success: Anything,
+    handle: ({ profile, site, token }) => Effect.andThen(docs.profileOf(profile), hosted.connectToken(profile, site, token)),
+  }),
+  "site.disconnect": pluginCall({
+    scope: "operate",
+    payload: Schema.Struct({ profile: Schema.String }),
+    success: Anything,
+    handle: ({ profile }) => hosted.disconnect(profile),
+  }),
+  "site.publish": pluginCall({
+    scope: "operate",
+    payload: Schema.Struct({ ...Where, version: Schema.Int, remote_slug: Schema.String, confirmed: Schema.optionalKey(Schema.Boolean) }),
+    success: Anything,
+    handle: ({ profile, slug, version, remote_slug, confirmed }) =>
+      Effect.flatMap(docs.docOf(profile, slug), (d) => hosted.publish(profile, d, version, { slug: remote_slug, ask: confirmed !== true })),
+  }),
+})

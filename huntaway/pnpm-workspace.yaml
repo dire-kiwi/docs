@@ -1,0 +1,7 @@
+# Only for working on the plugin here: the renderer is the one built from this repository
+# (crates/docs-render-wasm/build.sh), not the release the published package depends on.
+overrides:
+  "@dire-kiwi/docs-render": "link:../target/npm/docs-render"
+allowBuilds:
+  esbuild: true
+  sharp: true

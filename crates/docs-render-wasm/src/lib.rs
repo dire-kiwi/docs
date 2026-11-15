@@ -149,6 +149,17 @@ export interface ValidatedPage extends ValidPage {
   warnings: string[];
 }
 
+/** An image of a publish that passed validatePublish: recognised, not yet converted. */
+export interface ImageUpload {
+  /** Normalised name pages refer to it by. */
+  name: string;
+  /** How errors name it: `image "images/chart.png"` or `inline image 2 on page "plan"`. */
+  label: string;
+  format: "png" | "jpeg" | "webp" | "gif" | "avif";
+  /** Base64 of the uploaded bytes, to convert to AVIF. */
+  data: string;
+}
+
 export interface PageWarning {
   page: string;
   warning: string;
@@ -464,6 +475,53 @@ pub fn validate_pages(#[wasm_bindgen(unchecked_param_type = "PageInput[]")] page
         "pages": pages.iter().map(valid_json).collect::<Vec<_>>(),
         "warnings": warnings,
     })))
+}
+
+/// Check the pages and images of a publish the way publish_document does: `validatePages`, plus
+/// the `images` (names, base64, formats, duplicates) and the inline `data:` images taken out of
+/// the pages, at most 200 in all. The images are recognised but not converted: convert each to
+/// AVIF and check its size with `imageTooLargeError`. Throws the message publish_document would return.
+#[wasm_bindgen(
+    js_name = validatePublish,
+    unchecked_return_type = "{ pages: ValidPage[]; images: ImageUpload[]; warnings: PageWarning[] }"
+)]
+pub fn validate_publish(
+    #[wasm_bindgen(unchecked_param_type = "PageInput[]")] pages: JsValue,
+    #[wasm_bindgen(unchecked_param_type = "ImageInput[]")] images: JsValue,
+) -> JsResult<JsValue> {
+    use base64::Engine;
+    let input: Vec<PageInput> = from_js(&pages, "pages")?;
+    let image_input: Vec<publish::ImageInput> = from_js(&images, "images")?;
+    let v = publish::validate_publish(input, image_input).map_err(err)?;
+    Ok(to_js(&json!({
+        "pages": v.pages.iter().map(valid_json).collect::<Vec<_>>(),
+        "images": v.images.iter().map(|im| json!({
+            "name": im.name,
+            "label": im.label,
+            "format": im.format.as_str(),
+            "data": base64::engine::general_purpose::STANDARD.encode(&im.data),
+        })).collect::<Vec<_>>(),
+        "warnings": v.warnings,
+    })))
+}
+
+/// The error publish_document reports for an image whose bytes can't be decoded.
+#[wasm_bindgen(js_name = imageUnreadableError)]
+pub fn image_unreadable_error(
+    #[wasm_bindgen(unchecked_param_type = "string")] subject: JsValue,
+    #[wasm_bindgen(unchecked_param_type = "string")] detail: JsValue,
+) -> JsResult<String> {
+    Ok(images::unreadable_error(&string(&subject, "subject")?, &string(&detail, "detail")?))
+}
+
+/// The error publish_document reports for a version with more than 200 images.
+#[wasm_bindgen(js_name = imageTooManyError)]
+pub fn image_too_many_error(#[wasm_bindgen(unchecked_param_type = "number")] count: JsValue) -> JsResult<String> {
+    let n = count
+        .as_f64()
+        .filter(|n| *n >= 0.0)
+        .ok_or_else(|| err(format!("count must be a number, not {}", type_name(&count))))?;
+    Ok(images::too_many_error(n as usize))
 }
 
 /// Take the inline `data:image/<type>;base64,` images out of a page as publish_document does
