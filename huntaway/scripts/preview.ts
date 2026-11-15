@@ -7,9 +7,10 @@ import { mkdirSync } from "node:fs"
 import { createServer } from "node:http"
 import { NodeFileSystem, NodePath } from "@effect/platform-node"
 import { SqliteClient } from "@effect/sql-sqlite-node"
-import { Effect, Layer, ManagedRuntime, Option } from "effect"
+import { Effect, Layer, ManagedRuntime, Option, Scope } from "effect"
 import { FetchHttpClient } from "effect/http"
 import { SqlClient } from "effect/sql"
+import sharp from "sharp"
 import { PluginError, PluginHost, PluginImport } from "@huntaway/plugin"
 import type { CallContext, PluginHostShape, PluginTask } from "@huntaway/plugin"
 import plugin, { makeParts } from "../src/index.ts"
@@ -52,15 +53,19 @@ const parts = await runtime.runPromise(
       yield* m.run.pipe(Effect.provideService(PluginImport, { tables: [], rows: () => Effect.succeed([]) }))
       yield* sql`INSERT INTO migrations (name) VALUES (${m.name})`
     }
-    return yield* makeParts().pipe(Effect.provideService(PluginHost, host))
-  }).pipe(Effect.scoped, Effect.orDie),
+    // The plugin's background work (a hosted sign-in's polling) lasts as long as the server, as on the board.
+    return yield* makeParts().pipe(Effect.provideService(PluginHost, host), Effect.provideService(Scope.Scope, yield* Scope.make()))
+  }).pipe(Effect.orDie),
 )
 
 const call: CallContext = { run_id: "run-1", call_id: "call-1", task, project, profile, review: false }
 const tool = (name: string, args: Record<string, unknown>) => runtime.runPromise(parts.mcp!.tools.find((t) => t.tool.name === name)!.run(args, call))
 const listed = (await tool("list_documents", {})) as { structuredContent: { documents: Array<unknown> } }
 if (listed.structuredContent.documents.length === 0) {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="480" height="160"><rect width="480" height="160" rx="12" fill="#7c7cf8"/><text x="240" y="95" font-size="40" text-anchor="middle" fill="#fff" font-family="sans-serif">A chart</text></svg>`
+  const chart = (await sharp(Buffer.from(svg)).png().toBuffer()).toString("base64")
   await tool("publish_document", {
+    images: [{ name: "images/chart.png", data: chart }],
     title: "Preview",
     message: "A sample to look at",
     labels: ["samples"],
@@ -69,7 +74,7 @@ if (listed.structuredContent.documents.length === 0) {
         path: "index.mdx",
         content:
           "# Preview\n\nSelect some of this text and comment on it: the comment is saved when you click away, and shows beside the text.\n\n" +
-          '<Callout type="tip">Pages render with the hosted site\'s renderer.</Callout>\n\n## A table\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\nSee [the plan](plan/phase-1.md).\n\n<Approval />\n',
+          '<Callout type="tip">Pages render with the hosted site\'s renderer.</Callout>\n\n![A chart](images/chart.png)\n\n## A table\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\nSee [the plan](plan/phase-1.md).\n\n<Approval />\n',
       },
       { path: "plan/phase-1", content: "# Phase 1\n\nBack to [the overview](../index.md).\n\n```ts\nconst x = 1\n```\n" },
     ],

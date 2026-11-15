@@ -575,7 +575,8 @@ export const makeHosted = Effect.fnUntraced(function* (deps: HostedDeps) {
       },
       yield* nowIso,
     )
-    yield* host.emit({ topic: "documents", profile_id: profile, data: { slug: d.slug }, reload: true })
+    // Not a reload: the page that published it shows the outcome (and its warnings), which a reload would clear.
+    yield* host.emit({ topic: "documents", profile_id: profile, data: { slug: d.slug, published: true } })
     const row = yield* repo.published(d.id, c.site_url)
     if (row === null) return yield* Effect.die(new Error("a publish just recorded isn't there"))
     const warnings = prop(out, "warnings")

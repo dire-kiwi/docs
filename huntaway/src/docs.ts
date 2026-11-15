@@ -204,12 +204,24 @@ export const makeDocs = (deps: DocsDeps) => {
       const path = rawPath === "" ? "index" : yield* Effect.mapError(rendered(() => lib.normalizePath(rawPath)), (e) => PluginError.invalid(e.message))
       const p = pages.find((x) => x.path === path) ?? pages.find((x) => x.path === `${path}/index`) ?? (rawPath === "" ? pages[0] : undefined)
       if (p === undefined) return yield* PluginError.notFound(`version ${v.number} has no page ${quoted(path)}`)
-      const images: Record<string, string> = {}
-      for (const im of yield* repo.imageRefs(v.id)) {
-        const data = yield* repo.imageData(d.profile_id, im.sha256)
-        if (data !== null) images[im.name] = `data:image/avif;base64,${toBase64(data)}`
-      }
       const base = docBase(d.profile_id, d.slug, number)
+      // Only the images this page shows go in it (a version may have 200 of up to 500 KB each).
+      const images: Record<string, string> = {}
+      const refs = yield* repo.imageRefs(v.id)
+      if (refs.length > 0) {
+        const srcs = Result.getOrElse(
+          Result.try(() => lib.render(p.source, p.format, { pagePath: p.path, baseUrl: base }).imageSrcs),
+          () => [],
+        )
+        const byName = new Map(refs.map((im) => [im.name, im.sha256]))
+        for (const src of srcs) {
+          const name = lib.imageCandidates(p.path, src).find((n) => byName.has(n))
+          const sha = name === undefined ? undefined : byName.get(name)
+          if (name === undefined || sha === undefined || name in images) continue
+          const data = yield* repo.imageData(d.profile_id, sha)
+          if (data !== null) images[name] = `data:image/avif;base64,${toBase64(data)}`
+        }
+      }
       const shown = Result.try({ try: () => lib.render(p.source, p.format, { pagePath: p.path, baseUrl: base, images }), catch: renderMessage })
       const r = Result.getOrNull(shown)
       const page: RenderedPage = {

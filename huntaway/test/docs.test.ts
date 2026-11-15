@@ -152,6 +152,8 @@ describe("images", () => {
         assert.strictEqual(stored[0]?.n, 1)
         const page = yield* h.page("p1/d/pics/")
         assert.match(page.html, /<img src="data:image\/avif;base64,/)
+        // A page carries only the images it shows.
+        assert.notInclude((yield* h.page("p1/d/pics/other")).html, "data:image/avif")
         // A merge that changes another page keeps them; one that drops the page that shows them doesn't.
         const merged = yield* h.ok("publish_document", { slug: "pics", mode: "merge", pages: [{ path: "other", content: "# Other 2" }] })
         assert.strictEqual(merged.images.length, 2)
