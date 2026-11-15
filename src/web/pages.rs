@@ -677,36 +677,23 @@ async fn show_page(
                         a href={ (doc_base(&doc.slug, None)) (canonical) } { "Go to the latest version (v" (doc.latest_version) ")" }
                     }
                 }
-                @match &rendered {
-                    Ok(r) => {
-                        @for w in &r.warnings { div.render-warning { "⚠ " (w) } }
-                        article.doc-content data-version-id=(version.id) data-page=(page.path) {
-                            @if !r.has_h1 { h1 { (page.title) } }
-                            (PreEscaped(&r.html))
-                        }
-                    }
-                    Err(e) => {
-                        div.render-error { "This page could not be rendered: " (e) }
-                        pre { code { (page.source) } }
-                    }
-                }
-                section.selections #selections data-version-id=(version.id) data-page=(page.path) {
-                    h2 { "Comments on this page" }
-                    p.muted.hint { "Select any text above to quote it and leave a comment for the agent." }
-                    ol.selection-list {
-                        @for s in &selections {
-                            li.selection data-id=(s.id) data-quote=(s.quote) data-prefix=(s.prefix) data-suffix=(s.suffix) {
-                                blockquote { (s.quote) }
-                                @if !s.comment.is_empty() { p { (s.comment) } }
-                                footer {
-                                    span { (s.user) " · " (time(s.created_at)) }
-                                    @if s.user_id == user.id {
-                                        button.link.delete-selection type="button" { "Delete" }
-                                    }
+                div.doc-body.has-comments[!selections.is_empty()] {
+                    div.doc-text {
+                        @match &rendered {
+                            Ok(r) => {
+                                @for w in &r.warnings { div.render-warning { "⚠ " (w) } }
+                                article.doc-content data-version-id=(version.id) data-page=(page.path) {
+                                    @if !r.has_h1 { h1 { (page.title) } }
+                                    (PreEscaped(&r.html))
                                 }
+                            }
+                            Err(e) => {
+                                div.render-error { "This page could not be rendered: " (e) }
+                                pre { code { (page.source) } }
                             }
                         }
                     }
+                    (comment_rail(&selections, user.id))
                 }
             }
             aside.doc-aside {
@@ -737,6 +724,27 @@ async fn show_page(
         body,
     )
     .into_response())
+}
+
+/// Comments on the page's text, shown as bubbles beside it (placed next to their
+/// quotes by the frontend), or under the page on narrow screens.
+fn comment_rail(selections: &[db::Selection], user_id: i64) -> Markup {
+    html! {
+        div.comment-rail #comments aria-label="Comments" {
+            @for s in selections {
+                div.comment-bubble.quote-only[s.comment.is_empty()] data-id=(s.id) data-quote=(s.quote) data-prefix=(s.prefix) data-suffix=(s.suffix) {
+                    blockquote { (s.quote) }
+                    @if !s.comment.is_empty() { p { (s.comment) } }
+                    footer {
+                        span { (s.user) " · " (time(s.created_at)) }
+                        @if s.user_id == user_id {
+                            button.link.delete-selection type="button" { "Delete" }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// The document's labels, which its owner can add to and remove from (with
