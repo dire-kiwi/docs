@@ -77,6 +77,12 @@ export const makeCalls = (docs: Docs, hosted: Hosted): Readonly<Record<string, P
     success: Schema.Struct({ sent: Schema.Int, task: Schema.Struct({ id: Schema.String, key: Schema.String, title: Schema.String }) }),
     handle: ({ profile, slug }) => docs.sendComments(profile, slug),
   }),
+  "site.status": pluginCall({
+    scope: "read",
+    payload: Schema.Struct({ profile: Schema.String }),
+    success: Anything,
+    handle: ({ profile }) => Effect.andThen(docs.profileOf(profile), hosted.status(profile)),
+  }),
   "site.start": pluginCall({
     scope: "operate",
     payload: Schema.Struct({ profile: Schema.String, site: Schema.String }),

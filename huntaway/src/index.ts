@@ -25,9 +25,10 @@ import { docsTools, INSTRUCTIONS } from "./tools.ts"
 // their text for the agent, and publish them on to a hosted docs site. Its data is in the plugin's own SQLite database
 // on each host, copied from the board's built-in documents the first time it runs.
 
-export const VERSION = "0.1.0"
-
 const require = createRequire(import.meta.url)
+
+/** The package's version (package.json is beside src/ and dist/ alike). */
+export const VERSION: string = (require("../package.json") as { readonly version: string }).version
 
 /** The reader styles and the page script, read once as the plugin starts. */
 const loadAssets = Effect.gen(function* () {

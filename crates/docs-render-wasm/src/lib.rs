@@ -511,7 +511,10 @@ pub fn image_unreadable_error(
     #[wasm_bindgen(unchecked_param_type = "string")] subject: JsValue,
     #[wasm_bindgen(unchecked_param_type = "string")] detail: JsValue,
 ) -> JsResult<String> {
-    Ok(images::unreadable_error(&string(&subject, "subject")?, &string(&detail, "detail")?))
+    Ok(images::unreadable_error(
+        &string(&subject, "subject")?,
+        &string(&detail, "detail")?,
+    ))
 }
 
 /// The error publish_document reports for a version with more than 200 images.

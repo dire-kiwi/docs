@@ -73,10 +73,9 @@ document.addEventListener("click", (e) => {
   }
 })
 
-document.addEventListener("submit", async (e) => {
-  const form = e.target
-  if (!(form instanceof HTMLFormElement) || !form.dataset.call) return
-  e.preventDefault()
+// The frame is sandboxed without allow-forms, so a form never submits: its button (or Enter in one of its fields) runs it.
+const submit = async (form: HTMLFormElement) => {
+  if (!form.dataset.call || form.dataset.busy === "yes") return
   const error = form.querySelector<HTMLElement>(".error")
   const result = form.querySelector<HTMLElement>(".publish-result")
   const buttons = [...form.querySelectorAll("button")]
@@ -84,6 +83,7 @@ document.addEventListener("submit", async (e) => {
   for (const [k, v] of new FormData(form)) payload[k] = String(v)
   if (form.dataset.confirmed === "yes") payload.confirmed = true
   if (error) error.textContent = ""
+  form.dataset.busy = "yes"
   for (const b of buttons) b.disabled = true
   try {
     const out = (await bridge.call(form.dataset.call, payload)) as Record<string, unknown> | null
@@ -113,9 +113,25 @@ document.addEventListener("submit", async (e) => {
   } catch (err) {
     if (error) error.textContent = messageOf(err)
   } finally {
+    form.dataset.busy = ""
     for (const b of buttons) b.disabled = false
   }
+}
+document.addEventListener("click", (e) => {
+  const button = e.target instanceof Element ? e.target.closest("button") : null
+  const form = button?.closest<HTMLFormElement>("form[data-call]")
+  if (!button || !form || button.type !== "submit") return
+  e.preventDefault()
+  void submit(form)
 })
+document.addEventListener("keydown", (e) => {
+  const input = e.target instanceof HTMLInputElement ? e.target : null
+  const form = input?.closest<HTMLFormElement>("form[data-call]")
+  if (e.key !== "Enter" || !form) return
+  e.preventDefault()
+  void submit(form)
+})
+document.addEventListener("submit", (e) => e.preventDefault())
 
 // The publish form forgets the site's answer when the slug changes.
 document.addEventListener("input", (e) => {

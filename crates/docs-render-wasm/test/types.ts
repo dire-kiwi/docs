@@ -1,5 +1,5 @@
 // Compiled (not run) by test.sh: the published types accept the documented calls.
-import init, { extractInlineImages, imageLimits, labelTree, navTree, normalizeFolder, normalizeLabels, render, resolveLink, toolDefinitions, validatePage, validatePages } from "@dire-kiwi/docs-render";
+import init, { extractInlineImages, imageLimits, labelTree, navTree, normalizeFolder, normalizeLabels, render, resolveLink, toolDefinitions, validatePage, validatePages, validatePublish } from "@dire-kiwi/docs-render";
 
 await init();
 const full = render("x", "mdx", { pagePath: "plan/a", baseUrl: "/d/x/", answers: { q: 1 } });
@@ -21,3 +21,4 @@ const limit: number = imageLimits().maxImageBytes;
 const withImages = render("x", "md", { pagePath: "a", baseUrl: "/", images: { "a.png": "/a.avif" } }).imageSrcs;
 export { extracted, limit, withImages };
 export { html, fields, title, pages, warnings, nav, suffix, schema, folder, labels, counts };
+export const publishable: string = validatePublish([{ path: "index", content: "x" }], [{ name: "a.png", data: "" }]).images.map((i) => i.name + i.label + i.format + i.data).join();

@@ -3,7 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
-    tags: ["render-v*"]
+    tags: ["render-v*", "huntaway-v*"]
   pull_request:
 
 permissions:
@@ -64,6 +64,23 @@ jobs:
           name: docs-render-npm
           path: target/npm/*.tgz
           if-no-files-found: error
+      # The Huntaway plugin, on the renderer just built (huntaway/pnpm-workspace.yaml links it).
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - name: Huntaway plugin
+        working-directory: huntaway
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm typecheck
+          pnpm test
+          pnpm build
+          pnpm pack --pack-destination ../target/huntaway
+      - uses: actions/upload-artifact@v4
+        with:
+          name: docs-huntaway-npm
+          path: target/huntaway/*.tgz
+          if-no-files-found: error
 
   # On a render-v<version> tag, attach the package to a GitHub release, so it
   # can be installed from its URL without a registry or token.
@@ -91,3 +108,30 @@ jobs:
           url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${tgz}"
           gh release create "$TAG" "$tgz" --repo "$GITHUB_REPOSITORY" --title "@dire-kiwi/docs-render ${version}" \
             --notes "Install with: \`pnpm add ${url}\` (or \`npm install ${url}\`). See crates/docs-render-wasm/README.md for the API."
+
+  # On a huntaway-v<version> tag, attach the Huntaway plugin the same way. It depends on the renderer's release
+  # (huntaway/package.json), so release a new renderer version first.
+  release-huntaway:
+    if: startsWith(github.ref, 'refs/tags/huntaway-v')
+    needs: [test, wasm]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: docs-huntaway-npm
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#huntaway-v}"
+          tgz="dire-kiwi-docs-huntaway-${version}.tgz"
+          if [ ! -f "$tgz" ]; then
+            echo "tag $TAG does not match the plugin's version (huntaway/package.json): found $(ls *.tgz)" >&2
+            exit 1
+          fi
+          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${tgz}"
+          gh release create "$TAG" "$tgz" --repo "$GITHUB_REPOSITORY" --title "@dire-kiwi/docs-huntaway ${version}" \
+            --notes "The docs plugin for Huntaway. Install in apps/server with: \`pnpm add ${url}\`. See huntaway/README.md."

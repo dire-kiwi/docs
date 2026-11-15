@@ -24,7 +24,8 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p client/tsconfig.json",
-    "test": "node scripts/build.mjs --client && vitest run"
+    "test": "node scripts/build.mjs --client && vitest run",
+    "preview": "node scripts/build.mjs --client && node scripts/preview.ts"
   },
   "dependencies": {
     "@dire-kiwi/docs-render": "https://github.com/dire-kiwi/docs/releases/download/render-v0.4.0/dire-kiwi-docs-render-0.4.0.tgz",

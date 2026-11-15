@@ -5,3 +5,7 @@ overrides:
 allowBuilds:
   esbuild: true
   sharp: true
+# pnpm 10 (CI) reads this one; pnpm 11 and later read allowBuilds.
+onlyBuiltDependencies:
+  - esbuild
+  - sharp
