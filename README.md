@@ -47,7 +47,7 @@ claude mcp add --transport http docs http://localhost:3000/mcp
 
 The client opens a browser to sign in and approve access. Alternatively, create a personal access token under **Access** and pass it as `--header "Authorization: Bearer <token>"`.
 
-Agents on [Huntaway](https://github.com/dire-kiwi/huntaway) have a `docs` MCP server of the board's own, with the same tools. See [docs/huntaway/](docs/huntaway/index.mdx) for using it, and for publishing from the board to this site.
+Agents on [Huntaway](https://github.com/dire-kiwi/huntaway) have a `docs` MCP server on the board, with the same tools. It comes from this repository's Huntaway plugin, [`huntaway/`](huntaway/README.md) (`@dire-kiwi/docs-huntaway`), which keeps the board's documents with this site's renderer and publishes them on to this site. See [docs/huntaway/](docs/huntaway/index.mdx) for using it.
 
 #### Server-side clients (device flow)
 
@@ -125,6 +125,7 @@ Merges to `main` are deployed to https://docs.nest.dire.nz (a kiwi-nest cluster)
 cargo test --workspace         # unit tests and HTTP/MCP/OAuth end-to-end tests
 cargo clippy --workspace --all-targets
 cd frontend && pnpm exec vp check && pnpm exec vp test
+cd .. && crates/docs-render-wasm/build.sh && cd huntaway && pnpm install && pnpm typecheck && pnpm test   # the Huntaway plugin
 ```
 
 Layout:
@@ -137,6 +138,7 @@ Layout:
   - `publish.rs`: the page checks `publish_document` runs
   - `tools.rs`: MCP tool definitions and server instructions
 - `crates/docs-render-wasm/`: the renderer as the npm package `@dire-kiwi/docs-render` (WebAssembly for Node and browsers). See [its README](crates/docs-render-wasm/README.md).
+- `huntaway/`: the docs plugin for Huntaway (`@dire-kiwi/docs-huntaway`, TypeScript on the renderer's npm package). See [its README](huntaway/README.md).
 - `src/mcp.rs`: MCP server and tool handlers
 - `src/oauth.rs`: OAuth authorization server for MCP clients
 - `src/web/`: pages, sign-in and the JSON API (feedback, documents and labels)

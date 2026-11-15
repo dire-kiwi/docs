@@ -24,3 +24,5 @@ frontend/dist/
 *.db
 *.db-shm
 *.db-wal
+huntaway/node_modules/
+huntaway/dist/

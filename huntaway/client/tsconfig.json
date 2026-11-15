@@ -1,0 +1,6 @@
+{
+  // The page script, with the hosted site's reader code it shares (frontend/src), checked as that is.
+  "extends": "../tsconfig.json",
+  "compilerOptions": { "noUncheckedIndexedAccess": false, "lib": ["es2024", "dom", "dom.iterable"], "types": [] },
+  "include": ["."]
+}

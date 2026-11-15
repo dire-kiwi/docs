@@ -1,0 +1,14 @@
+{
+  "name": "@huntaway/plugin",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A copy of Huntaway's plugin API (dire-kiwi/huntaway packages/plugin at 3758e66), for type checking and tests until Huntaway publishes it. The board's own copy is the one the plugin runs with.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "peerDependencies": {
+    "effect": "*"
+  }
+}

@@ -5,11 +5,11 @@ order: 1
 
 # Using docs from Huntaway
 
-[Huntaway](https://github.com/dire-kiwi/huntaway) is a kanban board where each task is worked by its own agent. Agents on it publish documents with a `docs` MCP server, and people read them on the board. Huntaway can also publish them on to a hosted docs site such as https://docs.nest.dire.nz, where they can be shared and commented on.
+[Huntaway](https://github.com/dire-kiwi/huntaway) is a kanban board where each task is worked by its own agent. Agents on it publish documents with a `docs` MCP server, and people read and comment on them on the board. They can also be published on to a hosted docs site such as https://docs.nest.dire.nz, where they can be shared.
 
-There are two parts:
+All of it is this repository's Huntaway plugin, [`@dire-kiwi/docs-huntaway`](https://github.com/dire-kiwi/docs/blob/main/huntaway/README.md), which the board runs. There are two parts:
 
-1. **The board's own `docs` MCP server.** Every agent run gets it. Documents are stored on the Huntaway host, under the profile of the run's task, and shown on the board's **Docs** page.
+1. **The `docs` MCP server.** Every agent run gets it. Documents are stored on the Huntaway host, in the plugin's own database, under the profile of the run's task, and shown on the board's **Docs** pages.
 2. **Publishing to a hosted site.** From the **Docs** page, a person connects the profile to a docs site and publishes a document's version there.
 
 [Components](components.mdx) shows every MDX component a page can use.
@@ -20,19 +20,23 @@ Each run has an MCP server named `docs`. In Claude Code its tools are `mcp__docs
 
 | Tool | What it does |
 |------|--------------|
-| `publish_document` | Create a document or publish a new version of one. Pass `pages` (`{ path, content, format?, title? }`) and optionally `slug`, `title` and `message`. `mode: "merge"` keeps the previous version's other pages, and `delete_paths` drops some of them. |
-| `list_documents` | The profile's documents, with each one's latest version and URL. |
-| `get_document` | A document's pages (paths, titles, URLs) and its version history. |
+| `publish_document` | Create a document or publish a new version of one. Pass `pages` (`{ path, content, format?, title? }`) and optionally `slug`, `title`, `message`, `folder`, `labels` and `images`. `mode: "merge"` keeps the previous version's other pages, and `delete_paths` drops some of them. |
+| `list_documents` | The profile's documents, with each one's folder, labels, latest version and URL; `label` lists only those with that label or one under it. |
+| `get_document` | A document's pages (paths, titles, URLs), images and version history. |
 | `read_page` | The Markdown/MDX source of one page, from the latest version or a given `version`. |
+| `move_document` | Move a document to another folder (only when the user asks). |
+| `set_document_labels`, `list_labels` | Replace a document's labels; the profile's labels as a tree, to reuse them. |
+| `get_feedback` | The comments people left on a document's text on the board. Pass `since: <cursor>` for only new ones. |
 | `list_components` | Reference for the MDX components (callouts, details, form fields). |
 
-They are the hosted server's tools, with the same schemas, checks, errors and warnings, because Huntaway runs the same renderer ([`@dire-kiwi/docs-render`](https://github.com/dire-kiwi/docs/blob/main/crates/docs-render-wasm/README.md)). A page that publishes on the board publishes the same way on the hosted site.
+They are the hosted server's tools, with the same schemas, checks, errors and warnings, because the plugin runs the same renderer ([`@dire-kiwi/docs-render`](https://github.com/dire-kiwi/docs/blob/main/crates/docs-render-wasm/README.md)). A page that publishes on the board publishes the same way on the hosted site.
 
 <Callout type="warning" title="What's different on the board">
 
-- **No feedback or sharing yet.** `get_feedback` and `share_document` aren't there. Form fields (`<Approval />`, `TextInput` and the rest) render read-only and collect no answers, so ask the user for a decision in the task's thread instead (Huntaway's `request_user_input`).
+- **No sharing, and no answers.** `share_document` isn't there. Form fields (`<Approval />`, `TextInput` and the rest) render read-only and collect no answers, so ask the user for a decision in the task's thread instead (Huntaway's `request_user_input`). `get_feedback` has the comments people leave on the text, and no form answers.
 - **Documents belong to the profile** of the run's task, not to a docs-site user. Slugs are unique per profile.
 - **URLs point at the board:** `<board>/docs/<profile id>/d/<slug>/`, with `-/v/<n>/` for a version. `<board>` is the host's _Public URL_ setting, or else its own address.
+- **Images are kept on the host** and shown inside the page, as the board's frame for plugin pages reaches no network.
 
 </Callout>
 
@@ -122,11 +126,15 @@ The components reference and a document's pages are long, and the agent working 
 2. The sub-agent calls `list_components` if it wants components, writes the pages, publishes them, and fixes any warnings.
 3. It returns only the URL, which the main agent gives to the user.
 
-The hosted server's instructions ask agents to work this way, so they do it without being told. The board's `docs` server has its own instructions, which are to say the same (HA-288).
+The hosted server's instructions ask agents to work this way, and so do the plugin's, so agents do it without being told.
 
-## For people: the board's Docs page
+## For people: the board's Docs pages
 
-Under the profile's **Assistant**, **Docs** lists the profile's documents with their latest version, when each was updated, and the task that published it. A document opens at `/docs/<profile>/d/<slug>/`, with its menu, the page and a version picker. A task's thread links each document it published.
+**Docs** in the board's menu lists the profile's documents by folder (rename a folder there) or by label, with their latest version, when each was updated, and the task that published it. A document opens at `/docs/<profile>/d/<slug>/`, with its menu, the page and a version picker, and **Labels**, **Move** and **Delete**. A task's page lists the documents it published, and Settings has a Docs section.
+
+### Commenting for the agent
+
+Select text on a page and choose **Comment**: write in the popup, and it's saved when you click away (Escape cancels). Comments show as bubbles beside the text they quote; **Edit** or **Delete** one there. **Send** puts the unsent comments in one message to the task that published the document's newest version, with a link to each, and the agent can read them any time with `get_feedback`. Editing a sent comment makes it unsent again.
 
 ### Publishing to a hosted docs site
 
@@ -138,7 +146,7 @@ Under the profile's **Assistant**, **Docs** lists the profile's documents with t
   The Huntaway host keeps the tokens and renews them, and the board only shows whether it's connected and as whom. **Disconnect** forgets the sign-in on the host. To end it on the site too, revoke the grant under **Access**.
 </Callout>
 
-Once a document is on the site, share it from its **Share** page there. Answers to form fields and comments are collected on the site, not on the board.
+Once a document is on the site, share it from its **Share** page there. Answers to form fields are collected on the site, not on the board, and comments left there stay there.
 
 <Details summary="Trying it against a local site">
 
@@ -147,6 +155,8 @@ Run `DOCS_DEV_LOGIN=1 cargo run` in a checkout of dire-kiwi/docs (after building
 </Details>
 
 ## Turning it off, or using the hosted server directly
+
+The plugin is part of the board's build: see [its README](https://github.com/dire-kiwi/docs/blob/main/huntaway/README.md) for installing and developing it. On its first run on a host, it copies the documents the board had built in.
 
 A project can turn off the board's `docs` server in its settings: deny `mcp__docs` under the project's skills and MCP servers. Its runs then have no `docs` server and aren't told about it.
 

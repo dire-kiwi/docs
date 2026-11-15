@@ -132,6 +132,31 @@ test("images: inline extraction, names and limits", () => {
   assert.ok(docs.toolDefinitions().find((t) => t.name === "publish_document").inputSchema.properties.images);
 });
 
+test("validatePublish: pages and images, as publish_document checks them", () => {
+  const png = Buffer.concat([Buffer.from("\x89PNG\r\n\x1a\n", "latin1"), Buffer.alloc(10)]).toString("base64");
+  const v = docs.validatePublish(
+    [{ path: "index", content: `# Hi\n\n![a](images/a.png) ![b](data:image/png;base64,${png})` }],
+    [{ name: "./images/a.png", data: png }],
+  );
+  assert.deepEqual(
+    v.images.map((im) => [im.name.replace(/[0-9a-f]{16}/, "<hash>"), im.label.replace(/[0-9a-f]{16}/, "<hash>"), im.format, im.data]),
+    [
+      ["images/a.png", 'image "images/a.png"', "png", png],
+      ["images/inline-<hash>.avif", 'inline image 1 on page "index"', "png", png],
+    ],
+  );
+  assert.match(v.pages[0].source, /!\[b\]\(images\/inline-[0-9a-f]{16}\.avif\)/);
+  assert.deepEqual(v.warnings, []);
+  assert.equal(
+    attempt(() => docs.validatePublish([{ path: "index", content: "x" }], [{ name: "a.png", data: png }, { name: "./a.png", data: png }])).error,
+    'image "a.png" is given more than once',
+  );
+  assert.equal(attempt(() => docs.validatePublish([{ path: "index", content: "x" }], [{ name: "a.png", data: "!!" }])).error, 'image "a.png" isn\'t valid base64');
+  assert.match(attempt(() => docs.validatePublish([{ path: "index" }], [])).error, /^invalid pages: missing field `content`/);
+  assert.equal(docs.imageTooManyError(201), "a version can have at most 200 images, not 201");
+  assert.equal(docs.imageUnreadableError('image "a.png"', "bad header"), 'image "a.png" couldn\'t be read: bad header');
+});
+
 test("bad arguments throw strings", () => {
   assert.deepEqual(attempt(() => docs.render("x", "html", { pagePath: "index", baseUrl: "/" })), {
     error: 'format must be md or mdx, not "html"',

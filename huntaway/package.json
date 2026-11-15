@@ -1,0 +1,52 @@
+{
+  "name": "@dire-kiwi/docs-huntaway",
+  "version": "0.1.0",
+  "description": "The docs plugin for Huntaway: documents agents publish on the board, with versions, folders, labels, images, comments and publishing to a hosted docs site.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dire-kiwi/docs.git",
+    "directory": "huntaway"
+  },
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p client/tsconfig.json",
+    "test": "node scripts/build.mjs --client && vitest run",
+    "preview": "node scripts/build.mjs --client && node scripts/preview.ts"
+  },
+  "dependencies": {
+    "@dire-kiwi/docs-render": "https://github.com/dire-kiwi/docs/releases/download/render-v0.4.0/dire-kiwi-docs-render-0.4.0.tgz",
+    "sharp": "^0.35.5"
+  },
+  "peerDependencies": {
+    "@huntaway/plugin": "*",
+    "effect": "^4.1.4"
+  },
+  "devDependencies": {
+    "@effect/platform-node": "4.1.4",
+    "@effect/sql-sqlite-node": "4.1.4",
+    "@effect/vitest": "4.1.4",
+    "@huntaway/plugin": "link:./vendor/huntaway-plugin",
+    "@types/node": "24.19.2",
+    "effect": "4.1.4",
+    "esbuild": "0.28.2",
+    "typescript": "7.0.2",
+    "vitest": "5.1.0"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}
