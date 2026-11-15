@@ -419,22 +419,6 @@ details.connect {
   background-color: var(--bg-mark);
 }
 
-.selections {
-  margin-top: 64px;
-  padding-top: 16px;
-  border-top: 1px solid var(--border);
-}
-
-.selections h2 {
-  font-size: 1.1em;
-  margin-bottom: 0;
-}
-
-.hint {
-  font-size: 0.9em;
-  margin-top: 4px;
-}
-
 .selection-list {
   list-style: none;
   padding: 0;
@@ -474,14 +458,23 @@ details.connect {
   text-decoration: line-through dotted;
 }
 
-.comment-button,
-.comment-popover {
+::highlight(doc-comment-active),
+::highlight(doc-comment-draft) {
+  background-color: color-mix(in srgb, var(--bg-mark), var(--warning) 40%);
+}
+
+/* The popup on selected text: a Comment button, then the comment box. */
+.comment-popup {
   position: absolute;
   z-index: 30;
+}
+
+.comment-start,
+.comment-editor {
   box-shadow: 0 4px 16px rgb(0 0 0 / 0.15);
 }
 
-.comment-button {
+.comment-start {
   background: var(--fg);
   color: var(--bg);
   border-color: var(--fg);
@@ -489,36 +482,136 @@ details.connect {
   padding: 4px 12px;
 }
 
-.comment-popover {
-  width: min(360px, calc(100vw - 16px));
+.comment-editor {
+  width: min(320px, calc(100vw - 16px));
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 12px;
+  padding: 10px;
 }
 
-.comment-popover blockquote {
-  margin: 0 0 8px;
-  padding-left: 10px;
-  border-left: 3px solid var(--bg-mark);
-  color: var(--fg-muted);
-  font-size: 0.9em;
-  max-height: 6em;
-  overflow: auto;
+.comment-editor textarea {
+  display: block;
+  resize: vertical;
 }
 
-.comment-popover .error {
+.comment-editor .error {
   color: var(--danger);
   font-size: 0.85em;
-  margin: 4px 0;
+  margin: 6px 0 0;
 }
 
-.comment-popover .error:empty {
+.comment-editor .error:empty {
   display: none;
 }
 
-.comment-popover .row {
-  margin-top: 8px;
+.comment-hint {
+  color: var(--fg-muted);
+  font-size: 0.78em;
+  margin: 6px 0 0;
+}
+
+/* Comments beside the page: bubbles placed next to their quotes (selection.ts). */
+.doc-body.has-comments {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 250px;
+  gap: 28px;
+}
+
+.doc-body:not(.has-comments) .comment-rail {
+  display: none;
+}
+
+.comment-rail {
+  position: relative;
+}
+
+.comment-bubble {
+  position: absolute;
+  left: 0;
+  right: 0;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  font-size: 0.88em;
+  cursor: pointer;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.08);
+  transition:
+    top 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.comment-bubble.active {
+  z-index: 1;
+  border-color: var(--fg-muted);
+  box-shadow: 0 4px 16px rgb(0 0 0 / 0.15);
+}
+
+.comment-bubble p {
+  margin: 0 0 4px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* The quote shows only when there's no comment, or it's no longer in the page. */
+.comment-bubble blockquote {
+  display: none;
+  margin: 0 0 4px;
+  padding-left: 8px;
+  border-left: 3px solid var(--bg-mark);
+  color: var(--fg-muted);
+  white-space: pre-wrap;
+  max-height: 6em;
+  overflow: hidden;
+}
+
+.comment-bubble.quote-only blockquote,
+.comment-bubble.orphaned blockquote {
+  display: block;
+}
+
+.comment-bubble.orphaned blockquote {
+  text-decoration: line-through dotted;
+}
+
+.comment-bubble footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 0.85em;
+  color: var(--fg-muted);
+}
+
+/* Room for the bubbles: a wider page, and no contents column when it's tight. */
+.doc-layout:has(.doc-body.has-comments) {
+  max-width: 1680px;
+}
+
+@media (min-width: 1101px) and (max-width: 1500px) {
+  .doc-layout:has(.doc-body.has-comments) {
+    grid-template-columns: 260px minmax(0, 1fr);
+  }
+  .doc-layout:has(.doc-body.has-comments) .doc-aside {
+    display: none;
+  }
+}
+
+/* Too narrow for a margin: the comments go under the page, in page order. */
+@media (max-width: 1000px) {
+  .doc-body.has-comments {
+    display: block;
+  }
+  .comment-rail {
+    margin-top: 48px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+    min-height: 0 !important;
+  }
+  .comment-bubble {
+    position: static;
+    margin-bottom: 10px;
+  }
 }
 
 [hidden] {
