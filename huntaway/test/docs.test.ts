@@ -264,15 +264,15 @@ describe("comments", () => {
         assert.deepStrictEqual(later.selections, [])
 
         // To the newest version's task: DOC-2.
-        const sent = yield* h.call("comments.send", where)
-        assert.deepStrictEqual(sent, { sent: 2, task: { id: "t2", key: "DOC-2", title: "Something else" } })
+        const sent = yield* h.call("feedback.send", where)
+        assert.deepStrictEqual(sent, { comments: 2, answers: 0, task: { id: "t2", key: "DOC-2", title: "Something else" } })
         assert.strictEqual(h.sent.length, 1)
         assert.strictEqual(h.sent[0]?.task, "t2")
         assert.include(h.sent[0]?.text ?? "", 'The user left 2 comments on the document "The plan" (slug `the-plan`):')
         assert.include(h.sent[0]?.text ?? "", `1. On version 1, page \`index\` (${BOARD}/docs/p1/d/the-plan/-/v/1/):\n\n> phase 1\n\nToo vague`)
         assert.include(h.sent[0]?.text ?? "", "(No comment: just the quote.)")
-        const again = yield* Effect.flip(h.call("comments.send", where))
-        assert.strictEqual(again.message, "every comment has been sent already")
+        const again = yield* Effect.flip(h.call("feedback.send", where))
+        assert.strictEqual(again.message, "every comment and answer has been sent already")
 
         // Editing one makes it unsent; deleting one is gone.
         const edited = yield* h.call("comment.update", { ...where, id: c.id, comment: "Clearer now?" })
@@ -281,6 +281,81 @@ describe("comments", () => {
         assert.strictEqual((yield* h.ok("get_feedback", { slug: "the-plan" })).selections.length, 1)
         const missing = yield* Effect.flip(h.call("comment.add", { ...where, version: 1, page: "nope", quote: "x", prefix: "", suffix: "", comment: "" }))
         assert.strictEqual(missing.reason, "not_found")
+      }),
+    ),
+  )
+})
+
+describe("answers", () => {
+  const form = {
+    title: "Questions",
+    pages: [
+      {
+        path: "index",
+        format: "mdx",
+        content: '# Questions\n\n<Select name="db" label="Which database?" options={["SQLite", "Postgres"]} />\n\n<TextArea name="notes" label="Anything else?" />\n\n<Approval />',
+      },
+    ],
+  }
+  it.effect("are saved for a version's page, shown in it, read with get_feedback, and sent to the task", () =>
+    withHarness({}, (h) =>
+      Effect.gen(function* () {
+        yield* h.ok("publish_document", form)
+        const where = { profile: "p1", slug: "questions", version: 1, page: "index" }
+        const first = yield* h.call("answer.save", { ...where, field: "notes", value: "Keep it small" })
+        assert.strictEqual(first.unsent_answers, 1)
+        yield* h.call("answer.save", { ...where, field: "db", value: "SQLite" })
+        // A newer answer replaces the older one.
+        const third = yield* h.call("answer.save", { ...where, field: "db", value: "Postgres" })
+        assert.strictEqual(third.unsent_answers, 2)
+        assert.isTrue(h.events.some((e) => e.topic === "answers"))
+
+        // The page shows them, and tells its script how many are unsent.
+        const page = yield* h.page("p1/d/questions/")
+        assert.match(page.html, /<option value="Postgres" selected/)
+        assert.include(page.html, "Keep it small</textarea>")
+        assert.include(page.html, '"unsent_answers":2')
+
+        const fb = yield* h.ok("get_feedback", { slug: "questions" })
+        assert.deepStrictEqual(
+          fb.responses.map((r: { field: string; label: string; value: unknown; version: number; page: string }) => [r.version, r.page, r.field, r.label, r.value]),
+          [
+            [1, "index", "db", "Which database?", "Postgres"],
+            [1, "index", "notes", "Anything else?", "Keep it small"],
+          ],
+        )
+
+        // Sent in the order the fields are on the page.
+        const sent = yield* h.call("feedback.send", { profile: "p1", slug: "questions" })
+        assert.deepStrictEqual(sent, { comments: 0, answers: 2, task: { id: "t1", key: "DOC-1", title: "Write the plan" } })
+        const text = h.sent[0]?.text ?? ""
+        assert.include(text, 'The user answered 2 questions on the document "Questions" (slug `questions`):')
+        assert.include(
+          text,
+          `On version 1, page \`index\` (${BOARD}/docs/p1/d/questions/-/v/1/):\n\n- Which database? (\`db\`): "Postgres"\n- Anything else? (\`notes\`): "Keep it small"`,
+        )
+        assert.strictEqual((yield* h.page("p1/d/questions/")).html.includes('"unsent_answers":0'), true)
+
+        // Changing an answer makes it unsent again; with a comment, both go in one message.
+        const changed = yield* h.call("answer.save", { ...where, field: "approval", value: { decision: "approve", comment: "Go" } })
+        assert.strictEqual(changed.unsent_answers, 1)
+        yield* h.call("comment.add", { profile: "p1", slug: "questions", version: 1, page: "index", quote: "Questions", prefix: "", suffix: "", comment: "Nice" })
+        assert.deepStrictEqual(yield* h.call("feedback.send", { profile: "p1", slug: "questions" }), {
+          comments: 1,
+          answers: 1,
+          task: { id: "t1", key: "DOC-1", title: "Write the plan" },
+        })
+        const both = h.sent[1]?.text ?? ""
+        assert.include(both, "The user left a comment and answered a question on the document")
+        assert.include(both, '- Do you approve this? (`approval`): {"decision":"approve","comment":"Go"}')
+
+        // Only the page's fields, and not too much.
+        const unknown = yield* Effect.flip(h.call("answer.save", { ...where, field: "nope", value: "x" }))
+        assert.strictEqual(unknown.message, 'page has no field "nope"')
+        const long = yield* Effect.flip(h.call("answer.save", { ...where, field: "notes", value: "x".repeat(100_001) }))
+        assert.strictEqual(long.message, "answer is too long")
+        const noPage = yield* Effect.flip(h.call("answer.save", { ...where, page: "nope", field: "db", value: "x" }))
+        assert.strictEqual(noPage.reason, "not_found")
       }),
     ),
   )

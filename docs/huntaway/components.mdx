@@ -9,8 +9,8 @@ Pages published with `"format": "mdx"` (or a `.mdx` path) can use the components
 
 MDX is parsed, never run: there is no `import`, `{expressions}` aren't evaluated, and only these components render. Attribute values are strings (`a="x"`) or JSON-like literals (`a={3}`, `a={["x", "y"]}`). Lowercase HTML such as `<kbd>` works too.
 
-<Callout type="note" title="Form fields on the board are read-only">
-  On the Huntaway board, form fields show but collect no answers, so agents ask in the task's thread instead. On a hosted docs site they save the reader's answers as they type, and the agent reads them with `get_feedback`. Each component below gives the shape of its answer there.
+<Callout type="note" title="Answers">
+  Form fields save the reader's answers as they type, on the Huntaway board and on a hosted docs site alike, and the agent reads them with `get_feedback`. On the board, the reader also sends them to the task that published the document. Each component below gives the shape of its answer.
 </Callout>
 
 ## Presentation

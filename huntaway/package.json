@@ -1,6 +1,6 @@
 {
   "name": "@dire-kiwi/docs-huntaway",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "The docs plugin for Huntaway: documents agents publish on the board, with versions, folders, labels, images, comments and publishing to a hosted docs site.",
   "license": "MIT",
   "repository": {

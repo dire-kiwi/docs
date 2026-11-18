@@ -78,7 +78,6 @@ ul.tree{list-style:none;margin:0;padding:0 0 0 14px} ul.tree.top{padding:0}
 .comment-hint{margin:4px 0 0;font-size:11.5px;color:var(--color-muted,#9a9aab)}
 ::highlight(doc-comment){background-color:color-mix(in srgb,#f59e0b 28%,transparent)}
 ::highlight(doc-comment-active),::highlight(doc-comment-draft){background-color:color-mix(in srgb,#f59e0b 55%,transparent)}
-.read-only-note{color:var(--color-muted,#9a9aab);font-style:italic}
 @media (max-width:900px){
   .doc{grid-template-columns:1fr} .doc-nav{border-right:0;border-bottom:1px solid var(--color-line-strong,#33333f)}
   .doc-body.has-comments{grid-template-columns:minmax(0,1fr)}

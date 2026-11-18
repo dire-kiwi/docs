@@ -78,7 +78,7 @@ export default definePlugin({
   id: "docs",
   name: "Docs",
   version: VERSION,
-  description: "Documents agents publish for you (reports, plans, research), with versions, folders, labels, images and comments, and publishing to a hosted docs site.",
+  description: "Documents agents publish for you (reports, plans, research), with versions, folders, labels, images, comments and answers to form fields, and publishing to a hosted docs site.",
   migrations,
   make: makeParts(),
 })

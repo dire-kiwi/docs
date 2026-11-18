@@ -94,6 +94,7 @@ export const makePages = (deps: { readonly docs: Docs; readonly hosted: Hosted; 
       version: shown.version.number,
       path: shown.page.path,
       unsent: comments.comments.filter((c) => c.sent_at === null).length,
+      unsent_answers: yield* docs.unsentAnswers(d),
       task: data.commentsTask,
     }
     return shell(docPage(data), state, `${shown.page.path === "index" ? "" : `${shown.page.title} · `}${d.title}`)

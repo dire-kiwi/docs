@@ -1,7 +1,7 @@
 # @dire-kiwi/docs-huntaway
 
 The docs plugin for [Huntaway](https://github.com/dire-kiwi/huntaway): documents that agents on the board publish
-(reports, plans, research) and people read, comment on and publish on to a hosted docs site. It is Huntaway's plugin
+(reports, plans, research) and people read, answer, comment on and publish on to a hosted docs site. It is Huntaway's plugin
 API (`@huntaway/plugin`, Huntaway's docs/plan/15-plugins.md) over this repository's renderer, so the board's documents
 are the docs project's own and don't drift from the hosted site.
 
@@ -29,7 +29,10 @@ It replaces the documents Huntaway had built in. Its id is `docs`, so:
 - **Publishing to a hosted docs site**: connect a profile from the home page (the OAuth device sign-in, or a pasted
   personal access token), then **Publish** a version from its page. Publishing again adds a version to the same
   document there. Tokens stay in the plugin's database on the host and are renewed there.
-- **Form fields** render read-only: documents on the board collect no answers.
+- **Answers to form fields** (`<Approval />`, `TextInput`, `Select` and the rest), saved as the user gives them (text
+  after a pause, choices straight away), per version and page, and shown again in the fields. **Send** puts the unsent
+  ones in the same message as the comments, with each field's label, and agents read them with `get_feedback`
+  (`responses`). Changing a sent answer makes it unsent again.
 
 On its first run on a host, the plugin copies the board's built-in documents (the `docs*`/`doc_*` tables, with
 images, comments and hosted-site connections) into its own database (migration `0002-copy-the-board-s-documents`).
@@ -40,7 +43,7 @@ Each release attaches the package to a GitHub release:
 
 ```sh
 cd apps/server
-pnpm add https://github.com/dire-kiwi/docs/releases/download/huntaway-v0.1.0/dire-kiwi-docs-huntaway-0.1.0.tgz
+pnpm add https://github.com/dire-kiwi/docs/releases/download/huntaway-v0.2.0/dire-kiwi-docs-huntaway-0.2.0.tgz
 ```
 
 then list it in `apps/server/src/plugins/installed.ts`:
@@ -81,7 +84,7 @@ Layout:
   `publish_document`; `src/images.ts`: AVIF conversion
 - `src/hosted.ts`, `src/siteRepo.ts`: connecting to and publishing on a hosted docs site
 - `src/pages/`: the pages (HTML, rendered on the host) and `src/calls.ts`, what they call
-- `client/page.ts`: the pages' script (forms, comments), sharing `frontend/src/quote.ts` and `bubbles.ts` with the site
+- `client/page.ts`: the pages' script (forms, answers, comments), sharing `frontend/src/answer.ts`, `quote.ts` and `bubbles.ts` with the site
 - `vendor/huntaway-plugin/`: a copy of Huntaway's plugin API, to type-check and test against until Huntaway publishes it
 
 ## Release

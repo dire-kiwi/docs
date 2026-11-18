@@ -6,7 +6,7 @@ import { Comment } from "./repo.ts"
 import type { Hosted } from "./hosted.ts"
 
 // What the plugin's pages call (`huntaway.call(method, payload)` in their frames, over the board's `plugins.call`):
-// changing documents and comments, and the profile's connection to a hosted docs site. All need `operate`.
+// changing documents, comments and answers, and the profile's connection to a hosted docs site. All need `operate`.
 
 const Where = { profile: Schema.String, slug: Schema.String }
 const Ok = Schema.Struct({ ok: Schema.Boolean })
@@ -71,11 +71,21 @@ export const makeCalls = (docs: Docs, hosted: Hosted): Readonly<Record<string, P
     success: Ok,
     handle: ({ profile, slug, id }) => Effect.as(docs.deleteComment(profile, slug, id), ok),
   }),
-  "comments.send": pluginCall({
+  "answer.save": pluginCall({
+    scope: "operate",
+    payload: Schema.Struct({ ...Where, version: Schema.Int, page: Schema.String, field: Schema.String, value: Schema.Unknown }),
+    success: Schema.Struct({ saved_at: Schema.String, unsent_answers: Schema.Int }),
+    handle: ({ profile, slug, ...a }) => docs.saveAnswer(profile, slug, a),
+  }),
+  "feedback.send": pluginCall({
     scope: "operate",
     payload: Schema.Struct(Where),
-    success: Schema.Struct({ sent: Schema.Int, task: Schema.Struct({ id: Schema.String, key: Schema.String, title: Schema.String }) }),
-    handle: ({ profile, slug }) => docs.sendComments(profile, slug),
+    success: Schema.Struct({
+      comments: Schema.Int,
+      answers: Schema.Int,
+      task: Schema.Struct({ id: Schema.String, key: Schema.String, title: Schema.String }),
+    }),
+    handle: ({ profile, slug }) => docs.sendFeedback(profile, slug),
   }),
   "site.status": pluginCall({
     scope: "read",

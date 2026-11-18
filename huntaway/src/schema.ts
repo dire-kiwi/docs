@@ -160,4 +160,21 @@ export const migrations: ReadonlyArray<PluginMigration> = [
     }),
   },
   { name: "0002-copy-the-board-s-documents", run: importBoard },
+  {
+    // The user's answers to a version's form fields (one person per board profile, so no user column): `value` is the
+    // answer as JSON. A changed answer is unsent again (`sent_at` NULL) until the user sends it to the task.
+    name: "0003-answers",
+    run: Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient
+      yield* sql.unsafe(`CREATE TABLE doc_answers (
+        version_id TEXT NOT NULL REFERENCES doc_versions(id) ON DELETE CASCADE,
+        page_path TEXT NOT NULL,
+        field TEXT NOT NULL,
+        value TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        sent_at TEXT,
+        PRIMARY KEY (version_id, page_path, field)
+      ) STRICT`)
+    }),
+  },
 ]
