@@ -4,7 +4,7 @@ import { byLowercase } from "./rules.ts"
 
 // The plugin's tables (schema.ts): `docs` (a profile's, slug unique in it, with its folder), its immutable `doc_versions`
 // and their `doc_pages`, `doc_labels`, the profile's AVIFs by sha256 (`doc_images`) and the names versions give them
-// (`doc_version_images`), and `doc_comments` on a version's pages. Single statements; `Docs` puts them in
+// (`doc_version_images`), and `doc_comments` and `doc_answers` on a version's pages. Single statements; `Docs` puts them in
 // transactions. SQL errors and rows that don't decode are defects.
 
 export const Format = Schema.Literals(["md", "mdx"])
@@ -73,6 +73,17 @@ export const Comment = Schema.Struct({
 })
 export type Comment = typeof Comment.Type
 
+/** The user's answer to a form field, its value as JSON. */
+export const Answer = Schema.Struct({
+  version: Schema.Int,
+  page: Schema.String,
+  field: Schema.String,
+  value: Schema.String,
+  updated_at: Schema.String,
+  sent_at: Schema.NullOr(Schema.String),
+})
+export type Answer = typeof Answer.Type
+
 const Id = Schema.Struct({ id: Schema.String })
 const Label = Schema.Struct({ label: Schema.String })
 const Count = Schema.Struct({ n: Schema.Finite })
@@ -95,6 +106,7 @@ const imageRows = rowsOf(ImageRow)
 const imageRefRows = rowsOf(ImageRef)
 const imageDataRows = rowsOf(ImageData)
 const commentRows = rowsOf(Comment)
+const answerRows = rowsOf(Answer)
 const idRows = rowsOf(Id)
 const labelRows = rowsOf(Label)
 const countRows = rowsOf(Count)
@@ -116,6 +128,9 @@ const SELECT_DOC = `SELECT d.id, d.profile_id, d.slug, d.title, d.folder, d.crea
 
 const SELECT_COMMENT = `SELECT m.id, v.number AS version, m.page_path AS page, m.quote, m.prefix, m.suffix, m.comment, m.created_at, m.updated_at, m.sent_at
   FROM doc_comments m JOIN doc_versions v ON v.id = m.version_id`
+
+const SELECT_ANSWER = `SELECT v.number AS version, a.page_path AS page, a.field, a.value, a.updated_at, a.sent_at
+  FROM doc_answers a JOIN doc_versions v ON v.id = a.version_id`
 
 /** What a new comment says: the quote, its context, and the comment. */
 export interface CommentText {
@@ -146,6 +161,7 @@ export interface NewImage {
 export const makeRepo = (sql: SqlClient.SqlClient) => {
   const selectDoc = sql.literal(SELECT_DOC)
   const selectComment = sql.literal(SELECT_COMMENT)
+  const selectAnswer = sql.literal(SELECT_ANSWER)
   const versionCols = sql.literal("SELECT id, number, message, task_id, run_id, created_at FROM doc_versions")
   const comment = (doc: string, id: number) => first(commentRows(sql`${selectComment} WHERE v.doc_id = ${doc} AND m.id = ${id}`))
 
@@ -264,6 +280,29 @@ export const makeRepo = (sql: SqlClient.SqlClient) => {
       ),
     markSent: (ids: ReadonlyArray<number>, at: string) =>
       Effect.forEach(ids, (id) => sql`UPDATE doc_comments SET sent_at = ${at} WHERE id = ${id}`, { concurrency: 1, discard: true }).pipe(Effect.orDie),
+    /** A document's answers by version, page and field: on one version, and given or changed at or after `since`, if given. */
+    answers: (doc: string, filter: { readonly version?: number | null; readonly since?: string | null } = {}) => {
+      const version = filter.version ?? null
+      const since = filter.since ?? null
+      return answerRows(
+        sql`${selectAnswer} WHERE v.doc_id = ${doc} AND (${version} IS NULL OR v.number = ${version}) AND (${since} IS NULL OR a.updated_at >= ${since})
+          ORDER BY v.number, a.page_path, a.field`,
+      )
+    },
+    /** The answers on a version's page. */
+    pageAnswers: (version: string, page: string) => answerRows(sql`${selectAnswer} WHERE a.version_id = ${version} AND a.page_path = ${page}`),
+    /** Keeps an answer (as JSON), unsent. */
+    saveAnswer: (version: string, page: string, field: string, value: string, now: string) =>
+      done(sql`INSERT INTO doc_answers (version_id, page_path, field, value, updated_at) VALUES (${version}, ${page}, ${field}, ${value}, ${now})
+        ON CONFLICT (version_id, page_path, field) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at, sent_at = NULL`),
+    /** Marks a document's answers sent: those still as they were when they were read to send. */
+    markAnswersSent: (doc: string, sent: ReadonlyArray<Answer>, at: string) =>
+      Effect.forEach(
+        sent,
+        (a) => sql`UPDATE doc_answers SET sent_at = ${at} WHERE page_path = ${a.page} AND field = ${a.field} AND value = ${a.value}
+          AND version_id = (SELECT id FROM doc_versions WHERE doc_id = ${doc} AND number = ${a.version})`,
+        { concurrency: 1, discard: true },
+      ).pipe(Effect.orDie),
     /** The versions a task published, newest first, with their documents. */
     publishedBy: (profile: string, task: string) =>
       publishedRows(sql`SELECT d.slug, d.title, v.number, v.created_at FROM doc_versions v JOIN docs d ON d.id = v.doc_id

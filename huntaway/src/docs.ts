@@ -2,10 +2,10 @@ import { Clock, DateTime, Effect, Option, Result, Schema } from "effect"
 import { PluginError } from "@huntaway/plugin"
 import type { PluginHostShape } from "@huntaway/plugin"
 import type { Images } from "./images.ts"
-import type { Doc, Repo, VersionRow } from "./repo.ts"
+import type { Answer, Doc, DocPage, Repo, VersionRow } from "./repo.ts"
 import { renderMessage, rendered } from "./render.ts"
 import type { RenderLib } from "./render.ts"
-import { chars, commentsMessage, docBase, labelTree, quoted, renamedFolders, spelt } from "./rules.ts"
+import { chars, docBase, feedbackMessage, labelTree, quoted, renamedFolders, spelt } from "./rules.ts"
 import { nowIso, publishFor } from "./publish.ts"
 import type { Caller, PublishInput } from "./publish.ts"
 
@@ -14,7 +14,7 @@ import type { Caller, PublishInput } from "./publish.ts"
 // immutable versions, each with its pages (Markdown or MDX), and every publish makes a new one. Slugs are unique per
 // profile. A document is filed in a folder when it's created (a '/'-path, "" the top level), has labels ('/'-nested,
 // matched whatever their case, spelt as first used in the profile), images (AVIFs kept once per profile), and comments
-// the user leaves on a version's pages for the agent. What an agent is told when it can't is a `DocsRefused`, in the
+// and answers to form fields the user leaves on a version's pages for the agent. What an agent is told when it can't is a `DocsRefused`, in the
 // hosted server's words; what a page is told is a `PluginError`.
 
 /** A refusal an agent is told in the docs server's words (the hosted server's, where it has one). */
@@ -24,6 +24,8 @@ export class DocsRefused extends Schema.TaggedError<DocsRefused>()("DocsRefused"
 export const MAX_QUOTE_CHARS = 10_000
 export const MAX_COMMENT_CHARS = 20_000
 export const MAX_CONTEXT_CHARS = 500
+/** The longest answer, as JSON, in bytes (the hosted site's limit). */
+export const MAX_ANSWER_BYTES = 100_000
 
 /** A version as the docs server's tools show it. */
 const versionJson = (v: VersionRow) => ({ number: v.number, message: v.message, task_id: v.task_id, created_at: v.created_at })
@@ -56,6 +58,13 @@ export interface NewComment {
   readonly comment?: string | undefined
 }
 
+export interface NewAnswer {
+  readonly version: number
+  readonly page: string
+  readonly field: string
+  readonly value: unknown
+}
+
 export interface DocsDeps {
   readonly repo: Repo
   readonly images: Images
@@ -86,6 +95,44 @@ export const makeDocs = (deps: DocsDeps) => {
   const docsChanged = (profile: string, slug: string, deleted = false) =>
     host.emit({ topic: "documents", profile_id: profile, data: { slug, deleted }, reload: true })
   const commentsChanged = (d: Doc) => host.emit({ topic: "comments", profile_id: d.profile_id, data: { slug: d.slug } })
+  const answersChanged = (d: Doc) => host.emit({ topic: "answers", profile_id: d.profile_id, data: { slug: d.slug } })
+
+  /** A page's form fields, by name, with their labels (an unrenderable page has none). */
+  const fieldsOf = (p: DocPage) =>
+    new Map(
+      Result.getOrElse(
+        Result.try(() => lib.render(p.source, p.format, { pagePath: p.path, baseUrl: "/" }).fields),
+        () => [],
+      ).map((f) => [f.name, f]),
+    )
+  /**
+   * `answers` with their fields' labels (null for a field the page doesn't have), in the order the fields are on their
+   * pages.
+   */
+  const labelled = Effect.fnUntraced(function* (d: Doc, answers: ReadonlyArray<Answer>) {
+    const pages = new Map<string, ReadonlyArray<string>>()
+    const labels = new Map<string, string>()
+    for (const a of answers) {
+      const key = `${a.version}\n${a.page}`
+      if (pages.has(key)) continue
+      const v = yield* repo.version(d.id, a.version)
+      const p = v === null ? null : yield* repo.page(v.id, a.page)
+      const fields = p === null ? [] : [...fieldsOf(p).values()]
+      pages.set(key, fields.map((f) => f.name))
+      for (const f of fields) labels.set(`${key}\n${f.name}`, f.label)
+    }
+    const position = (a: Answer) => (pages.get(`${a.version}\n${a.page}`) ?? []).indexOf(a.field) >>> 0
+    return answers
+      .map((a) => ({ ...a, label: labels.get(`${a.version}\n${a.page}\n${a.field}`) ?? null }))
+      .toSorted((x, y) => x.version - y.version || (x.page < y.page ? -1 : x.page > y.page ? 1 : 0) || position(x) - position(y))
+  })
+  const valueOf = (a: Answer): unknown => {
+    try {
+      return JSON.parse(a.value) as unknown
+    } catch {
+      return null
+    }
+  }
 
   const url = (profile: string) => (board: string) => (slug: string, number: number | null, path: string) =>
     `${board}${docBase(profile, slug, number)}${lib.urlSuffix(path)}`
@@ -222,7 +269,8 @@ export const makeDocs = (deps: DocsDeps) => {
           if (data !== null) images[name] = `data:image/avif;base64,${toBase64(data)}`
         }
       }
-      const shown = Result.try({ try: () => lib.render(p.source, p.format, { pagePath: p.path, baseUrl: base, images }), catch: renderMessage })
+      const answers = Object.fromEntries((yield* repo.pageAnswers(v.id, p.path)).map((a) => [a.field, valueOf(a)]))
+      const shown = Result.try({ try: () => lib.render(p.source, p.format, { pagePath: p.path, baseUrl: base, images, answers }), catch: renderMessage })
       const r = Result.getOrNull(shown)
       const page: RenderedPage = {
         path: p.path,
@@ -276,24 +324,48 @@ export const makeDocs = (deps: DocsDeps) => {
       if (!(yield* tx(repo.deleteComment(d.id, id)))) return yield* PluginError.notFound(`no comment ${id}`)
       yield* commentsChanged(d)
     }),
-    /** Sends the unsent comments to the task that published the document, as one message, and marks them sent. */
-    sendComments: Effect.fn("Docs.sendComments")(function* (profile: string, slug: string) {
+    /** How many of a document's answers haven't been sent to its task. */
+    unsentAnswers: (d: Doc) => Effect.map(repo.answers(d.id), (all) => all.filter((a) => a.sent_at === null).length),
+    /** Keeps the user's answer to a form field on a version's page; how many of the document's answers are unsent then. */
+    saveAnswer: Effect.fn("Docs.saveAnswer")(function* (profile: string, slug: string, a: NewAnswer) {
+      const d = yield* docOf(profile, slug)
+      const v = yield* repo.version(d.id, a.version)
+      if (v === null) return yield* PluginError.notFound(`document ${quoted(slug)} has no version ${a.version}`)
+      const page = yield* repo.page(v.id, a.page)
+      if (page === null) return yield* PluginError.notFound(`version ${a.version} has no page ${quoted(a.page)}`)
+      if (!fieldsOf(page).has(a.field)) return yield* PluginError.invalid(`page has no field ${quoted(a.field)}`)
+      const json = JSON.stringify(a.value ?? null)
+      if (new TextEncoder().encode(json).length > MAX_ANSWER_BYTES) return yield* PluginError.invalid("answer is too long")
+      const now = yield* nowIso
+      yield* tx(repo.saveAnswer(v.id, page.path, a.field, json, now))
+      yield* answersChanged(d)
+      return { saved_at: now, unsent_answers: (yield* repo.answers(d.id)).filter((x) => x.sent_at === null).length }
+    }),
+    /**
+     * Sends the unsent comments and answers to the task that published the document, as one message, and marks them
+     * sent.
+     */
+    sendFeedback: Effect.fn("Docs.sendFeedback")(function* (profile: string, slug: string) {
       const d = yield* docOf(profile, slug)
       const task = yield* commentsTask(d)
-      if (task === null) return yield* PluginError.conflict("no task that published this document is still on the board to send its comments to")
-      const unsent = (yield* repo.comments(d.id)).filter((m) => m.sent_at === null)
-      if (unsent.length === 0) return yield* PluginError.conflict("every comment has been sent already")
-      const at = (yield* urls(profile))
+      if (task === null) return yield* PluginError.conflict("no task that published this document is still on the board to send its feedback to")
+      const comments = (yield* repo.comments(d.id)).filter((m) => m.sent_at === null)
+      const answers = (yield* repo.answers(d.id)).filter((a) => a.sent_at === null)
+      if (comments.length === 0 && answers.length === 0) return yield* PluginError.conflict("every comment and answer has been sent already")
+      const at = yield* urls(profile)
       yield* host.sendToTask(
         task.id,
-        commentsMessage(
+        feedbackMessage(
           d,
-          unsent.map((m) => ({ version: m.version, page: m.page, quote: m.quote, comment: m.comment, url: at(d.slug, m.version, m.page) })),
+          comments.map((m) => ({ version: m.version, page: m.page, quote: m.quote, comment: m.comment, url: at(d.slug, m.version, m.page) })),
+          (yield* labelled(d, answers)).map((a) => ({ ...a, value: valueOf(a), url: at(d.slug, a.version, a.page) })),
         ),
       )
-      yield* tx(repo.markSent(unsent.map((m) => m.id), yield* nowIso))
-      yield* commentsChanged(d)
-      return { sent: unsent.length, task: { id: task.id, key: task.key, title: task.title } }
+      const now = yield* nowIso
+      yield* tx(Effect.andThen(repo.markSent(comments.map((m) => m.id), now), repo.markAnswersSent(d.id, answers, now)))
+      if (comments.length > 0) yield* commentsChanged(d)
+      if (answers.length > 0) yield* answersChanged(d)
+      return { comments: comments.length, answers: answers.length, task: { id: task.id, key: task.key, title: task.title } }
     }),
 
     // ---- the docs server's tools: each as its tool answers, failing with what the agent is told ----------------------
@@ -373,11 +445,21 @@ export const makeDocs = (deps: DocsDeps) => {
       const from = since === null ? Option.none() : DateTime.make(since * 1000)
       const after = Option.isNone(from) ? null : DateTime.formatIso(from.value)
       const comments = yield* repo.comments(d.id, { version: number, since: after })
+      const answers = yield* labelled(d, yield* repo.answers(d.id, { version: number, since: after }))
+      const seconds = (iso: string) => Math.floor(DateTime.toEpochMillis(DateTime.makeUnsafe(iso)) / 1000)
       return {
         document: d.slug,
         latest_version: d.latest_version,
         cursor,
-        responses: [],
+        responses: answers.map((a) => ({
+          version: a.version,
+          page: a.page,
+          field: a.field,
+          label: a.label,
+          value: valueOf(a),
+          user: "user",
+          updated_at: seconds(a.updated_at),
+        })),
         selections: comments.map((m) => ({
           id: m.id,
           version: m.version,
@@ -387,7 +469,7 @@ export const makeDocs = (deps: DocsDeps) => {
           context_before: m.prefix,
           context_after: m.suffix,
           user: "user",
-          created_at: Math.floor(DateTime.toEpochMillis(DateTime.makeUnsafe(m.created_at)) / 1000),
+          created_at: seconds(m.created_at),
         })),
         hint: "Pass `since: cursor` next time to get only feedback that is new or changed (items may repeat within the same second).",
       }

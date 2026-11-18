@@ -24,12 +24,13 @@ export const INSTRUCTIONS =
   "say, let it look up components, publish and fix any problems, and have it return the URL. That keeps the component " +
   "reference and the page sources out of your own context. Plain Markdown needs no reference. For components " +
   '(callouts, collapsible sections, form fields), call `list_components` for their names, props and examples, and use format "mdx". ' +
-  "Form fields (`<Approval />`, inputs and the like) show read-only here and collect no answers, so ask the user in the " +
-  "thread for a decision or input instead. `publish_document` is the check: it rejects a page it can't publish and says " +
+  "Form fields (`<Approval />`, inputs and the like) collect the user's answers: to ask the user questions, publish them " +
+  "as form fields and give the user the URL; they answer on the page and send their answers to the task that published " +
+  "the document as a message, and `get_feedback` returns them as `responses`. `publish_document` is the check: it rejects a page it can't publish and says " +
   "why, and returns warnings (an unknown component, a bad prop) with the URL; fix them and publish again. Don't install " +
-  "or run npm packages, renderers or other tools to check pages. The user can select text in a document on the board and " +
-  "comment on it for you: read the comments with `get_feedback` (pass its `cursor` as `since` next time for only new " +
-  "ones); the board can also send them to the task that published the document as a message. " +
+  "or run npm packages, renderers or other tools to check pages. The user can also select text in a document on the board " +
+  "and comment on it for you: `get_feedback` has the comments and answers (pass its `cursor` as `since` next time for only " +
+  "new ones), and the board sends them to the task that published the document as a message when the user chooses Send. " +
   "Documents belong to your profile on this board. A new " +
   "document goes in a folder named after your task's project unless you give `folder`; a `folder` you give is used as " +
   'it is (`"plans"` is a top-level folder, `"<project>/plans"` one inside the project\'s), and later versions stay ' +

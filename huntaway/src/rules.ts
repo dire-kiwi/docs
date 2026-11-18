@@ -2,7 +2,7 @@ import { Result, Schema } from "effect"
 import type { RenderLib } from "./render.ts"
 
 // The rules of documents that read no state: slugs, labels as a document keeps them, renaming folders, the label tree,
-// where the board shows a document, and the message that sends comments to an agent. Labels, folders and paths are the
+// where the board shows a document, and the message that sends comments and answers to an agent. Labels, folders and paths are the
 // renderer's (the hosted site's own code); the rest are the hosted site's rules written again, so an agent gets the same
 // answer from either.
 
@@ -121,13 +121,45 @@ export interface SentComment {
   readonly url: string
 }
 
-/** The message that sends a document's `comments` to the agent that published it. */
-export const commentsMessage = (doc: { readonly title: string; readonly slug: string }, comments: ReadonlyArray<SentComment>): string => {
-  const n = comments.length
-  const parts = [`The user left ${n === 1 ? "a comment" : `${n} comments`} on the document "${doc.title}" (slug \`${doc.slug}\`):`]
+/** An answer as the message that sends it names it. */
+export interface SentAnswer {
+  readonly version: number
+  readonly page: string
+  readonly field: string
+  /** The field's label, if the page still has the field. */
+  readonly label: string | null
+  readonly value: unknown
+  /** The board's URL of the page it's on, in its version. */
+  readonly url: string
+}
+
+const count = (n: number, one: string, many: string) => (n === 1 ? `a ${one}` : `${n} ${many}`)
+
+/** The message that sends a document's `comments` and `answers` (some of either) to the agent that published it. */
+export const feedbackMessage = (
+  doc: { readonly title: string; readonly slug: string },
+  comments: ReadonlyArray<SentComment>,
+  answers: ReadonlyArray<SentAnswer> = [],
+): string => {
+  const did = [
+    ...(comments.length > 0 ? [`left ${count(comments.length, "comment", "comments")}`] : []),
+    ...(answers.length > 0 ? [`answered ${count(answers.length, "question", "questions")}`] : []),
+  ].join(" and ")
+  const parts = [`The user ${did} on the document "${doc.title}" (slug \`${doc.slug}\`):`]
+  if (comments.length > 0 && answers.length > 0) parts.push("Comments:")
   comments.forEach((m, i) => {
     parts.push(`${i + 1}. On version ${m.version}, page \`${m.page}\` (${m.url}):\n\n${blockQuote(m.quote)}\n\n${m.comment || "(No comment: just the quote.)"}`)
   })
+  if (comments.length > 0 && answers.length > 0) parts.push("Answers:")
+  let where = ""
+  for (const a of answers) {
+    const here = `On version ${a.version}, page \`${a.page}\` (${a.url}):`
+    if (here !== where) parts.push(here)
+    where = here
+    const line = `- ${a.label === null ? `\`${a.field}\`` : `${a.label} (\`${a.field}\`)`}: ${JSON.stringify(a.value)}`
+    if (parts.at(-1)?.startsWith("- ")) parts[parts.length - 1] += `\n${line}`
+    else parts.push(line)
+  }
   parts.push(`The docs server's \`get_feedback\` (slug "${doc.slug}") has them too.`)
   return parts.join("\n\n")
 }

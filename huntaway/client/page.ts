@@ -1,9 +1,11 @@
 // The script of the docs plugin's pages, in the board's sandboxed frame (no network: everything goes through
 // `huntaway.call` to the plugin on its host). Forms and buttons; times in the reader's zone; links to a page's own
-// headings; read-only form fields; and on a document, comments on its text as the hosted site's reader has them
-// (frontend/src/selection.ts): select text, comment in the popup (saved when you click away, Esc cancels), and the
-// comments as bubbles beside their quotes.
+// headings; and on a document, its form fields saving the user's answers as they give them (frontend/src/fields.ts, sharing its answer.ts),
+// comments on its text as the hosted site's reader has them (frontend/src/selection.ts): select text, comment in the
+// popup (saved when you click away, Esc cancels), and the comments as bubbles beside their quotes; and a bar that sends
+// the answers and comments to the task that published the document.
 import { layoutBubbles } from "../../frontend/src/bubbles.ts"
+import { fieldValue, linkOther } from "../../frontend/src/answer.ts"
 import { CONTEXT, findQuote, indexText, offsetOf, rangeFor } from "../../frontend/src/quote.ts"
 
 interface Bridge {
@@ -19,6 +21,7 @@ interface State {
   version?: number
   path?: string
   unsent?: number
+  unsent_answers?: number
   task?: { id: string; key: string; title: string } | null
 }
 declare global {
@@ -143,68 +146,122 @@ document.addEventListener("input", (e) => {
   }
 })
 
-// Documents on the board collect no answers: their form fields are read-only, and say so.
-for (const field of document.querySelectorAll(".docs-render .field")) {
-  for (const c of field.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | HTMLButtonElement>("input, select, textarea, button")) c.disabled = true
-  const note = document.createElement("div")
-  note.className = "field-status read-only-note"
-  note.textContent = "Read-only: documents on the board don't collect answers. Answer in the task's thread."
-  field.append(note)
+// ---- sending answers and comments ---------------------------------------------------------------------------------------
+
+const where = { profile: state.profile, slug: state.slug }
+/** How many comments and answers haven't been sent to the task yet. */
+const unsent = { comments: state.unsent ?? 0, answers: state.unsent_answers ?? 0 }
+
+const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`
+const unsentText = () =>
+  [unsent.answers > 0 ? plural(unsent.answers, "answer", "answers") : "", unsent.comments > 0 ? plural(unsent.comments, "comment", "comments") : ""]
+    .filter((s) => s !== "")
+    .join(" and ")
+
+/** The bar above the page: send the answers and comments to the agent that published the document. */
+const showSend = () => {
+  const sendBar = document.querySelector<HTMLElement>("#send-bar")
+  if (!sendBar) return
+  sendBar.replaceChildren()
+  sendBar.classList.remove("muted")
+  if (unsent.comments === 0 && unsent.answers === 0) return
+  if (!state.task) {
+    sendBar.append(`${unsentText()} not sent: the task that published this document isn't on the board any more, so its agent can read them with get_feedback.`)
+    sendBar.classList.add("muted")
+    return
+  }
+  const button = document.createElement("button")
+  button.className = "primary"
+  button.textContent = `Send ${unsentText()} to ${state.task.key}`
+  const note = document.createElement("span")
+  note.className = "muted small"
+  note.textContent = state.task.title
+  const err = document.createElement("span")
+  err.className = "error"
+  button.addEventListener("click", async () => {
+    button.disabled = true
+    err.textContent = ""
+    try {
+      await bridge.call("feedback.send", where)
+      unsent.comments = 0
+      unsent.answers = 0
+      for (const b of document.querySelectorAll("#comments .comment-bubble footer")) if (!b.querySelector(".sent")) b.insertAdjacentHTML("afterbegin", '<span class="sent">sent</span> · ')
+      for (const s of document.querySelectorAll<HTMLElement>(".docs-render .field-status[data-state='saved']")) s.textContent = "Sent"
+      sendBar.replaceChildren(`Sent to ${state.task?.key ?? "the task"}.`)
+    } catch (e) {
+      err.textContent = messageOf(e)
+      button.disabled = false
+    }
+  })
+  sendBar.append(button, note, err)
+}
+
+// ---- answers -------------------------------------------------------------------------------------------------------------
+
+if (state.page === "doc") initFields()
+
+/** Answers save as the user gives them: text after a pause, choices straight away. */
+function initFields(): void {
+  const article = document.querySelector<HTMLElement>("article.doc-content")
+  if (!article) return
+  for (const field of article.querySelectorAll<HTMLElement>(".field[data-field]")) {
+    linkOther(field)
+    const status = field.querySelector<HTMLElement>(".field-status")
+    const setStatus = (text: string, kind = "") => {
+      if (!status) return
+      status.textContent = text
+      status.dataset.state = kind
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let inflight = Promise.resolve()
+    const save = () => {
+      clearTimeout(timer)
+      const value = fieldValue(field)
+      setStatus("Saving…", "saving")
+      // One save at a time, so an older answer never overwrites a newer one.
+      inflight = inflight.then(async () => {
+        try {
+          const out = (await bridge.call("answer.save", { ...where, version: state.version, page: state.path, field: field.dataset.field, value })) as {
+            unsent_answers: number
+          }
+          setStatus("Saved", "saved")
+          unsent.answers = out.unsent_answers
+          showSend()
+        } catch (e) {
+          setStatus(`Not saved: ${messageOf(e)}`, "error")
+        }
+      })
+    }
+    field.addEventListener("input", (e) => {
+      const target = e.target
+      if (target instanceof HTMLTextAreaElement || (target instanceof HTMLInputElement && target.type === "text")) {
+        setStatus("Editing…")
+        clearTimeout(timer)
+        timer = setTimeout(save, 700)
+      }
+    })
+    field.addEventListener("change", save)
+  }
 }
 
 // ---- comments ------------------------------------------------------------------------------------------------------------
 
-if (state.page === "doc") initComments()
+if (state.page === "doc") {
+  showSend()
+  initComments()
+}
 
 function initComments(): void {
   const article = document.querySelector<HTMLElement>("article.doc-content")
   const body = document.querySelector<HTMLElement>(".doc-body")
   const rail = document.querySelector<HTMLElement>("#comments")
-  const sendBar = document.querySelector<HTMLElement>("#send-bar")
-  if (!article || !body || !rail || !sendBar) return
-  const where = { profile: state.profile, slug: state.slug }
+  if (!article || !body || !rail) return
   const highlights = typeof CSS !== "undefined" && "highlights" in CSS ? CSS.highlights : null
   const mark = (name: string, ranges: Range[]) => {
     if (!highlights) return
     if (ranges.length === 0) highlights.delete(name)
     else highlights.set(name, new Highlight(...ranges))
   }
-  let unsent = state.unsent ?? 0
-
-  // The bar above the page: send the comments to the agent that published the document.
-  const showSend = () => {
-    sendBar.replaceChildren()
-    if (unsent === 0) return
-    if (!state.task) {
-      sendBar.append(`${unsent} unsent ${unsent === 1 ? "comment" : "comments"}: the task that published this document isn't on the board any more, so its agent can read them with get_feedback.`)
-      sendBar.classList.add("muted")
-      return
-    }
-    const button = document.createElement("button")
-    button.className = "primary"
-    button.textContent = `Send ${unsent} ${unsent === 1 ? "comment" : "comments"} to ${state.task.key}`
-    const note = document.createElement("span")
-    note.className = "muted small"
-    note.textContent = state.task.title
-    const err = document.createElement("span")
-    err.className = "error"
-    button.addEventListener("click", async () => {
-      button.disabled = true
-      err.textContent = ""
-      try {
-        await bridge.call("comments.send", where)
-        unsent = 0
-        for (const b of rail.querySelectorAll(".comment-bubble footer")) if (!b.querySelector(".sent")) b.insertAdjacentHTML("afterbegin", '<span class="sent">sent</span> · ')
-        sendBar.replaceChildren(`Sent to ${state.task?.key ?? "the task"}.`)
-      } catch (e) {
-        err.textContent = messageOf(e)
-        button.disabled = false
-      }
-    })
-    sendBar.append(button, note, err)
-  }
-  showSend()
-
   // The popup on selected text: a Comment button, then the comment box.
   const popup = document.createElement("div")
   popup.className = "comment-popup"
@@ -300,7 +357,7 @@ function initComments(): void {
         created_at: string
       }
       rail.append(bubble(saved.id, saved.created_at, { quote, prefix, suffix, comment }))
-      unsent++
+      unsent.comments++
       showSend()
       close()
       refresh()
@@ -407,7 +464,7 @@ function initComments(): void {
           if (sent) {
             sent.nextSibling?.remove()
             sent.remove()
-            unsent++
+            unsent.comments++
             showSend()
           }
         } catch (e) {
@@ -438,7 +495,7 @@ function initComments(): void {
     if (target.closest(".delete-comment")) {
       try {
         await bridge.call("comment.delete", { ...where, id: Number(b.dataset.id) })
-        if (!b.querySelector(".sent")) unsent = Math.max(0, unsent - 1)
+        if (!b.querySelector(".sent")) unsent.comments = Math.max(0, unsent.comments - 1)
         b.remove()
         showSend()
         refresh()

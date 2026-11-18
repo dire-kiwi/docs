@@ -9,8 +9,8 @@ Pages published with `"format": "mdx"` (or a `.mdx` path) can use the components
 
 MDX is parsed, never run: there is no `import`, `{expressions}` aren't evaluated, and only these components render. Attribute values are strings (`a="x"`) or JSON-like literals (`a={3}`, `a={["x", "y"]}`). Lowercase HTML such as `<kbd>` works too.
 
-<Callout type="note" title="Form fields on the board are read-only">
-  On the Huntaway board, form fields show but collect no answers, so agents ask in the task's thread instead. On a hosted docs site they save the reader's answers as they type, and the agent reads them with `get_feedback`. Each component below gives the shape of its answer there.
+<Callout type="note" title="Answers">
+  Form fields save the reader's answers as they type, on the Huntaway board and on a hosted docs site alike, and the agent reads them with `get_feedback`. On the board, the reader also sends them to the task that published the document. Each component below gives the shape of its answer.
 </Callout>
 
 ## Presentation
@@ -92,31 +92,33 @@ A multi-line text answer, `rows` lines high (4 by default). Answer: a string.
 
 Pick one option from a dropdown. `options` is a list (`{["A", "B"]}`), a list of `{value, label}` objects, or a comma-separated string. Answer: the chosen value.
 
+`other` adds an **Other** choice with a text box, for an answer that isn't one of the options; `other="Somewhere else"` names it. `Select`, `RadioGroup` and `CheckboxGroup` all take it. The answer is then the text typed in the box (for `CheckboxGroup`, it's in the array with the chosen values).
+
 ```mdx
-<Select name="region" label="Deploy region" options={["us-east", "eu-west", "ap-southeast"]} />
+<Select name="region" label="Deploy region" options={["us-east", "eu-west", "ap-southeast"]} other="Somewhere else" />
 ```
 
-<Select name="region" label="Deploy region" options={["us-east", "eu-west", "ap-southeast"]} />
+<Select name="region" label="Deploy region" options={["us-east", "eu-west", "ap-southeast"]} other="Somewhere else" />
 
 ### RadioGroup
 
-Pick one option, with every option visible. Takes `options` as `Select` does. Answer: the chosen value.
+Pick one option, with every option visible. Takes `options` and `other` as `Select` does. Answer: the chosen value, or the text typed for Other.
 
 ```mdx
-<RadioGroup name="database" label="Which database?" options={[{value: "sqlite", label: "SQLite"}, {value: "postgres", label: "Postgres"}]} />
+<RadioGroup name="database" label="Which database?" options={[{value: "sqlite", label: "SQLite"}, {value: "postgres", label: "Postgres"}]} other />
 ```
 
-<RadioGroup name="database" label="Which database?" options={[{value: "sqlite", label: "SQLite"}, {value: "postgres", label: "Postgres"}]} />
+<RadioGroup name="database" label="Which database?" options={[{value: "sqlite", label: "SQLite"}, {value: "postgres", label: "Postgres"}]} other />
 
 ### CheckboxGroup
 
-Pick any number of options. Answer: an array of the chosen values.
+Pick any number of options. Takes `options` and `other` as `Select` does. Answer: an array of the chosen values, with the text typed for Other if it's ticked.
 
 ```mdx
-<CheckboxGroup name="phases" label="Which phases should go ahead?" options="Phase 1, Phase 2, Phase 3" />
+<CheckboxGroup name="phases" label="Which phases should go ahead?" options="Phase 1, Phase 2, Phase 3" other />
 ```
 
-<CheckboxGroup name="phases" label="Which phases should go ahead?" options="Phase 1, Phase 2, Phase 3" />
+<CheckboxGroup name="phases" label="Which phases should go ahead?" options="Phase 1, Phase 2, Phase 3" other />
 
 ### Checkbox
 

@@ -2,7 +2,7 @@
 // http://localhost:4100/docs/. It runs the plugin on a database of its own (.preview/plugin.db) with a pretend board (one
 // profile, one project, one task) and shows each page as the board does: in a sandboxed frame with no network under a
 // strict policy, with the board's theme as CSS variables and `window.huntaway` as the bridge (calls go to the plugin
-// here). Messages the plugin sends to the task are printed. The first run publishes a sample document.
+// here). Messages the plugin sends to the task (comments and answers) are printed. The first run publishes a sample document.
 import { mkdirSync } from "node:fs"
 import { createServer } from "node:http"
 import { NodeFileSystem, NodePath } from "@effect/platform-node"
@@ -74,7 +74,12 @@ if (listed.structuredContent.documents.length === 0) {
         path: "index.mdx",
         content:
           "# Preview\n\nSelect some of this text and comment on it: the comment is saved when you click away, and shows beside the text.\n\n" +
-          '<Callout type="tip">Pages render with the hosted site\'s renderer.</Callout>\n\n![A chart](images/chart.png)\n\n## A table\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\nSee [the plan](plan/phase-1.md).\n\n<Approval />\n',
+          '<Callout type="tip">Pages render with the hosted site\'s renderer.</Callout>\n\n![A chart](images/chart.png)\n\n## A table\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\nSee [the plan](plan/phase-1.md).\n\n' +
+          "## Questions\n\nAnswers save as you give them; **Send** puts them in a message to the task.\n\n" +
+          '<RadioGroup name="database" label="Which database?" options={["SQLite", "Postgres"]} other />\n\n' +
+          '<CheckboxGroup name="phases" label="Which phases should go ahead?" options={["Phase 1", "Phase 2", "Phase 3"]} other="Something else" />\n\n' +
+          '<Select name="region" label="Deploy region" options={["us-east", "eu-west", "ap-southeast"]} other="Somewhere else" />\n\n' +
+          '<TextInput name="owner" label="Who should own this work?" placeholder="GitHub username" />\n\n<Approval />\n',
       },
       { path: "plan/phase-1", content: "# Phase 1\n\nBack to [the overview](../index.md).\n\n```ts\nconst x = 1\n```\n" },
     ],
