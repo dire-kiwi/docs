@@ -1,9 +1,10 @@
-import { fieldValue } from "./answer.ts";
+import { fieldValue, linkOther } from "./answer.ts";
 import { api } from "./api.ts";
 
 /** Answers save as the reader types: text after a pause, choices immediately. */
 export function initFields(): void {
   for (const field of document.querySelectorAll<HTMLElement>(".field[data-field]")) {
+    linkOther(field);
     const article = field.closest<HTMLElement>("[data-version-id]");
     const status = field.querySelector<HTMLElement>(".field-status");
     const setStatus = (text: string, state = ""): void => {

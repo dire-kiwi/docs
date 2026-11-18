@@ -737,6 +737,21 @@ impl<'a> Renderer<'a> {
             Value::Number(n) => n.to_string(),
             _ => String::new(),
         };
+        // `other` adds an "Other" choice with a text box: its answer is the text typed there.
+        let other = match attrs.get("other") {
+            _ if !matches!(kind, "select" | "radio" | "checkboxes") => None,
+            Some(Value::Bool(true)) => Some("Other".to_string()),
+            Some(Value::String(s)) if s.trim().is_empty() || s == "true" => Some("Other".to_string()),
+            Some(Value::String(s)) if s != "false" => Some(s.trim().to_string()),
+            _ => None,
+        };
+        let other_box = |text: &str, label: &str| {
+            format!(
+                "<input type=\"text\" class=\"other-text\" aria-label=\"{}\" placeholder=\"Your answer\" value=\"{}\">",
+                escape(label),
+                escape(text)
+            )
+        };
         match kind {
             "text" => self.push(&format!(
                 "<input type=\"text\" id=\"{id}\" name=\"{id}\" value=\"{}\"{placeholder}{req}>",
@@ -753,13 +768,29 @@ impl<'a> Renderer<'a> {
             "select" => {
                 self.push(&format!("<select id=\"{id}\" name=\"{id}\"{req}>"));
                 self.push("<option value=\"\">Choose…</option>");
-                for (value, text) in attrs.options("options") {
-                    let sel = if value == answer_str { " selected" } else { "" };
-                    self.push(&format!("<option value=\"{}\"{sel}>", escape(&value)));
-                    self.text(&text);
+                let options = attrs.options("options");
+                for (value, text) in &options {
+                    let sel = if *value == answer_str { " selected" } else { "" };
+                    self.push(&format!("<option value=\"{}\"{sel}>", escape(value)));
+                    self.text(text);
+                    self.push("</option>");
+                }
+                // An answer that isn't one of the options was typed for Other.
+                let typed = if answer_str.is_empty() || options.iter().any(|(v, _)| *v == answer_str) {
+                    ""
+                } else {
+                    answer_str.as_str()
+                };
+                if let Some(other) = &other {
+                    let sel = if typed.is_empty() { "" } else { " selected" };
+                    self.push(&format!("<option value=\"\" data-other=\"\"{sel}>"));
+                    self.text(&format!("{other}…"));
                     self.push("</option>");
                 }
                 self.push("</select>");
+                if let Some(other) = &other {
+                    self.push(&other_box(typed, other));
+                }
                 self.empty_options_warning(component, attrs);
             }
             "radio" | "checkboxes" => {
@@ -773,14 +804,31 @@ impl<'a> Renderer<'a> {
                 self.push(&format!(
                     "<div class=\"options\" role=\"{role}\" aria-labelledby=\"{id}-label\">"
                 ));
-                for (value, text) in attrs.options("options") {
-                    let checked = if chosen.contains(&value) { " checked" } else { "" };
+                let options = attrs.options("options");
+                for (value, text) in &options {
+                    let checked = if chosen.contains(value) { " checked" } else { "" };
                     self.push(&format!(
                         "<label class=\"option\"><input type=\"{input_type}\" name=\"{id}\" value=\"{}\"{checked}> <span>",
-                        escape(&value)
+                        escape(value)
                     ));
-                    self.text(&text);
+                    self.text(text);
                     self.push("</span></label>");
+                }
+                if let Some(other) = &other {
+                    // Chosen answers that aren't options were typed for Other.
+                    let typed: Vec<&str> = chosen
+                        .iter()
+                        .filter(|c| !c.is_empty() && !options.iter().any(|(v, _)| v == *c))
+                        .map(String::as_str)
+                        .collect();
+                    let checked = if typed.is_empty() { "" } else { " checked" };
+                    self.push(&format!(
+                        "<div class=\"option-other\"><label class=\"option\"><input type=\"{input_type}\" name=\"{id}\" value=\"\" data-other=\"\"{checked}> <span>"
+                    ));
+                    self.text(other);
+                    self.push("</span></label>");
+                    self.push(&other_box(&typed.join(", "), other));
+                    self.push("</div>");
                 }
                 self.push("</div>");
                 self.empty_options_warning(component, attrs);
@@ -1192,6 +1240,51 @@ order: 2
             r.html
         );
         assert!(r.html.contains("checked"));
+    }
+
+    #[test]
+    fn other_adds_a_choice_with_a_text_box() {
+        let mut answers = HashMap::new();
+        answers.insert("db".to_string(), Value::String("MySQL".into()));
+        answers.insert("phases".to_string(), serde_json::json!(["Phase 1", "Later, maybe"]));
+        answers.insert("region".to_string(), Value::String("eu".into()));
+        let opts = Options {
+            page_path: "index",
+            base_url: "/d/x/",
+            answers: &answers,
+            images: &HashMap::new(),
+        };
+        let r = render(
+            "<RadioGroup name=\"db\" options=\"SQLite, Postgres\" other />\n\n\
+             <CheckboxGroup name=\"phases\" options=\"Phase 1, Phase 2\" other=\"Something else\" />\n\n\
+             <Select name=\"region\" options=\"eu, us\" other />\n\n\
+             <TextInput name=\"t\" other />",
+            Format::Mdx,
+            &opts,
+        )
+        .unwrap();
+        // The typed answer checks Other and fills its box.
+        assert!(
+            r.html.contains(
+                "<input type=\"radio\" name=\"f-db\" value=\"\" data-other=\"\" checked=\"\"> <span>Other</span></label><input type=\"text\" class=\"other-text\" aria-label=\"Other\" placeholder=\"Your answer\" value=\"MySQL\">"
+            ),
+            "{}",
+            r.html
+        );
+        assert!(r.html.contains("<span>Something else</span>"), "{}", r.html);
+        assert!(r.html.contains("value=\"Later, maybe\""), "{}", r.html);
+        assert!(r.html.contains("value=\"Phase 1\" checked"), "{}", r.html);
+        // A chosen option leaves Other unchosen and its box empty.
+        assert!(r.html.contains("<option value=\"eu\" selected=\"\">"), "{}", r.html);
+        assert!(
+            r.html.contains(
+                "<option value=\"\" data-other=\"\">Other…</option></select><input type=\"text\" class=\"other-text\""
+            ),
+            "{}",
+            r.html
+        );
+        // Only choice fields have it.
+        assert_eq!(r.html.matches("other-text").count(), 3, "{}", r.html);
     }
 
     #[test]

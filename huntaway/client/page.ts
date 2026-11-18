@@ -5,7 +5,7 @@
 // popup (saved when you click away, Esc cancels), and the comments as bubbles beside their quotes; and a bar that sends
 // the answers and comments to the task that published the document.
 import { layoutBubbles } from "../../frontend/src/bubbles.ts"
-import { fieldValue } from "../../frontend/src/answer.ts"
+import { fieldValue, linkOther } from "../../frontend/src/answer.ts"
 import { CONTEXT, findQuote, indexText, offsetOf, rangeFor } from "../../frontend/src/quote.ts"
 
 interface Bridge {
@@ -205,6 +205,7 @@ function initFields(): void {
   const article = document.querySelector<HTMLElement>("article.doc-content")
   if (!article) return
   for (const field of article.querySelectorAll<HTMLElement>(".field[data-field]")) {
+    linkOther(field)
     const status = field.querySelector<HTMLElement>(".field-status")
     const setStatus = (text: string, kind = "") => {
       if (!status) return

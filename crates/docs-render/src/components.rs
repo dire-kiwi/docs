@@ -31,6 +31,11 @@ const OPTIONS: Prop = p(
     "List of choices: options={[\"A\", \"B\"]}, options={[{value: \"a\", label: \"A\"}]} or options=\"A, B\".",
 );
 
+const OTHER: Prop = p(
+    "other",
+    "Adds an \"Other\" choice with a text box for an answer that isn't an option: `other`, or other=\"Something else\" to name it.",
+);
+
 pub const COMPONENTS: &[ComponentDoc] = &[
     ComponentDoc {
         name: "Callout",
@@ -73,22 +78,22 @@ pub const COMPONENTS: &[ComponentDoc] = &[
     ComponentDoc {
         name: "Select",
         summary: "Pick one option from a dropdown.",
-        props: &[NAME, LABEL, OPTIONS, HELP, REQUIRED],
-        answer: Some("string (the chosen value)"),
+        props: &[NAME, LABEL, OPTIONS, OTHER, HELP, REQUIRED],
+        answer: Some("string (the chosen value, or the text typed for Other)"),
         example: "<Select name=\"region\" label=\"Deploy region\" options={[\"us-east\", \"eu-west\", \"ap-southeast\"]} />",
     },
     ComponentDoc {
         name: "RadioGroup",
         summary: "Pick one option, with every option visible.",
-        props: &[NAME, LABEL, OPTIONS, HELP, REQUIRED],
-        answer: Some("string (the chosen value)"),
-        example: "<RadioGroup name=\"database\" label=\"Which database?\" options={[\"SQLite\", \"Postgres\"]} />",
+        props: &[NAME, LABEL, OPTIONS, OTHER, HELP, REQUIRED],
+        answer: Some("string (the chosen value, or the text typed for Other)"),
+        example: "<RadioGroup name=\"database\" label=\"Which database?\" options={[\"SQLite\", \"Postgres\"]} other />",
     },
     ComponentDoc {
         name: "CheckboxGroup",
         summary: "Pick any number of options.",
-        props: &[NAME, LABEL, OPTIONS, HELP],
-        answer: Some("array of chosen values"),
+        props: &[NAME, LABEL, OPTIONS, OTHER, HELP],
+        answer: Some("array of chosen values (with the text typed for Other, if it's chosen)"),
         example: "<CheckboxGroup name=\"phases\" label=\"Which phases should go ahead?\" options={[\"Phase 1\", \"Phase 2\", \"Phase 3\"]} />",
     },
     ComponentDoc {

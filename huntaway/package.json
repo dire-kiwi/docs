@@ -28,7 +28,7 @@
     "preview": "node scripts/build.mjs --client && node scripts/preview.ts"
   },
   "dependencies": {
-    "@dire-kiwi/docs-render": "https://github.com/dire-kiwi/docs/releases/download/render-v0.4.0/dire-kiwi-docs-render-0.4.0.tgz",
+    "@dire-kiwi/docs-render": "https://github.com/dire-kiwi/docs/releases/download/render-v0.5.0/dire-kiwi-docs-render-0.5.0.tgz",
     "sharp": "^0.35.5"
   },
   "peerDependencies": {
