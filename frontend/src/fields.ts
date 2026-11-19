@@ -12,6 +12,16 @@ export function initFields(): void {
       status.textContent = text;
       status.dataset.state = state;
     };
+    if (field.closest("[data-readonly]")) {
+      // A public document read by someone it isn't shared with: nothing to save.
+      for (const input of field.querySelectorAll<
+        HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | HTMLButtonElement
+      >("input, textarea, select, button")) {
+        input.disabled = true;
+      }
+      setStatus("Only people the document is shared with can answer");
+      continue;
+    }
     if (!article) {
       // e.g. the examples on the components page
       field.addEventListener("change", () => setStatus("Preview: answers are not saved here"));

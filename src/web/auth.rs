@@ -56,6 +56,11 @@ impl FromRequestParts<AppState> for Viewer {
 }
 
 impl Viewer {
+    /// The path (and query) of the request.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
     pub fn require(&self) -> AppResult<&User> {
         self.user.as_ref().ok_or_else(|| AppError::Login(self.path.clone()))
     }

@@ -183,11 +183,11 @@ impl Server<'_> {
         Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
     }
 
-    fn url(&self, slug: &str, version: Option<i64>, path: &str) -> String {
+    fn url(&self, uuid: &str, version: Option<i64>, path: &str) -> String {
         format!(
             "{}{}{}",
             self.state.config.base_url,
-            doc_base(slug, version),
+            doc_base(uuid, version),
             paths::url_suffix(path)
         )
     }
@@ -243,7 +243,7 @@ impl Server<'_> {
         Ok(json!({
             "slug": doc.slug,
             "labels": stored.unwrap_or_default(),
-            "url": self.url(&doc.slug, None, "index"),
+            "url": self.url(&doc.uuid, None, "index"),
         }))
     }
 
@@ -257,7 +257,7 @@ impl Server<'_> {
         let doc = self.doc(&a.slug).await?;
         let version = self.version(&doc, a.version).await?;
         let pages = db::pages(&self.state.db, version.id).await?;
-        let version_images = self.images_json(&doc.slug, version.id).await?;
+        let version_images = self.images_json(&doc.uuid, version.id).await?;
         let versions = db::versions(&self.state.db, doc.id).await?;
         let sharing = if doc.owner_id == self.user.id {
             Some(self.sharing(&doc).await?)
@@ -271,14 +271,14 @@ impl Server<'_> {
             "folder": doc.folder,
             "labels": doc.labels,
             "owner": doc.owner,
-            "url": self.url(&doc.slug, None, "index"),
+            "url": self.url(&doc.uuid, None, "index"),
             "version": version,
             "latest_version": doc.latest_version,
             "pages": pages.iter().map(|p| json!({
                 "path": p.path,
                 "title": p.title,
                 "format": p.format,
-                "url": self.url(&doc.slug, a.version, &p.path),
+                "url": self.url(&doc.uuid, a.version, &p.path),
             })).collect::<Vec<_>>(),
             "images": version_images,
             "versions": versions.iter().take(50).collect::<Vec<_>>(),
@@ -309,7 +309,7 @@ impl Server<'_> {
             "title": page.title,
             "format": page.format,
             "version": version.number,
-            "url": self.url(&doc.slug, Some(version.number), &page.path),
+            "url": self.url(&doc.uuid, Some(version.number), &page.path),
             "content": page.source,
         }))
     }
@@ -438,7 +438,7 @@ impl Server<'_> {
         let doc = self.doc(&slug).await?;
         let version = self.version(&doc, Some(number)).await?;
         let all = db::pages(&self.state.db, version.id).await?;
-        let version_images = self.images_json(&slug, version.id).await?;
+        let version_images = self.images_json(&doc.uuid, version.id).await?;
         // An existing document stays where it is, so a publish doesn't undo the user's move.
         let note = (a.folder.is_some() && doc.folder != folder).then(|| {
             format!(
@@ -452,9 +452,9 @@ impl Server<'_> {
             "labels": doc.labels,
             "note": note,
             "version": number,
-            "url": self.url(&slug, None, "index"),
-            "version_url": self.url(&slug, Some(number), "index"),
-            "pages": all.iter().map(|p| json!({ "path": p.path, "title": p.title, "url": self.url(&slug, None, &p.path) })).collect::<Vec<_>>(),
+            "url": self.url(&doc.uuid, None, "index"),
+            "version_url": self.url(&doc.uuid, Some(number), "index"),
+            "pages": all.iter().map(|p| json!({ "path": p.path, "title": p.title, "url": self.url(&doc.uuid, None, &p.path) })).collect::<Vec<_>>(),
             "images": version_images,
             "warnings": warnings,
         }))
@@ -516,13 +516,13 @@ impl Server<'_> {
     }
 
     /// A version's images with the URLs they are served from.
-    async fn images_json(&self, slug: &str, version_id: i64) -> Result<Value, ToolError> {
+    async fn images_json(&self, uuid: &str, version_id: i64) -> Result<Value, ToolError> {
         let list = db::version_images(&self.state.db, version_id).await?;
         Ok(json!(
             list.iter()
                 .map(|i| json!({
                     "name": i.name,
-                    "url": format!("{}{}", self.state.config.base_url, image_path(slug, &i.sha256)),
+                    "url": format!("{}{}", self.state.config.base_url, image_path(uuid, &i.sha256)),
                     "bytes": i.bytes,
                 }))
                 .collect::<Vec<_>>()
@@ -536,7 +536,8 @@ impl Server<'_> {
         Ok(json!({
             "shared_with": shares.iter().map(|s| &s.login).collect::<Vec<_>>(),
             "share_link": token.map(|t| format!("{}/s/{t}", self.state.config.base_url)),
-            "manage_url": format!("{}/d/{}/-/share", self.state.config.base_url, doc.slug),
+            "public": doc.public,
+            "manage_url": format!("{}/d/{}/-/share", self.state.config.base_url, doc.uuid),
         }))
     }
 
@@ -549,9 +550,10 @@ impl Server<'_> {
             #[serde(default)]
             remove_users: Vec<String>,
             link: Option<String>,
+            public: Option<bool>,
         }
         let a: A = args(a)?;
-        let doc = self.doc(&a.slug).await?;
+        let mut doc = self.doc(&a.slug).await?;
         if doc.owner_id != self.user.id {
             return Err(ToolError(format!(
                 "only the owner ({}) can share {:?}",
@@ -588,8 +590,12 @@ impl Server<'_> {
                 )));
             }
         }
+        if let Some(public) = a.public {
+            db::set_public(&self.state.db, doc.id, public).await?;
+            doc.public = public;
+        }
         let mut out = self.sharing(&doc).await?;
-        out["url"] = json!(self.url(&doc.slug, None, "index"));
+        out["url"] = json!(self.url(&doc.uuid, None, "index"));
         Ok(out)
     }
 
@@ -612,7 +618,7 @@ impl Server<'_> {
         Ok(json!({
             "slug": doc.slug,
             "folder": folder,
-            "url": self.url(&doc.slug, None, "index"),
+            "url": self.url(&doc.uuid, None, "index"),
         }))
     }
 
@@ -705,7 +711,8 @@ pub fn documents_json(base_url: &str, user: &User, docs: &[DocumentSummary]) -> 
             "title": d.title,
             "folder": d.folder,
             "labels": d.labels,
-            "url": format!("{base_url}{}", doc_base(&d.slug, None)),
+            "url": format!("{base_url}{}", doc_base(&d.uuid, None)),
+            "public": d.public,
             "latest_version": d.latest_version,
             "pages": d.page_count,
             "owner": d.owner,
