@@ -108,6 +108,12 @@ struct Server<'a> {
     user: &'a User,
 }
 
+/// `publish_document` for another caller (the site's editor): the same checks, image
+/// handling and answer.
+pub(crate) async fn publish_as(state: &AppState, user: &User, arguments: Value) -> Result<Value, ToolError> {
+    Server { state, user }.publish(arguments).await
+}
+
 /// A tool failure reported to the model (as opposed to a protocol error).
 pub(crate) struct ToolError(pub String);
 

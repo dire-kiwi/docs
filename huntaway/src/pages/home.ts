@@ -130,6 +130,7 @@ export const homePage = (d: HomeData): Raw => {
     ${d.profiles.length > 1 ? html`<span class="tabs">${d.profiles.map((x) => html`<a class="${x.id === d.profile.id ? "on" : ""}" href="${at(encodeURIComponent(x.id))}">${x.name}</a>`)}</span>` : html`<span class="muted">${d.profile.name}</span>`}
     <span class="grow"></span>
     <span class="tabs"><a class="${d.view === "folders" ? "on" : ""}" href="${at(p)}">Folders</a><a class="${d.view === "labels" ? "on" : ""}" href="${at(`${p}/labels`)}">Labels</a></span>
+    <a class="new-doc" href="${at(`${p}/new`)}">New document</a>
   </div>
   ${sitePanel(d.profile.id, d.site)}
   ${

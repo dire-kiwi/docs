@@ -55,7 +55,7 @@ export interface Harness {
   readonly ok: (name: string, args: Readonly<Record<string, unknown>>, ctx?: CallContext) => Effect.Effect<any>
   /** A tool's error, or the test fails. */
   readonly refused: (name: string, args: Readonly<Record<string, unknown>>) => Effect.Effect<string>
-  readonly page: (path: string) => Effect.Effect<any, PluginError>
+  readonly page: (path: string, query?: Readonly<Record<string, string>>) => Effect.Effect<any, PluginError>
   readonly task: (id: string) => Effect.Effect<any, PluginError>
   readonly settings: Effect.Effect<any, PluginError>
   readonly call: (method: string, payload: unknown) => Effect.Effect<any, PluginError>
@@ -129,7 +129,7 @@ export const harness = (options: { readonly board?: Readonly<Record<string, Read
       tool,
       ok: (name, args, ctx) => Effect.flatMap(tool(name, args, ctx), (r) => (r.isError ? Effect.die(new Error(`${name} failed: ${r.text}`)) : Effect.succeed(r.json))),
       refused: (name, args) => Effect.flatMap(tool(name, args), (r) => (r.isError ? Effect.succeed(r.text) : Effect.die(new Error(`${name} succeeded: ${r.text}`)))),
-      page: (path) => parts.pages!.render({ slot: "page", path, query: {}, task_id: null, session }),
+      page: (path, query = {}) => parts.pages!.render({ slot: "page", path, query, task_id: null, session }),
       task: (id) => parts.pages!.render({ slot: "task", path: "", query: {}, task_id: id, session }),
       settings: parts.pages!.render({ slot: "settings", path: "", query: {}, task_id: null, session }),
       call: (method, payload) => {

@@ -2,11 +2,15 @@
 // `huntaway.call` to the plugin on its host). Forms and buttons; times in the reader's zone; links to a page's own
 // headings; and on a document, its form fields saving the user's answers as they give them (frontend/src/fields.ts, sharing its answer.ts),
 // comments on its text as the hosted site's reader has them (frontend/src/selection.ts): select text, comment in the
-// popup (saved when you click away, Esc cancels), and the comments as bubbles beside their quotes; and a bar that sends
-// the answers and comments to the task that published the document.
+// popup (saved when you click away, Esc cancels), and the comments as bubbles beside their quotes; a bar that sends
+// the answers and comments to the task that published the document; and the editor, where the user edits a document's
+// pages and saves them as a new version (frontend/src/editor.ts, previewing and saving through the plugin's calls).
 import { layoutBubbles } from "../../frontend/src/bubbles.ts"
 import { fieldValue, linkOther } from "../../frontend/src/answer.ts"
 import { CONTEXT, findQuote, indexText, offsetOf, rangeFor } from "../../frontend/src/quote.ts"
+import { mountEditor } from "../../frontend/src/editor.ts"
+import type { Draft, EditorData, PreviewResult, SaveResult } from "../../frontend/src/editor.ts"
+import editorCss from "../../frontend/src/editor.css"
 
 interface Bridge {
   call(method: string, payload?: unknown): Promise<unknown>
@@ -17,12 +21,15 @@ interface Bridge {
 interface State {
   page?: string
   profile?: string
-  slug?: string
+  slug?: string | null
   version?: number
   path?: string
   unsent?: number
   unsent_answers?: number
   task?: { id: string; key: string; title: string } | null
+  /** The editor's page: what it opens with, and the changes it had kept and not saved. */
+  editor?: EditorData
+  draft?: Draft | null
 }
 declare global {
   interface Window {
@@ -561,4 +568,40 @@ function bubble(id: number, createdAt: string, s: { quote: string; prefix: strin
   b.append(quote, p, footer)
   showTimes(b)
   return b
+}
+
+// ---- the editor ---------------------------------------------------------------------------------------------------------
+
+if (state.page === "edit" && state.editor) {
+  const style = document.createElement("style")
+  style.textContent = editorCss
+  document.head.append(style)
+  const root = document.getElementById("editor")
+  const slug = state.slug ?? null
+  if (root) {
+    mountEditor(root, state.editor, {
+      async preview(page) {
+        const out = (await bridge.call("doc.preview", { profile: state.profile, slug, ...page })) as {
+          html: string | null
+          has_h1: boolean
+          warnings: string[]
+          error: string | null
+        }
+        const result: PreviewResult = { html: out.html, hasH1: out.has_h1, warnings: out.warnings, error: out.error }
+        return result
+      },
+      async save(request) {
+        return (await bridge.call("doc.save", { profile: state.profile, slug, ...request })) as SaveResult
+      },
+      go(url) {
+        bridge.navigate(url)
+      },
+      // Kept in the plugin: the board reloads its pages when any document changes.
+      drafts: {
+        load: async () => state.draft ?? null,
+        save: async (draft) => void (await bridge.call("draft.keep", { profile: state.profile, slug, draft })),
+        clear: async () => void (await bridge.call("draft.keep", { profile: state.profile, slug, draft: null })),
+      },
+    })
+  }
 }

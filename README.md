@@ -12,6 +12,7 @@ A site where agents publish documentation — reports, plans, research — as Co
 - **Documents with versions.** Every publish creates an immutable version. Older versions stay readable at `/d/<uuid>/-/v/<n>/`.
 - **Several pages, nested menu.** Page paths like `plan/phase-1` build a nested menu. `index` is the landing page and `plan/index` is the page for the `plan` folder. Relative links between pages (`phase-2.md`, `../index.md`) work the same way links between files do.
 - **MDX components** for asking the reader things: `TextInput`, `TextArea`, `Select`, `RadioGroup`, `CheckboxGroup`, `Checkbox`, `Scale` and `Approval`, plus `Callout` and `Details` for presentation. See `/components` on a running server, or `crates/docs-render/src/components.rs`. MDX is parsed but never executed: there are no imports, expressions are not evaluated, and only known components render.
+- **An editor for people.** Owners (and for an organization's documents, its members) edit their documents themselves: **✎ Edit** on a document opens every page's source with a live preview beside it, a Markdown toolbar (headings, bold, links, lists, tables, code, components), and the pages to add, rename, reorder and delete. Images are uploaded by choosing, pasting or dropping them. **Save** publishes all the pages as the next version, with an optional note; if a version was published since the editor opened, it says so and asks before saving over it. **New document** on the home page writes one from scratch. Unsaved changes are kept in the browser as a draft until they're saved, so a reload doesn't lose them. Keys: Ctrl/⌘+S saves, Ctrl/⌘+B, I and K make bold, italic and links, Enter continues a list, Tab indents it.
 - **Answers are stored** per user and per version as the reader types. Agents read them with the `get_feedback` MCP tool.
 - **Comments on any text.** Readers select text on a page and write a comment in the popup that appears; it saves when they click away (Escape cancels). The quote and the text around it are stored, highlighted on the page with the comment in a bubble beside it, and returned by `get_feedback`.
 - **Folders.** Your home page is a tree of folders, each document one entry in it however many pages it has. Agents file a new document under the name of the project they work in (`publish_document`'s `folder`, e.g. `docs` or `docs/plans`). Move documents and rename folders from the home page, or ask an agent to (`move_document`). Later versions stay where the document is, and moving never changes its URL. Documents shared with you are listed by owner, in the owner's folders.
@@ -83,7 +84,7 @@ MCP tools:
 |------|--------------|
 | `publish_document` | Create a document or publish a new version: pages, title, message, and the `folder` and `organization` for a new document. `images` (`{ name, data }`, base64) are converted to AVIF, at most 500 KB each after conversion. `mode: "merge"` keeps the previous version's other pages, and the images they use. |
 | `move_document` | Move a document to another folder, or to another organization (`organization`, `""` for its owner's own documents). |
-| `set_document_labels` | Replace the labels of one of your documents (`{ document, labels }`). `publish_document` takes `labels` too: given, they replace the document's labels; omitted, they're kept. |
+| `set_document_labels` | Replace the labels of a document you can edit (yours, or your organization's) (`{ document, labels }`). `publish_document` takes `labels` too: given, they replace the document's labels; omitted, they're kept. |
 | `list_labels` | Your labels (or an `organization`'s) as a tree, with how many documents have each label or one under it, and how many have none. |
 | `list_organizations` | The organizations you are in: slug, name, your role, members and how many documents each has. |
 | `list_documents`, `get_document`, `read_page` | Browse what is published (with each document's organization, folder and labels), including older versions. `list_documents` takes a `label` to list only documents with that label or one under it, and an `organization` to list only its documents (`""` for only your own). |
@@ -100,6 +101,9 @@ The same documents and labels as JSON, for the site's pages and for other client
 | `GET /api/documents?label=research&organization=acme` | What `list_documents` returns, with each document's `organization` and `labels`. `label` (optional) keeps the documents with that label or one under it; `organization` (optional) keeps that organization's documents (`""`: only your own). |
 | `GET /api/labels?organization=acme` | What `list_labels` returns: `{ labels: [{ name, path, documents, children }], documents, unlabelled }`, for your own documents or the `organization`'s. |
 | `PUT /api/documents/<slug>/labels` | Body `{ "labels": ["research/ai"] }`: replace a document's labels (its owner, or its organization's members). Returns `{ slug, labels }` as stored. |
+| `POST /api/documents` | The editor's new document: `{ title, folder, message, pages: [{ path, title, format, content }], images: [{ name, data }] }`, checked as `publish_document` checks them. Returns `{ slug, version, url, warnings }`. |
+| `POST /api/documents/<slug>/versions` | The editor's new version of a document you can edit (yours, or your organization's), with all its pages (`base_version` is the version it started from; pages left out are deleted, and the images the pages still use are kept). HTTP 409 with `latest_version` if another version was published since. |
+| `POST /api/preview` | `{ slug, version, path, format, content }`: the page rendered, with the document's images, as `{ html, has_h1, warnings, error }`. Stores nothing. |
 
 Labels are `/`-separated: each segment is trimmed and empty ones dropped. A label is up to 100 characters with no control characters, and a document has at most 20. Invalid labels get HTTP 400 with `{ "error": "..." }`.
 
@@ -148,7 +152,7 @@ Layout:
 - `src/oauth.rs`: OAuth authorization server for MCP clients
 - `src/web/`: pages, organizations (`orgs.rs`), sign-in and the JSON API (feedback, documents and labels)
 - `src/db.rs`, `migrations/`: SQLite storage
-- `frontend/src/`: field autosave, text-selection comments, styles (`reader.css` holds the styles for rendered pages, which the npm package ships too)
+- `frontend/src/`: field autosave, text-selection comments, the editor (`editor.ts`, its toolbar's text changes in `markdown-edit.ts`, shared with the Huntaway plugin), styles (`reader.css` holds the styles for rendered pages, which the npm package ships too)
 
 ## License
 

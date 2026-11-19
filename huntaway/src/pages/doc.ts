@@ -68,6 +68,7 @@ export const docPage = (d: DocData): Raw => {
       ${doc.labels.map((l) => html`<a class="chip" href="${at(`${encodeURIComponent(profile)}/labels/${l.split("/").map(encodeURIComponent).join("/")}`)}">${l}</a>`)}
       ${d.versions[0]?.task == null ? "" : html`<span class="muted">by <a href="/t/${encodeURIComponent(d.versions[0]?.task?.id ?? "")}">${d.versions[0]?.task?.key}</a></span>`}
       <span class="grow"></span>
+      ${shownLatest ? html`<a href="${at(`${docPath(profile, doc.slug, null)}-/edit/${d.urlSuffix(d.page.path)}`)}" title="Edit the pages and save them as a new version">Edit</a>` : ""}
       <button type="button" class="link" data-toggle="labels-form">Labels</button>
       <button type="button" class="link" data-toggle="move-form">Move</button>
       ${d.site.connected ? html`<button type="button" class="link" data-toggle="publish-form">Publish to ${site}</button>` : ""}

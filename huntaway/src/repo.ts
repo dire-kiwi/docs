@@ -111,6 +111,7 @@ const idRows = rowsOf(Id)
 const labelRows = rowsOf(Label)
 const countRows = rowsOf(Count)
 const publishedRows = rowsOf(Published)
+const draftRows = rowsOf(Schema.Struct({ data: Schema.String }))
 
 // Labels have no control characters, so a newline keeps them apart.
 const docOf = (r: typeof DocRow.Type): Doc => ({
@@ -243,12 +244,20 @@ export const makeRepo = (sql: SqlClient.SqlClient) => {
       Effect.gen(function* () {
         const gone = yield* idRows(sql`DELETE FROM docs WHERE profile_id = ${profile} AND slug = ${slug} RETURNING id`)
         if (gone.length === 0) return false
+        yield* sql`DELETE FROM doc_drafts WHERE profile_id = ${profile} AND slug = ${slug}`.pipe(Effect.orDie)
         yield* sql`DELETE FROM doc_images WHERE profile_id = ${profile} AND NOT EXISTS (SELECT 1 FROM doc_version_images vi
           JOIN doc_versions v ON v.id = vi.version_id JOIN docs d ON d.id = v.doc_id
           WHERE vi.sha256 = doc_images.sha256 AND d.profile_id = ${profile})`.pipe(Effect.orDie)
         return true
       }),
     move: (doc: string, folder: string) => done(sql`UPDATE docs SET folder = ${folder} WHERE id = ${doc}`),
+    /** The editor's unsaved changes to a document (slug '' for a new one), as JSON. */
+    draft: (profile: string, slug: string) =>
+      Effect.map(first(draftRows(sql`SELECT data FROM doc_drafts WHERE profile_id = ${profile} AND slug = ${slug}`)), (r) => r?.data ?? null),
+    putDraft: (profile: string, slug: string, data: string, now: string) =>
+      done(sql`INSERT INTO doc_drafts (profile_id, slug, data, updated_at) VALUES (${profile}, ${slug}, ${data}, ${now})
+        ON CONFLICT (profile_id, slug) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at`),
+    dropDraft: (profile: string, slug: string) => done(sql`DELETE FROM doc_drafts WHERE profile_id = ${profile} AND slug = ${slug}`),
     /** A document's comments by version, page, then age: on one version, and made or changed at or after `since`, if given. */
     comments: (doc: string, filter: { readonly version?: number | null; readonly since?: string | null } = {}) => {
       const version = filter.version ?? null
