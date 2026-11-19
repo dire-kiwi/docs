@@ -1,3 +1,4 @@
+import { createHash, randomBytes } from "node:crypto"
 import { Clock, DateTime, Effect, Option, Result, Schema } from "effect"
 import { PluginError } from "@huntaway/plugin"
 import type { PluginHostShape } from "@huntaway/plugin"
@@ -19,6 +20,12 @@ import type { Caller, PublishInput } from "./publish.ts"
 
 /** A refusal an agent is told in the docs server's words (the hosted server's, where it has one). */
 export class DocsRefused extends Schema.TaggedError<DocsRefused>()("DocsRefused", { message: Schema.String }) {}
+
+/** Why an image file sent to an upload URL isn't taken: the answer's HTTP status, and what it says (the hosted site's words). */
+export class UploadRefused extends Schema.TaggedError<UploadRefused>()("UploadRefused", { status: Schema.Int, message: Schema.String }) {}
+
+/** An upload URL's token as it is kept: its SHA-256, so the database doesn't hold what uploads. */
+const tokenHash = (token: string): string => createHash("sha256").update(token).digest("hex")
 
 /** The longest quote, comment, and quote's context either side a comment may have, in characters. */
 export const MAX_QUOTE_CHARS = 10_000
@@ -596,6 +603,57 @@ export const makeDocs = (deps: DocsDeps) => {
       }
     }),
     components: Effect.sync(() => lib.componentsReference()),
+
+    // ---- images uploaded on their own (DOC-22): over HTTP, so their bytes don't go through a tool call ----------------
+
+    /**
+     * `create_upload_url`: a URL the caller's profile's agents send image files to (the plugin's `/uploads/:token`
+     * route), for an hour. The token is random and only its hash is kept. Uploads that expired go now.
+     */
+    uploadUrl: Effect.fn("Docs.uploadUrl")(function* (caller: Caller) {
+      const now = yield* Clock.currentTimeMillis
+      const limits = lib.imageLimits()
+      yield* tx(repo.purgeUploads(now))
+      const token = randomBytes(32).toString("base64url")
+      yield* repo.addUploadUrl(tokenHash(token), caller.profile, now + limits.uploadUrlSeconds * 1000)
+      const url = `${yield* host.boardUrl}/plugins/${host.plugin}/uploads/${token}`
+      return {
+        upload_url: url,
+        expires_in: limits.uploadUrlSeconds,
+        curl: `curl -sS --data-binary @FILE "${url}"`,
+        then: 'Each upload answers { "id": ... }: pass { "name": "images/<name>.png", "upload": "<id>" } in publish_document\'s `images`, within a day.',
+      }
+    }),
+    /** Whose uploads an upload URL's token takes, while it lasts: asked before anything of the request is read. */
+    uploader: Effect.fn("Docs.uploader")(function* (token: string) {
+      const profile = yield* repo.uploadUrlProfile(tokenHash(token), yield* Clock.currentTimeMillis)
+      if (profile === null) return yield* new UploadRefused({ status: 404, message: lib.uploadErrors().url })
+      return profile
+    }),
+    /**
+     * An image file sent to an upload URL: checked and converted to AVIF as a publish's images are, and kept for the
+     * URL's profile to publish, under a random UUID, for a day.
+     */
+    upload: Effect.fn("Docs.upload")(function* (profile: string, bytes: Uint8Array) {
+      const now = yield* Clock.currentTimeMillis
+      const limits = lib.imageLimits()
+      if (bytes.length === 0) return yield* new UploadRefused({ status: 400, message: lib.uploadErrors().body })
+      const no = (e: { readonly message: string }) => new UploadRefused({ status: 400, message: e.message })
+      const data = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.length).toString("base64")
+      const checked = yield* Effect.mapError(rendered(() => lib.validateUpload(data)), no)
+      const image = yield* Effect.mapError(deps.images.convertBytes(lib, { name: "", label: checked.label, format: checked.format }, bytes), no)
+      const id = yield* deps.uuid
+      const at = yield* nowIso
+      yield* tx(
+        Effect.gen(function* () {
+          if ((yield* repo.waitingUploads(profile, now)) >= limits.maxWaitingUploads) {
+            return yield* new UploadRefused({ status: 429, message: lib.uploadErrors().tooMany })
+          }
+          yield* repo.addUpload(id, profile, image, at, now + limits.uploadKeptSeconds * 1000)
+        }),
+      )
+      return { id, bytes: image.data.length, expires_in: limits.uploadKeptSeconds }
+    }),
   }
 }
 

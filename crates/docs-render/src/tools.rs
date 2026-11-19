@@ -15,8 +15,10 @@ Documents are organised in folders: when you create one, set `folder` to the nam
 optionally with a subfolder (\"docs/plans\"). Later versions stay in whatever folder the document is in; use `move_document` only when the user asks to move one. \
 Documents can also have labels, nested with '/' (\"research/ai\"): pass `labels` to `publish_document` or call `set_document_labels`, \
 and call `list_labels` to reuse the labels that already exist rather than inventing near-duplicates. \
-Pages can show images: pass them in `publish_document`'s `images` (`{ name, data }`, base64) and refer to them by name (`![chart](images/chart.png)`), \
-or inline them as `data:image/png;base64,...` URIs. PNG, JPEG, WebP, GIF (first frame) and AVIF are accepted, not SVG. \
+Pages can show images, referred to by name (`![chart](images/chart.png)`). For an image file (a screenshot, a chart), call `create_upload_url` \
+and send the file to the URL it gives (`curl --data-binary @chart.png \"<upload_url>\"`), then pass `{ name, upload: <the id it answered> }` in `publish_document`'s `images`: \
+its bytes never go through a tool call. Small images can also be passed there as `{ name, data }` (base64), or inlined in a page as `data:image/png;base64,...` URIs. \
+PNG, JPEG, WebP, GIF (first frame) and AVIF are accepted, not SVG. \
 Every image is converted to AVIF and must be at most 500 KB (512000 bytes) after conversion, so downscale big screenshots and photos; \
 the originals aren't kept. Image data doesn't count towards a page's size. \
 Plain Markdown needs no reference. For components (callouts, collapsible sections, form fields), call `list_components` \
@@ -95,8 +97,9 @@ pub fn tool_definitions() -> Value {
     Paths may be nested (\"plan/phase-1\"); \"index\" is the landing page and \"plan/index\" the page for the \"plan\" folder. \
     Pages are listed in the order given, unless their YAML frontmatter has `order: <n>`; the title comes from `title`, the frontmatter, or the first # heading. \
     Relative links between pages (\"phase-2.md\", \"../index.md\") work like links between files. \
-    Images: pass them in `images` and refer to them by name (`![chart](images/chart.png)`, resolved against the page's folder, then the document root), \
-    or inline them in a page as `data:image/png;base64,...` URIs (each is stored as an image and the URI replaced with its name). \
+    Images: pass them in `images` and refer to them by name (`![chart](images/chart.png)`, resolved against the page's folder, then the document root). \
+    Each is either an `upload` (the id of a file sent to a create_upload_url URL: best for image files, as their bytes stay out of this call) or `data` (base64). \
+    Images can also be inlined in a page as `data:image/png;base64,...` URIs (each is stored as an image and the URI replaced with its name). \
     PNG, JPEG, WebP, GIF (first frame) and AVIF are accepted; SVG isn't. Every image is converted to AVIF, \
     and the publish is rejected if one is over 500 KB (512000 bytes) after conversion: downscale or crop it. \
     The originals aren't kept. At most 200 images per version; image data doesn't count towards a page's 1,000,000-byte limit. \
@@ -131,9 +134,10 @@ pub fn tool_definitions() -> Value {
                             "type": "object",
                             "properties": {
                                 "name": { "type": "string", "description": "Relative path pages refer to it by, e.g. \"images/chart.png\" (letters, digits, '.', '_' and '-', separated by '/')." },
-                                "data": { "type": "string", "description": "The image bytes in base64 (PNG, JPEG, WebP, GIF or AVIF; not SVG), without a data: prefix." },
+                                "upload": { "type": "string", "description": "The id of an image uploaded to a create_upload_url URL. Give this or `data`, not both." },
+                                "data": { "type": "string", "description": "The image bytes in base64 (PNG, JPEG, WebP, GIF or AVIF; not SVG), without a data: prefix. Give this or `upload`, not both." },
                             },
-                            "required": ["name", "data"],
+                            "required": ["name"],
                         },
                     },
                     "mode": { "type": "string", "enum": ["replace", "merge"], "description": "replace (default): the new version has exactly these pages, and only the images given or inlined in this publish. \
@@ -142,6 +146,21 @@ pub fn tool_definitions() -> Value {
                 },
                 "required": ["pages"],
             },
+        },
+        {
+            "name": "create_upload_url",
+            "title": "Create image upload URL",
+            "description": "Get a URL to upload image files to over HTTP, so that their bytes don't go through a tool call as base64: \
+    use it for screenshots, charts and any other image you have as a file. \
+    Send each file as the body of a POST (or PUT): `curl -sS --data-binary @chart.png \"<upload_url>\"`. \
+    The answer is JSON: `{ \"id\": \"<uuid>\", \"bytes\": <size of the stored AVIF> }`, or `{ \"error\": \"...\" }`. \
+    Then give the image to publish_document in `images`, as `{ \"name\": \"images/chart.png\", \"upload\": \"<id>\" }`, \
+    and show it in a page by that name (`![Chart](images/chart.png)`). \
+    The URL takes any number of images for an hour. It has a random token in it: whoever has the URL can upload as you, so don't put it in a document. \
+    An uploaded image has the formats and limits of any other (PNG, JPEG, WebP, GIF or AVIF, not SVG; converted to AVIF, at most 500 KB (512000 bytes) after conversion), \
+    and its file can be at most 32 MiB. Its id is a random UUID that only you can publish with, in any number of publishes, \
+    and it is deleted a day after it was uploaded: publish it by then. An image in a document stays as long as the document does.",
+            "inputSchema": { "type": "object", "properties": {} },
         },
         {
             "name": "move_document",

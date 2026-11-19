@@ -94,6 +94,9 @@ pub fn router(state: AppState) -> Router {
             "/api/documents/{slug}/versions",
             post(api::save_version).layer(DefaultBodyLimit::max(mcp::MAX_REQUEST_BYTES)),
         )
+        // Image files, read by the handlers themselves (up to `images::MAX_UPLOAD_BYTES`).
+        .route("/api/uploads", post(api::upload))
+        .route("/api/uploads/{token}", post(api::upload_to_url).put(api::upload_to_url))
         .route("/api/preview", post(api::preview))
         .route("/api/documents/{slug}/labels", put(api::set_labels))
         .route("/api/labels", get(api::list_labels))
