@@ -27,7 +27,8 @@ Add form fields when you need a decision or input from the reader, \
 then call `get_feedback` later to read their answers and any text they selected and commented on. \
 Documents are private to the user you act for, unless they belong to an organization: the user may be a member of organizations (`list_organizations`), \
 whose documents every member can read and publish to. To publish for an organization, pass its slug as `publish_document`'s `organization` when you create the document. \
-Use `share_document` to share a document with other people (by username) or to get a share link. \
+Use `share_document` to share a document with other people (by username), to get a share link, \
+or to make it public (anyone with its URL can read it, without signing in) when the user asks. \
 Always give the reader the URL returned by `publish_document`.";
 
 /// The `tools/list` result: one entry per tool.
@@ -205,7 +206,9 @@ pub fn tool_definitions() -> Value {
             "title": "Share document",
             "description": "Documents are private to their owner, or to their organization's members. Share one with more people by username (they see it after signing in), \
     and/or turn on a share link: anyone who signs in and opens it gets access. People it is shared with can read it and leave feedback, \
-    but can't publish versions or change sharing. Returns who it is shared with and the link.",
+    but can't publish versions or change sharing. A document can also be made public: anyone with its URL (which has a random UUID in it) \
+    can read it without signing in, but can't answer or comment. Only make a document public when the user asks. \
+    Its owner, or its organization's members, can change sharing. Returns who it is shared with, the link, and whether it is public.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -213,6 +216,7 @@ pub fn tool_definitions() -> Value {
                     "add_users": { "type": "array", "items": { "type": "string" }, "description": "Usernames (e.g. GitHub logins) to share with." },
                     "remove_users": { "type": "array", "items": { "type": "string" }, "description": "Usernames to stop sharing with." },
                     "link": { "type": "string", "enum": ["keep", "enable", "disable", "regenerate"], "description": "Share link: enable (keeps an existing link), disable, or regenerate (invalidates the old link). Default keep." },
+                    "public": { "type": "boolean", "description": "true makes it public (anyone with its URL can read it), false private again. Omit to keep it as it is." },
                 },
                 "required": ["slug"],
             },

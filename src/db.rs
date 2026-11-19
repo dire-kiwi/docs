@@ -31,6 +31,16 @@ pub fn now() -> i64 {
     time::OffsetDateTime::now_utc().unix_timestamp()
 }
 
+/// A random (version 4) UUID, lowercase: what a document's URL has in it.
+pub fn new_uuid() -> String {
+    let mut b = [0u8; 16];
+    getrandom::fill(&mut b).expect("system random number generator");
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    format!("{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..])
+}
+
 /// 256 random bits, base64url encoded.
 pub fn random_token() -> String {
     let mut buf = [0u8; 32];
@@ -554,6 +564,10 @@ pub async fn poll_device_code(db: &Db, device_code: &str, client_id: &str) -> Re
 pub struct DocumentSummary {
     pub id: i64,
     pub slug: String,
+    /// What its URLs have in them (`/d/<uuid>/`), so they can't be guessed.
+    pub uuid: String,
+    /// Anyone with its URL can read it, without signing in.
+    pub public: bool,
     pub title: String,
     pub owner: String,
     pub owner_id: i64,
@@ -609,7 +623,7 @@ impl Space {
     }
 }
 
-const DOC_SUMMARY: &str = "SELECT d.id, d.slug, d.title, u.login AS owner, d.owner_id, d.org_id, o.slug AS organization, d.folder, d.updated_at,
+const DOC_SUMMARY: &str = "SELECT d.id, d.slug, d.uuid, d.public, d.title, u.login AS owner, d.owner_id, d.org_id, o.slug AS organization, d.folder, d.updated_at,
     (SELECT MAX(number) FROM versions v WHERE v.document_id = d.id) AS latest_version,
     (SELECT COUNT(*) FROM pages p JOIN versions v ON v.id = p.version_id
        WHERE v.document_id = d.id AND v.number = (SELECT MAX(number) FROM versions WHERE document_id = d.id)) AS page_count
@@ -640,15 +654,38 @@ pub async fn list_documents(db: &Db, user: &User) -> Result<Vec<DocumentSummary>
     Ok(docs)
 }
 
-/// A document, if `user` can see it.
-pub async fn get_document(db: &Db, slug: &str, user: &User) -> Result<Option<DocumentSummary>> {
-    let sql = format!("{DOC_SUMMARY} WHERE d.slug = ? AND {CAN_VIEW}");
-    let doc = bind_viewer(sqlx::query_as::<_, DocumentSummary>(&sql).bind(slug), user)
+/// A document, by its UUID or slug, if `user` can see it: they own it, are in its
+/// organization, or it is shared with them. (Being public doesn't count: see [`get_public_document`].)
+pub async fn get_document(db: &Db, key: &str, user: &User) -> Result<Option<DocumentSummary>> {
+    // A slug could look like another document's UUID; the UUID wins.
+    let sql = format!("{DOC_SUMMARY} WHERE (d.uuid = ? OR d.slug = ?) AND {CAN_VIEW} ORDER BY d.uuid = ? DESC LIMIT 1");
+    let doc = bind_viewer(sqlx::query_as::<_, DocumentSummary>(&sql).bind(key).bind(key), user)
+        .bind(key)
         .fetch_optional(db)
         .await?;
     let mut docs = Vec::from_iter(doc);
     finish(db, user, &mut docs).await?;
     Ok(docs.pop())
+}
+
+/// A public document, by its UUID only, so a public document can't be found by guessing its slug.
+pub async fn get_public_document(db: &Db, uuid: &str) -> Result<Option<DocumentSummary>> {
+    Ok(
+        sqlx::query_as::<_, DocumentSummary>(&format!("{DOC_SUMMARY} WHERE d.uuid = ? AND d.public = 1"))
+            .bind(uuid)
+            .fetch_optional(db)
+            .await?,
+    )
+}
+
+/// Make a document public or private again.
+pub async fn set_public(db: &Db, document_id: i64, public: bool) -> Result<()> {
+    sqlx::query("UPDATE documents SET public = ? WHERE id = ?")
+        .bind(public)
+        .bind(document_id)
+        .execute(db)
+        .await?;
+    Ok(())
 }
 
 /// Work out which documents `user` can edit, and fill in their labels.
@@ -755,9 +792,9 @@ pub async fn can_view_version(db: &Db, version_id: i64, user: &User) -> Result<b
     Ok(row.is_some())
 }
 
-/// Whether any document, visible or not, has this slug.
+/// Whether any document, visible or not, has this slug (or UUID).
 pub async fn slug_exists(db: &Db, slug: &str) -> Result<bool> {
-    Ok(sqlx::query("SELECT 1 FROM documents WHERE slug = ?")
+    Ok(sqlx::query("SELECT 1 FROM documents WHERE slug = ?1 OR uuid = ?1")
         .bind(slug)
         .fetch_optional(db)
         .await?
@@ -827,18 +864,18 @@ pub async fn set_share_token(db: &Db, document_id: i64, enabled: bool) -> Result
     Ok(token)
 }
 
-/// Opening a share link adds the user to the document's shares. Returns the slug.
+/// Opening a share link adds the user to the document's shares. Returns its UUID.
 pub async fn accept_share_link(db: &Db, token: &str, user: &User) -> Result<Option<String>> {
     let row: Option<(i64, String, i64)> =
-        sqlx::query_as("SELECT id, slug, owner_id FROM documents WHERE share_token = ?")
+        sqlx::query_as("SELECT id, uuid, owner_id FROM documents WHERE share_token = ?")
             .bind(token)
             .fetch_optional(db)
             .await?;
-    let Some((id, slug, owner)) = row else { return Ok(None) };
+    let Some((id, uuid, owner)) = row else { return Ok(None) };
     if owner != user.id {
         add_share(db, id, &user.login.to_lowercase()).await?;
     }
-    Ok(Some(slug))
+    Ok(Some(uuid))
 }
 
 #[derive(Debug, Clone, FromRow, Serialize)]
@@ -940,7 +977,7 @@ pub struct Publish<'a> {
     /// `None` for the user's own documents. Used only when the document is created.
     pub org_id: Option<i64>,
     /// Document to add a version to; created when it does not exist yet.
-    /// When `None`, a new document is created with a slug derived from the title.
+    /// Its slug or UUID. When `None`, a new document is created with a slug derived from the title.
     pub slug: Option<&'a str>,
     pub title: Option<&'a str>,
     /// Normalised folder, used only when the document is created.
@@ -968,10 +1005,11 @@ pub async fn publish(db: &Db, p: Publish<'_>) -> Result<(String, i64)> {
     let wanted = p.slug.map(doc_slug);
     let existing: Option<(i64, i64, String, bool)> = match &wanted {
         Some(slug) => {
+            // Agents may name a document by the UUID in its URL.
             sqlx::query_as(
-                "SELECT d.id, d.owner_id, d.slug, CASE WHEN d.org_id IS NULL THEN d.owner_id = ?
-                   ELSE EXISTS (SELECT 1 FROM organization_members m WHERE m.org_id = d.org_id AND m.login = ?) END
-                 FROM documents d WHERE d.slug = ?",
+                "SELECT d.id, d.owner_id, d.slug, CASE WHEN d.org_id IS NULL THEN d.owner_id = ?1
+                   ELSE EXISTS (SELECT 1 FROM organization_members m WHERE m.org_id = d.org_id AND m.login = ?2) END
+                 FROM documents d WHERE d.uuid = ?3 OR d.slug = ?3 ORDER BY d.uuid = ?3 DESC LIMIT 1",
             )
             .bind(p.user.id)
             .bind(p.user.login.to_lowercase())
@@ -1012,9 +1050,10 @@ pub async fn publish(db: &Db, p: Publish<'_>) -> Result<(String, i64)> {
                 slug = format!("{base}-{n}");
             }
             let (id,): (i64,) = sqlx::query_as(
-                "INSERT INTO documents (slug, title, folder, owner_id, org_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
+                "INSERT INTO documents (slug, uuid, title, folder, owner_id, org_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
             )
             .bind(&slug)
+            .bind(new_uuid())
             .bind(title)
             .bind(p.folder)
             .bind(p.user.id)

@@ -79,6 +79,15 @@ impl TestApp {
         .await
     }
 
+    /// Where a document is: `/d/<uuid>`, without the trailing slash.
+    async fn doc_path(&self, token: &str, slug: &str) -> String {
+        let got = self.tool(token, "get_document", json!({ "slug": slug })).await;
+        let url = got["url"].as_str().unwrap();
+        let path = url.strip_prefix("http://docs.test").unwrap().trim_end_matches('/');
+        assert!(is_uuid(path.strip_prefix("/d/").unwrap()), "{url}");
+        path.to_string()
+    }
+
     async fn rpc(&self, token: &str, method: &str, params: Value) -> Value {
         let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
         let res = self
@@ -131,6 +140,15 @@ impl TestApp {
         )
         .await
     }
+}
+
+fn is_uuid(s: &str) -> bool {
+    s.len() == 36
+        && s.char_indices().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => c == '-',
+            14 => c == '4',
+            _ => c.is_ascii_hexdigit() && !c.is_ascii_uppercase(),
+        })
 }
 
 fn csrf_of(html: &str) -> String {
@@ -228,15 +246,16 @@ async fn publish_view_and_collect_feedback() {
         .await;
     assert_eq!(published["slug"], "rollout");
     assert_eq!(published["version"], 1);
-    assert_eq!(published["url"], "http://docs.test/d/rollout/");
+    let d = t.doc_path(&token, "rollout").await;
+    assert_eq!(published["url"], format!("http://docs.test{d}/"));
     assert_eq!(published["warnings"], json!([]));
 
     // Server-rendered page with nested menu, components and no script.
-    let page = t.get("/d/rollout/", &cookie).await;
+    let page = t.get(&format!("{d}/"), &cookie).await;
     assert_eq!(page.status, StatusCode::OK, "{}", page.body);
     assert!(page.body.contains("<title>Rollout plan · Rollout plan · Docs</title>"));
     assert!(
-        page.body.contains("href=\"/d/rollout/plan/phase-1\""),
+        page.body.contains(&format!("href=\"{d}/plan/phase-1\"")),
         "relative link rewritten"
     );
     assert!(page.body.contains("callout-warning"));
@@ -247,11 +266,22 @@ async fn publish_view_and_collect_feedback() {
     let version_id: i64 = attr_after(&page.body, "<article", "data-version-id").parse().unwrap();
 
     // Sub page, and unauthenticated access redirects to login.
-    let sub = t.get("/d/rollout/plan/phase-1", &cookie).await;
-    assert!(sub.body.contains("href=\"/d/rollout/\""));
-    let anon = t.get("/d/rollout/", "").await;
+    let sub = t.get(&format!("{d}/plan/phase-1"), &cookie).await;
+    assert!(sub.body.contains(&format!("href=\"{d}/\"")));
+    let anon = t.get(&format!("{d}/"), "").await;
     assert_eq!(anon.status, StatusCode::SEE_OTHER);
-    assert_eq!(anon.location(), "/login?next=%2Fd%2Frollout%2F");
+    assert_eq!(
+        anon.location(),
+        format!("/login?next={}", d.replace('/', "%2F") + "%2F")
+    );
+    // Links by slug, from before documents had UUIDs, go to the same page at its UUID.
+    let old = t.get("/d/rollout/plan/phase-1", &cookie).await;
+    assert_eq!(old.status, StatusCode::SEE_OTHER);
+    assert_eq!(old.location(), format!("{d}/plan/phase-1"));
+    assert_eq!(
+        t.get("/d/rollout/", "").await.location(),
+        "/login?next=%2Fd%2Frollout%2F"
+    );
 
     // Answers and selections.
     let saved = t
@@ -302,7 +332,7 @@ async fn publish_view_and_collect_feedback() {
     assert_eq!(sel.status, StatusCode::CREATED, "{}", sel.body);
 
     // The answer is pre-filled and the comment listed when the page is reloaded.
-    let page = t.get("/d/rollout/", &cookie).await;
+    let page = t.get(&format!("{d}/"), &cookie).await;
     assert!(page.body.contains("value=\"Sunday\" checked"), "answer prefilled");
     assert!(page.body.contains("Why not one?"));
 
@@ -364,13 +394,34 @@ async fn versions_merge_and_validation() {
     assert_eq!(new["content"], "# A v2");
 
     // No index page: the document root opens the first page.
-    let root = t.get("/d/research-notes/", &cookie).await;
+    let d = t.doc_path(&token, "research-notes").await;
+    let root = t.get(&format!("{d}/"), &cookie).await;
     assert_eq!(root.status, StatusCode::SEE_OTHER);
-    assert_eq!(root.location(), "/d/research-notes/a");
-    let v1 = t.get("/d/research-notes/-/v/1/a", &cookie).await;
+    assert_eq!(root.location(), format!("{d}/a"));
+    let v1 = t.get(&format!("{d}/-/v/1/a"), &cookie).await;
     assert!(v1.body.contains("You are viewing version 1"));
-    let versions = t.get("/d/research-notes/-/versions", &cookie).await;
+    let versions = t.get(&format!("{d}/-/versions"), &cookie).await;
     assert!(versions.body.contains("update a"));
+    assert_eq!(
+        t.get("/d/research-notes/-/v/1/a", &cookie).await.location(),
+        format!("{d}/-/v/1/a")
+    );
+
+    // A document can be named by its UUID too, to publish a new version.
+    let uuid = d.strip_prefix("/d/").unwrap();
+    let v3 = t
+        .tool(
+            &token,
+            "publish_document",
+            json!({ "slug": uuid, "mode": "merge", "pages": [{ "path": "b", "content": "# B v3" }] }),
+        )
+        .await;
+    assert_eq!(
+        (v3["slug"].as_str(), v3["version"].as_i64()),
+        (Some("research-notes"), Some(3))
+    );
+    let got = t.tool(&token, "read_page", json!({ "slug": uuid, "path": "b" })).await;
+    assert_eq!(got["content"], "# B v3");
 
     let err = t
         .tool_error(
@@ -662,16 +713,18 @@ async fn documents_are_private_until_shared() {
     )
     .await;
 
+    let d = t.doc_path(&alice, "secret").await;
+
     // Bob can't see it anywhere.
-    assert_eq!(t.get("/d/secret/", &bob_cookie).await.status, StatusCode::NOT_FOUND);
+    assert_eq!(t.get(&format!("{d}/"), &bob_cookie).await.status, StatusCode::NOT_FOUND);
     assert_eq!(
-        t.get("/d/secret/-/feedback", &bob_cookie).await.status,
+        t.get(&format!("{d}/-/feedback"), &bob_cookie).await.status,
         StatusCode::NOT_FOUND
     );
     assert_eq!(t.tool(&bob, "list_documents", json!({})).await["documents"], json!([]));
     let err = t.tool_error(&bob, "get_feedback", json!({ "slug": "secret" })).await;
     assert!(err.contains("no document"), "{err}");
-    let page = t.get("/d/secret/", &alice_cookie).await;
+    let page = t.get(&format!("{d}/"), &alice_cookie).await;
     let version_id: i64 = attr_after(&page.body, "<article", "data-version-id").parse().unwrap();
     let bob_home = t.get("/", &bob_cookie).await;
     let saved = t
@@ -706,7 +759,7 @@ async fn documents_are_private_until_shared() {
         .await;
     assert_eq!(shared["shared_with"], json!(["bob"]));
     assert_eq!(shared["share_link"], Value::Null);
-    let page = t.get("/d/secret/", &bob_cookie).await;
+    let page = t.get(&format!("{d}/"), &bob_cookie).await;
     assert_eq!(page.status, StatusCode::OK);
     assert!(page.body.contains("Shared by alice"));
     let saved = t
@@ -729,7 +782,7 @@ async fn documents_are_private_until_shared() {
         .await;
     assert!(err.contains("only the owner"), "{err}");
     assert_eq!(
-        t.get("/d/secret/-/share", &bob_cookie).await.status,
+        t.get(&format!("{d}/-/share"), &bob_cookie).await.status,
         StatusCode::FORBIDDEN
     );
     let err = t
@@ -753,8 +806,8 @@ async fn documents_are_private_until_shared() {
         "must sign in first"
     );
     let joined = t.get(path, &carol_cookie).await;
-    assert_eq!(joined.location(), "/d/secret/");
-    assert_eq!(t.get("/d/secret/", &carol_cookie).await.status, StatusCode::OK);
+    assert_eq!(joined.location(), format!("{d}/"));
+    assert_eq!(t.get(&format!("{d}/"), &carol_cookie).await.status, StatusCode::OK);
     let (dave_cookie, _) = t.user("dave").await;
     t.tool(&alice, "share_document", json!({ "slug": "secret", "link": "disable" }))
         .await;
@@ -769,14 +822,17 @@ async fn documents_are_private_until_shared() {
         )
         .await;
     assert_eq!(shared["shared_with"], json!(["bob"]));
-    assert_eq!(t.get("/d/secret/", &carol_cookie).await.status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        t.get(&format!("{d}/"), &carol_cookie).await.status,
+        StatusCode::NOT_FOUND
+    );
     assert_eq!(
         t.tool(&carol, "list_documents", json!({})).await["documents"],
         json!([])
     );
 
     // The owner's share page lists people and manages the link.
-    let share_page = t.get("/d/secret/-/share", &alice_cookie).await;
+    let share_page = t.get(&format!("{d}/-/share"), &alice_cookie).await;
     assert_eq!(share_page.status, StatusCode::OK);
     assert!(share_page.body.contains("bob") && share_page.body.contains("Link sharing is off"));
     let form = serde_urlencoded::to_string([
@@ -787,7 +843,7 @@ async fn documents_are_private_until_shared() {
     .unwrap();
     let res = t
         .send(
-            Request::post("/d/secret/-/share")
+            Request::post(format!("{d}/-/share"))
                 .header(header::COOKIE, &alice_cookie)
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .body(Body::from(form))
@@ -795,7 +851,12 @@ async fn documents_are_private_until_shared() {
         )
         .await;
     assert_eq!(res.status, StatusCode::SEE_OTHER);
-    assert!(t.get("/d/secret/-/share", &alice_cookie).await.body.contains("erin"));
+    assert!(
+        t.get(&format!("{d}/-/share"), &alice_cookie)
+            .await
+            .body
+            .contains("erin")
+    );
 }
 
 const DEVICE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
@@ -975,7 +1036,8 @@ async fn oauth_device_flow_publishes_as_the_user() {
         )
         .await;
     assert_eq!(published["version"], 1);
-    let page = t.get("/d/from-huntaway/", &cookie).await;
+    let fh = t.doc_path(access, "from-huntaway").await;
+    let page = t.get(&format!("{fh}/"), &cookie).await;
     assert_eq!(page.status, StatusCode::OK, "published as frank");
 
     assert_eq!(
@@ -1258,12 +1320,16 @@ async fn folders_organise_documents() {
     let err = t.tool_error(&alice, "get_document", json!({ "slug": "bad" })).await;
     assert!(err.contains("no document"), "{err}");
 
+    let plan = t.doc_path(&alice, "plan").await;
+    let notes = t.doc_path(&alice, "notes").await;
+    let loose = t.doc_path(&alice, "loose").await;
+    let bobs = t.doc_path(&bob, "bobs").await;
     // move_document moves it; the URL stays the same; a later publish keeps the move.
     let moved = t
         .tool(&alice, "move_document", json!({ "slug": "plan", "folder": "archive" }))
         .await;
     assert_eq!(moved["folder"], "archive");
-    assert_eq!(moved["url"], "http://docs.test/d/plan/");
+    assert_eq!(moved["url"], format!("http://docs.test{plan}/"));
     let republished = t
         .tool(
             &alice,
@@ -1296,9 +1362,9 @@ async fn folders_organise_documents() {
     assert!(home.body.contains(r#"data-folder-key="mine:docs""#), "{}", home.body);
     assert!(home.body.contains(r#"data-folder-key="mine:archive""#));
     assert!(home.body.contains("2 pages"));
-    assert_eq!(home.body.matches(r#"href="/d/notes/""#).count(), 1);
+    assert_eq!(home.body.matches(&format!(r#"href="{notes}/""#)).count(), 1);
     assert!(
-        home.body.find("mine:archive").unwrap() < home.body.find(r#"href="/d/loose/""#).unwrap(),
+        home.body.find("mine:archive").unwrap() < home.body.find(&format!(r#"href="{loose}/""#)).unwrap(),
         "folders come before documents"
     );
     assert!(
@@ -1310,7 +1376,7 @@ async fn folders_organise_documents() {
     // Moving from the home page, including into a new folder.
     let res = t
         .post_form(
-            "/d/loose/-/move",
+            &format!("{loose}/-/move"),
             &alice_cookie,
             &[("csrf", &csrf), ("folder", "docs/new one")],
         )
@@ -1319,12 +1385,20 @@ async fn folders_organise_documents() {
     let listed = t.tool(&alice, "list_documents", json!({})).await;
     assert_eq!(folder_of(&listed, "loose"), "docs/new one");
     let res = t
-        .post_form("/d/loose/-/move", &alice_cookie, &[("csrf", &csrf), ("folder", "../x")])
+        .post_form(
+            &format!("{loose}/-/move"),
+            &alice_cookie,
+            &[("csrf", &csrf), ("folder", "../x")],
+        )
         .await;
     assert_eq!(res.status, StatusCode::OK);
     assert!(res.body.contains("invalid folder"), "the error is shown on the page");
     let res = t
-        .post_form("/d/loose/-/move", &alice_cookie, &[("csrf", "wrong"), ("folder", "x")])
+        .post_form(
+            &format!("{loose}/-/move"),
+            &alice_cookie,
+            &[("csrf", "wrong"), ("folder", "x")],
+        )
         .await;
     assert_ne!(res.status, StatusCode::SEE_OTHER, "needs the CSRF token");
 
@@ -1384,7 +1458,7 @@ async fn folders_organise_documents() {
     assert!(home.body.contains("Shared with you"));
     assert!(home.body.contains(r#"data-folder-key="shared:bob:docs""#));
     assert!(
-        !home.body.contains(r#"action="/d/bobs/-/move""#),
+        !home.body.contains(&format!(r#"action="{bobs}/-/move""#)),
         "no move form for shared documents"
     );
     let err = t
@@ -1392,7 +1466,11 @@ async fn folders_organise_documents() {
         .await;
     assert!(err.contains("only the owner"), "{err}");
     let res = t
-        .post_form("/d/bobs/-/move", &alice_cookie, &[("csrf", &csrf), ("folder", "mine")])
+        .post_form(
+            &format!("{bobs}/-/move"),
+            &alice_cookie,
+            &[("csrf", &csrf), ("folder", "mine")],
+        )
         .await;
     assert_eq!(res.status, StatusCode::FORBIDDEN);
     t.post_form(
@@ -1404,7 +1482,7 @@ async fn folders_organise_documents() {
     let listed = t.tool(&bob, "list_documents", json!({})).await;
     assert_eq!(folder_of(&listed, "bobs"), "docs");
     let bob_home = t.get("/", &bob_cookie).await;
-    assert!(bob_home.body.contains(r#"action="/d/bobs/-/move""#));
+    assert!(bob_home.body.contains(&format!(r#"action="{bobs}/-/move""#)));
 
     // The tools are advertised.
     let tools = t.rpc(&alice, "tools/list", json!({})).await;
@@ -1730,6 +1808,10 @@ async fn labels_organise_documents() {
     let res = t.get("/?view=labels", &alice_cookie).await;
     let cookie = res.headers[header::SET_COOKIE].to_str().unwrap().to_string();
     assert!(cookie.starts_with("docs_view=labels"), "{cookie}");
+    let llm = t.doc_path(&alice, "llm").await;
+    let survey = t.doc_path(&alice, "survey").await;
+    let people = t.doc_path(&alice, "people").await;
+    let bobs = t.doc_path(&bob, "bobs").await;
     let labels_cookie = format!("{alice_cookie}; docs_view=labels");
     let home = t.get("/", &labels_cookie).await;
     assert!(
@@ -1741,7 +1823,7 @@ async fn labels_organise_documents() {
     assert!(home.body.contains(r#"data-folder-key="unlabelled""#));
     assert!(home.body.contains(r#"data-tree-store="docs.closedLabels""#));
     // A document with several labels is under each of them.
-    assert_eq!(home.body.matches(r#"href="/d/llm/""#).count(), 2);
+    assert_eq!(home.body.matches(&format!(r#"href="{llm}/""#)).count(), 2);
     assert!(!home.body.contains("secret"));
     let home = t.get("/?view=folders", &labels_cookie).await;
     assert!(!home.body.contains(r#"data-folder-key="labels:"#));
@@ -1749,12 +1831,15 @@ async fn labels_organise_documents() {
     // Clicking a label shows only documents with it (and labels under it).
     let filtered = t.get("/?label=research/ai", &labels_cookie).await;
     assert!(filtered.body.contains("Documents labelled"));
-    assert!(filtered.body.contains(r#"href="/d/survey/""#));
-    assert!(filtered.body.contains(r#"href="/d/llm/""#));
-    assert!(!filtered.body.contains(r#"href="/d/people/""#));
-    assert!(!filtered.body.contains(r#"href="/d/bobs/""#), "no shared documents");
+    assert!(filtered.body.contains(&format!(r#"href="{survey}/""#)));
+    assert!(filtered.body.contains(&format!(r#"href="{llm}/""#)));
+    assert!(!filtered.body.contains(&format!(r#"href="{people}/""#)));
+    assert!(
+        !filtered.body.contains(&format!(r#"href="{bobs}/""#)),
+        "no shared documents"
+    );
     assert_eq!(
-        filtered.body.matches(r#"href="/d/llm/""#).count(),
+        filtered.body.matches(&format!(r#"href="{llm}/""#)).count(),
         1,
         "only under the labels the filter matches"
     );
@@ -1763,8 +1848,8 @@ async fn labels_organise_documents() {
     assert!(filtered.body.contains("None of your documents have this label."));
 
     // The document page shows the labels, and its owner can add and remove them.
-    let doc = t.get("/d/survey/", &alice_cookie).await;
-    assert!(doc.body.contains(r#"action="/d/survey/-/labels""#));
+    let doc = t.get(&format!("{survey}/"), &alice_cookie).await;
+    assert!(doc.body.contains(&format!(r#"action="{survey}/-/labels""#)));
     assert!(
         doc.body.contains(r#"<option value="Research">"#),
         "parents are suggested"
@@ -1772,21 +1857,21 @@ async fn labels_organise_documents() {
     assert!(doc.body.contains(r#"<option value="Research/AI/LLMs">"#));
     let res = t
         .post_form(
-            "/d/survey/-/labels",
+            &format!("{survey}/-/labels"),
             &alice_cookie,
             &[
                 ("csrf", &csrf),
                 ("action", "add"),
                 ("label", "OPS"),
-                ("next", "/d/survey/"),
+                ("next", &format!("{survey}/")),
             ],
         )
         .await;
     assert_eq!(res.status, StatusCode::SEE_OTHER, "{}", res.body);
-    assert_eq!(res.location(), "/d/survey/");
+    assert_eq!(res.location(), format!("{survey}/"));
     let res = t
         .post_form(
-            "/d/survey/-/labels",
+            &format!("{survey}/-/labels"),
             &alice_cookie,
             &[("csrf", &csrf), ("action", "remove"), ("label", "research/ai")],
         )
@@ -1797,7 +1882,7 @@ async fn labels_organise_documents() {
     assert_eq!(got["latest_version"], 1);
     let res = t
         .post_form(
-            "/d/survey/-/labels",
+            &format!("{survey}/-/labels"),
             &alice_cookie,
             &[("csrf", &csrf), ("action", "add"), ("label", "//")],
         )
@@ -1805,7 +1890,7 @@ async fn labels_organise_documents() {
     assert_eq!(res.status, StatusCode::BAD_REQUEST);
     let res = t
         .post_form(
-            "/d/survey/-/labels",
+            &format!("{survey}/-/labels"),
             &alice_cookie,
             &[("csrf", "wrong"), ("action", "add"), ("label", "x")],
         )
@@ -1813,7 +1898,7 @@ async fn labels_organise_documents() {
     assert_eq!(res.status, StatusCode::FORBIDDEN);
     let res = t
         .post_form(
-            "/d/survey/-/labels",
+            &format!("{survey}/-/labels"),
             &alice_cookie,
             &[
                 ("csrf", &csrf),
@@ -1825,13 +1910,13 @@ async fn labels_organise_documents() {
         .await;
     assert_eq!(res.location(), "/", "only redirects on this site");
     // Readers of a shared document don't see its owner's labels or the form.
-    let shared = t.get("/d/bobs/", &alice_cookie).await;
+    let shared = t.get(&format!("{bobs}/"), &alice_cookie).await;
     assert!(!shared.body.contains("secret"));
     assert!(!shared.body.contains("/-/labels"));
     let bob_csrf = csrf_of(&t.get("/", &bob_cookie).await.body);
     let res = t
         .post_form(
-            "/d/survey/-/labels",
+            &format!("{survey}/-/labels"),
             &bob_cookie,
             &[("csrf", &bob_csrf), ("action", "add"), ("label", "x")],
         )
@@ -1951,6 +2036,7 @@ async fn images_are_converted_to_avif_and_served() {
     assert!(content.contains(&format!("![big]({inline_name})")));
     assert!(content.contains(&format!("`data:image/png;base64,{}`", b64(&chart))));
 
+    let pictures = t.doc_path(&token, "pictures").await;
     // Rendered pages point at the served AVIFs.
     let url_of = |name: &str| {
         images.iter().find(|i| i["name"] == name).unwrap()["url"]
@@ -1961,14 +2047,14 @@ async fn images_are_converted_to_avif_and_served() {
             .to_string()
     };
     let chart_url = url_of("images/chart.png");
-    assert!(chart_url.starts_with("/d/pictures/-/images/") && chart_url.ends_with(".avif"));
-    let index = t.get("/d/pictures/", &cookie).await;
+    assert!(chart_url.starts_with(&format!("{pictures}/-/images/")) && chart_url.ends_with(".avif"));
+    let index = t.get(&format!("{pictures}/"), &cookie).await;
     assert!(index.body.contains(&format!("src=\"{chart_url}\"")), "{}", index.body);
     assert!(index.body.contains(&format!("src=\"{}\"", url_of("photo.jpg"))));
     assert!(index.body.contains("src=\"https://example.com/x.png\""));
-    let sub = t.get("/d/pictures/plan/sub", &cookie).await;
+    let sub = t.get(&format!("{pictures}/plan/sub"), &cookie).await;
     assert!(sub.body.contains(&format!("src=\"{chart_url}\"")));
-    let inline = t.get("/d/pictures/plan/inline", &cookie).await;
+    let inline = t.get(&format!("{pictures}/plan/inline"), &cookie).await;
     assert!(inline.body.contains(&format!("src=\"{}\"", url_of(&inline_name))));
     assert!(!inline.body.contains("src=\"data:"));
 
@@ -1988,10 +2074,12 @@ async fn images_are_converted_to_avif_and_served() {
         json!({ "slug": "other", "pages": [{ "path": "index", "content": "x" }] }),
     )
     .await;
-    let elsewhere = chart_url.replace("/d/pictures/", "/d/other/");
+    let elsewhere = chart_url.replace(&format!("{pictures}/"), "/d/other/");
     assert_eq!(t.get(&elsewhere, &cookie).await.status, StatusCode::NOT_FOUND);
     assert_eq!(
-        t.get("/d/pictures/-/images/nothing.avif", &cookie).await.status,
+        t.get(&format!("{pictures}/-/images/nothing.avif"), &cookie)
+            .await
+            .status,
         StatusCode::NOT_FOUND
     );
 
@@ -2140,7 +2228,8 @@ async fn merge_keeps_the_images_its_pages_use() {
         .await;
     assert_eq!(names(&v2), ["a.png", "b.png"]);
     assert_eq!(v2["warnings"], json!([]));
-    let other = t.get("/d/m/other", &cookie).await;
+    let m = t.doc_path(&token, "m").await;
+    let other = t.get(&format!("{m}/other"), &cookie).await;
     assert!(other.body.contains("/-/images/"), "{}", other.body);
 
     // Deleting the page that used b.png drops it; a new upload replaces a kept name.
@@ -2156,7 +2245,7 @@ async fn merge_keeps_the_images_its_pages_use() {
     let v2_a = v2["images"][0]["url"].as_str().unwrap().to_string();
     assert_ne!(url(&v3), v2_a);
     // Old versions keep their images.
-    let old = t.get("/d/m/-/v/2/", &cookie).await;
+    let old = t.get(&format!("{m}/-/v/2/"), &cookie).await;
     assert!(old.body.contains(v2_a.strip_prefix("http://docs.test").unwrap()));
 
     // Replace keeps only the images given in that publish.
@@ -2289,6 +2378,9 @@ async fn organizations_share_documents() {
         .await;
     assert_eq!(published["organization"], "acme-corp");
     assert_eq!(published["folder"], "plans");
+    // Its pages are at /d/<uuid>/.
+    let d = published["url"].as_str().unwrap().replace("http://docs.test", "");
+    let d = d.trim_end_matches('/');
     let listed = t
         .tool(&alice, "list_documents", json!({ "organization": "acme-corp" }))
         .await;
@@ -2362,10 +2454,10 @@ async fn organizations_share_documents() {
     let home = t.get("/", &alice_cookie).await;
     assert!(home.body.contains(r#"id="org-acme-corp""#), "{}", home.body);
     assert!(home.body.contains(r#"data-folder-key="org:acme-corp:plans""#));
-    assert!(home.body.contains(r#"href="/d/roadmap/""#));
-    let page = t.get("/d/roadmap/", &alice_cookie).await;
+    assert!(home.body.contains(&format!(r#"href="{d}/""#)));
+    let page = t.get(&format!("{d}/"), &alice_cookie).await;
     assert!(page.body.contains(r#"href="/orgs/acme-corp""#));
-    assert!(page.body.contains("/d/roadmap/-/labels"), "members can label it");
+    assert!(page.body.contains(&format!("{d}/-/labels")), "members can label it");
 
     // Folders are the organization's: rename one from the home page.
     let renamed = t
@@ -2420,7 +2512,7 @@ async fn organizations_share_documents() {
         "acme-corp"
     );
     let home = t.get("/", &alice_cookie).await;
-    let form = &home.body[home.body.find(r#"action="/d/roadmap/-/move""#).unwrap()..];
+    let form = &home.body[home.body.find(&format!(r#"action="{d}/-/move""#)).unwrap()..];
     let form = &form[..form.find("</form>").unwrap()];
     assert!(!form.contains("<select"), "{form}");
     let res = t
@@ -2479,7 +2571,7 @@ async fn organizations_share_documents() {
         &[("csrf", &csrf), ("action", "remove"), ("login", "bob")],
     )
     .await;
-    assert_eq!(t.get("/d/roadmap/", &bob_cookie).await.status, StatusCode::NOT_FOUND);
+    assert_eq!(t.get(&format!("{d}/"), &bob_cookie).await.status, StatusCode::NOT_FOUND);
     let err = t
         .tool_error(
             &bob,
@@ -2488,6 +2580,15 @@ async fn organizations_share_documents() {
         )
         .await;
     assert!(err.contains("can't publish to"), "{err}");
+
+    // Members can make it public too: then anyone with its link reads it, read-only.
+    let shared = t
+        .tool(&alice, "share_document", json!({ "slug": "roadmap", "public": true }))
+        .await;
+    assert_eq!(shared["public"], true, "{shared}");
+    let page = t.get(&format!("{d}/"), &bob_cookie).await;
+    assert_eq!(page.status, StatusCode::OK);
+    assert!(page.body.contains("Public document by acme-corp"), "{}", page.body);
 
     // An empty organization can be deleted.
     t.post_form(
@@ -2501,4 +2602,112 @@ async fn organizations_share_documents() {
         .await;
     assert_eq!(deleted.status, StatusCode::SEE_OTHER, "{}", deleted.body);
     assert_eq!(t.get("/orgs/spare", &alice_cookie).await.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn public_documents_can_be_read_by_anyone_with_the_link() {
+    let t = TestApp::new().await;
+    let (alice_cookie, alice) = t.user("alice").await;
+    let (bob_cookie, bob) = t.user("bob").await;
+    t.tool(
+        &alice,
+        "publish_document",
+        json!({ "slug": "launch", "pages": [
+            { "path": "index", "content": "# Launch\n\nWe launch on Monday.\n\n<TextInput name=\"q\" label=\"Q\" />" },
+            { "path": "more", "content": "# More" },
+        ] }),
+    )
+    .await;
+    let d = t.doc_path(&alice, "launch").await;
+
+    // Private by default, even at its UUID.
+    assert_eq!(t.get(&format!("{d}/"), "").await.status, StatusCode::SEE_OTHER);
+    assert_eq!(t.get(&format!("{d}/"), &bob_cookie).await.status, StatusCode::NOT_FOUND);
+
+    // Alice comments, then makes it public.
+    let page = t.get(&format!("{d}/"), &alice_cookie).await;
+    assert!(!page.body.contains("Make private"));
+    let version_id: i64 = attr_after(&page.body, "<article", "data-version-id").parse().unwrap();
+    let sel = t
+        .post_json(
+            "/api/selections",
+            &alice_cookie,
+            &csrf_of(&page.body),
+            json!({ "version_id": version_id, "page": "index", "quote": "Monday", "comment": "internal note" }),
+        )
+        .await;
+    assert_eq!(sel.status, StatusCode::CREATED, "{}", sel.body);
+    let shared = t
+        .tool(&alice, "share_document", json!({ "slug": "launch", "public": true }))
+        .await;
+    assert_eq!(shared["public"], true);
+    assert_eq!(shared["url"], format!("http://docs.test{d}/"));
+    let listed = t.tool(&alice, "list_documents", json!({})).await;
+    assert_eq!(listed["documents"][0]["public"], true);
+    assert!(
+        t.get("/", &alice_cookie)
+            .await
+            .body
+            .contains(r#"<span class="badge">public</span>"#)
+    );
+
+    // Anyone can read it at its UUID, without signing in, but can't answer or comment.
+    for cookie in ["", bob_cookie.as_str()] {
+        let page = t.get(&format!("{d}/"), cookie).await;
+        assert_eq!(page.status, StatusCode::OK, "{}", page.body);
+        assert!(page.body.contains("We launch on Monday."));
+        assert!(page.body.contains("data-readonly"));
+        assert!(!page.body.contains("data-version-id"));
+        assert!(!page.body.contains("internal note"), "comments stay private");
+        assert!(page.body.contains("Public document by alice"));
+        assert!(!page.body.contains("/-/feedback") && !page.body.contains("/-/share"));
+        assert_eq!(t.get(&format!("{d}/more"), cookie).await.status, StatusCode::OK);
+        assert_eq!(t.get(&format!("{d}/-/v/1/"), cookie).await.status, StatusCode::OK);
+        assert_eq!(t.get(&format!("{d}/-/versions"), cookie).await.status, StatusCode::OK);
+        // Not by its slug: that could be guessed.
+        assert_ne!(t.get("/d/launch/", cookie).await.status, StatusCode::OK);
+    }
+    assert_eq!(
+        t.get(&format!("{d}/-/feedback"), "").await.status,
+        StatusCode::SEE_OTHER
+    );
+    assert_eq!(
+        t.get(&format!("{d}/-/feedback"), &bob_cookie).await.status,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        t.get(&format!("{d}/-/share"), &bob_cookie).await.status,
+        StatusCode::NOT_FOUND
+    );
+    let bob_page = t.get(&format!("{d}/"), &bob_cookie).await;
+    let saved = t
+        .post_json(
+            "/api/responses",
+            &bob_cookie,
+            &csrf_of(&bob_page.body),
+            json!({ "version_id": version_id, "page": "index", "field": "q", "value": "x" }),
+        )
+        .await;
+    assert_eq!(saved.status, StatusCode::BAD_REQUEST, "can't answer a public document");
+    // Bob's agent doesn't get it either: public is for reading on the site.
+    assert_eq!(t.tool(&bob, "list_documents", json!({})).await["documents"], json!([]));
+    let uuid = d.strip_prefix("/d/").unwrap();
+    let err = t.tool_error(&bob, "get_document", json!({ "slug": uuid })).await;
+    assert!(err.contains("no document"), "{err}");
+
+    // The owner makes it private again from the share page.
+    let share = t.get(&format!("{d}/-/share"), &alice_cookie).await;
+    assert!(share.body.contains("Make private"));
+    let res = t
+        .post_form(
+            &format!("{d}/-/share"),
+            &alice_cookie,
+            &[("csrf", &csrf_of(&share.body)), ("action", "public_off")],
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::SEE_OTHER);
+    assert_eq!(t.get(&format!("{d}/"), "").await.status, StatusCode::SEE_OTHER);
+    assert_eq!(t.get(&format!("{d}/"), &bob_cookie).await.status, StatusCode::NOT_FOUND);
+    let got = t.tool(&alice, "get_document", json!({ "slug": "launch" })).await;
+    assert_eq!(got["sharing"]["public"], false);
 }
