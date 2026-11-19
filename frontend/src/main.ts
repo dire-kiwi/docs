@@ -1,4 +1,5 @@
 import "./styles.css";
+import { initEditor } from "./editor-site.ts";
 import { initFields } from "./fields.ts";
 import { initFolders } from "./folders.ts";
 import { initNav } from "./nav.ts";
@@ -10,3 +11,4 @@ initTimes(document);
 initFields();
 initFolders();
 initSelections();
+initEditor();

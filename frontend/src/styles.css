@@ -1,4 +1,5 @@
 @import "./reader.css";
+@import "./editor.css";
 
 html {
   scroll-padding-top: calc(var(--topbar) + 16px);
@@ -865,4 +866,26 @@ a.label-chip:hover {
 .label-add button {
   font-size: 0.85em;
   padding: 2px 8px;
+}
+
+/* ---------- editing ---------- */
+
+.home-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.doc-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin: 0 0 8px;
+}
+
+.doc-actions .button {
+  font-size: 0.9em;
+  padding: 4px 12px;
+  color: inherit;
 }

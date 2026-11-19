@@ -1,0 +1,325 @@
+/*
+ * The document editor (editor.ts), on the site and in the Huntaway plugin's pages
+ * (which sets the variables from the board's theme). It fills the window below the
+ * site's top bar: the pages on the left, the source and its preview beside each other.
+ */
+
+.editor {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-areas: "bar bar" "error error" "pages main";
+  height: calc(100vh - var(--topbar, 0px));
+  box-sizing: border-box;
+  color: var(--fg);
+}
+
+.editor *,
+.editor *::before,
+.editor *::after {
+  box-sizing: border-box;
+}
+
+.editor input[type="text"],
+.editor select,
+.editor textarea {
+  font: inherit;
+  color: inherit;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+}
+
+.editor input.invalid {
+  border-color: var(--danger);
+}
+
+.editor .grow {
+  flex: 1;
+}
+
+.editor-bar {
+  grid-area: bar;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  align-items: center;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.editor .editor-title {
+  flex: 1 1 260px;
+  font-size: 1.15em;
+  font-weight: 600;
+}
+
+.editor .editor-message {
+  flex: 1 1 220px;
+}
+
+.editor-folder {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  color: var(--fg-muted);
+  font-size: 0.9em;
+}
+
+.editor-status {
+  color: var(--fg-muted);
+  font-size: 0.85em;
+}
+
+.editor-error {
+  grid-area: error;
+  margin: 8px 16px 0;
+  padding: 8px 12px;
+  border: 1px solid var(--danger);
+  border-radius: 6px;
+  color: var(--danger);
+  white-space: pre-wrap;
+}
+
+.editor-error button {
+  margin-left: 6px;
+}
+
+.editor-pages {
+  grid-area: pages;
+  overflow: auto;
+  padding: 12px 12px 24px;
+  border-right: 1px solid var(--border);
+  font-size: 0.92em;
+}
+
+.editor-pages h2 {
+  margin: 0 0 8px;
+  font-size: 0.8em;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-muted);
+}
+
+.editor-page-list {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+}
+
+.editor-page-list button {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  text-align: left;
+  padding: 5px 8px;
+  margin: 0 0 2px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+}
+
+.editor-page-list button:hover {
+  background: var(--bg-soft);
+}
+
+.editor-page-list button.on {
+  background: var(--bg-soft);
+  border-color: var(--border);
+  font-weight: 600;
+}
+
+.editor-page-path {
+  font: 0.8em var(--mono);
+  font-weight: normal;
+  color: var(--fg-muted);
+  overflow-wrap: anywhere;
+}
+
+.editor-hint {
+  margin: 16px 0 0;
+  font-size: 0.85em;
+  color: var(--fg-muted);
+}
+
+.editor-main {
+  grid-area: main;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 10px 16px 12px;
+  gap: 8px;
+}
+
+.editor-page-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  align-items: center;
+  font-size: 0.9em;
+}
+
+.editor-page-fields label {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  color: var(--fg-muted);
+}
+
+.editor-page-fields label input {
+  color: var(--fg);
+}
+
+.editor-field-error {
+  color: var(--danger);
+  font-size: 0.85em;
+}
+
+.editor-field-error:empty {
+  display: none;
+}
+
+.editor-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
+.editor .editor-tool {
+  min-width: 32px;
+  padding: 3px 8px;
+  font-size: 0.9em;
+}
+
+.editor-sep {
+  width: 1px;
+  align-self: stretch;
+  margin: 2px 4px;
+  background: var(--border);
+}
+
+.editor-modes {
+  display: flex;
+}
+
+.editor-modes button {
+  padding: 3px 10px;
+  font-size: 0.85em;
+  border-radius: 0;
+}
+
+.editor-modes button:first-child {
+  border-radius: 6px 0 0 6px;
+}
+
+.editor-modes button:last-child {
+  border-radius: 0 6px 6px 0;
+}
+
+.editor-modes button + button {
+  margin-left: -1px;
+}
+
+.editor-modes button.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-fg);
+}
+
+.editor-panes {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.editor-panes[data-mode="write"] {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.editor-panes[data-mode="write"] .editor-preview-wrap {
+  display: none;
+}
+
+.editor-panes[data-mode="preview"] {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.editor-panes[data-mode="preview"] .editor-source {
+  display: none;
+}
+
+.editor .editor-source {
+  width: 100%;
+  height: 100%;
+  min-height: 300px;
+  resize: none;
+  padding: 12px 14px;
+  font: 14px/1.6 var(--mono);
+  tab-size: 2;
+}
+
+.editor .editor-source.dropping {
+  border-color: var(--accent);
+  border-style: dashed;
+}
+
+.editor-preview-wrap {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.editor-preview-notes:empty {
+  display: none;
+}
+
+.editor-preview-notes {
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.85em;
+}
+
+.editor-preview-notes p {
+  margin: 2px 0;
+}
+
+.editor-preview {
+  flex: 1;
+  overflow: auto;
+  padding: 4px 20px 24px;
+}
+
+@media (max-width: 900px) {
+  .editor {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "bar" "error" "pages" "main";
+    grid-template-rows: auto auto auto minmax(0, 1fr);
+    height: auto;
+  }
+
+  .editor-pages {
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .editor-panes,
+  .editor-panes[data-mode="split"] {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .editor .editor-source {
+    height: 60vh;
+  }
+
+  .editor-preview-wrap {
+    min-height: 40vh;
+  }
+}

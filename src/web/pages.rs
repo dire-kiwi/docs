@@ -318,7 +318,10 @@ async fn render_home(state: &AppState, viewer: &Viewer, view: &HomeView, error: 
         Some(user),
         &viewer.csrf,
         html! {
-            h1 { "Documents" }
+            div.home-head {
+                h1 { "Documents" }
+                a.button.primary href="/new" { "New document" }
+            }
             @if let Some(e) = &error { div.render-error { (e) } }
             @if any_mine {
                 nav.view-toggle aria-label="Show documents by" {
@@ -671,6 +674,13 @@ async fn show_page(
                 }
             }
             main.doc-main {
+                @if doc.owner_id == user.id && is_latest {
+                    div.doc-actions {
+                        a.button href={ "/d/" (doc.slug) "/-/edit/" (canonical) } title="Edit the document's pages and save them as a new version" {
+                            "✎ Edit"
+                        }
+                    }
+                }
                 @if !is_latest {
                     div.banner {
                         "You are viewing version " (version.number) ". "
@@ -1172,4 +1182,117 @@ pub async fn share_link(
         Some(slug) => Ok(Redirect::to(&doc_base(&slug, None))),
         None => Err(AppError::NotFound),
     }
+}
+
+// ---------- the editor ----------
+
+/// JSON for a `<script type="application/json">`, so nothing in it closes the element.
+fn script_json(v: &serde_json::Value) -> PreEscaped<String> {
+    PreEscaped(v.to_string().replace('<', "\\u003c"))
+}
+
+/// The editor's page: `frontend/src/editor.ts` builds the editor from `data`.
+fn editor_shell(
+    viewer: &Viewer,
+    user: &User,
+    title: &str,
+    save_url: &str,
+    slug: Option<&str>,
+    data: serde_json::Value,
+) -> Markup {
+    shell(
+        Shell {
+            title,
+            user: Some(user),
+            csrf: &viewer.csrf,
+            body_class: "editing",
+        },
+        html! {
+            main #editor data-save-url=(save_url) data-slug=[slug] {
+                noscript { p.page { "The editor needs JavaScript." } }
+            }
+            script #editor-data type="application/json" { (script_json(&data)) }
+        },
+    )
+}
+
+#[derive(Deserialize)]
+pub struct NewQuery {
+    folder: Option<String>,
+}
+
+/// `/new[?folder=…]`: write a new document.
+pub async fn new_document(viewer: Viewer, Query(q): Query<NewQuery>) -> AppResult<Markup> {
+    let user = viewer.require()?;
+    let folder = paths::normalize_folder(q.folder.as_deref().unwrap_or("")).unwrap_or_default();
+    let data = serde_json::json!({
+        "isNew": true,
+        "title": "",
+        "folder": folder,
+        "baseVersion": null,
+        "pages": [{ "path": "index", "title": "", "format": "md", "content": "" }],
+        "open": "index",
+        "images": [],
+        "cancelUrl": "/",
+    });
+    Ok(editor_shell(
+        &viewer,
+        user,
+        "New document",
+        "/api/documents",
+        None,
+        data,
+    ))
+}
+
+pub async fn edit_root(state: State<AppState>, viewer: Viewer, Path(slug): Path<String>) -> AppResult<Response> {
+    edit(state, viewer, slug, String::new()).await
+}
+
+pub async fn edit_page(
+    state: State<AppState>,
+    viewer: Viewer,
+    Path((slug, path)): Path<(String, String)>,
+) -> AppResult<Response> {
+    edit(state, viewer, slug, path).await
+}
+
+/// `/d/{slug}/-/edit/[page]`: edit one of your documents (its latest version), opening at a page.
+async fn edit(State(state): State<AppState>, viewer: Viewer, slug: String, suffix: String) -> AppResult<Response> {
+    let user = viewer.require()?;
+    let doc = owned_doc(&state, &slug, user, "Only the owner can edit this document.").await?;
+    let version = db::version(&state.db, doc.id, None).await?.ok_or(AppError::NotFound)?;
+    let pages = db::all_pages(&state.db, version.id).await?;
+    let candidates = paths::candidates(&suffix);
+    let open = pages
+        .iter()
+        .find(|p| candidates.contains(&p.path))
+        .or(pages.first())
+        .map(|p| p.path.clone())
+        .unwrap_or_else(|| "index".into());
+    let images = db::version_images(&state.db, version.id).await?;
+    let data = serde_json::json!({
+        "isNew": false,
+        "title": doc.title,
+        "folder": doc.folder,
+        "baseVersion": version.number,
+        "pages": pages.iter().map(|p| serde_json::json!({
+            "path": p.path,
+            "title": p.title,
+            "format": p.format,
+            "content": p.source,
+        })).collect::<Vec<_>>(),
+        "open": open,
+        "images": images.iter().map(|i| &i.name).collect::<Vec<_>>(),
+        "cancelUrl": format!("{}{}", doc_base(&doc.slug, None), paths::url_suffix(&open)),
+    });
+    Ok(editor_shell(
+        &viewer,
+        user,
+        &format!("Edit · {}", doc.title),
+        &format!("/api/documents/{}/versions", doc.slug),
+        Some(&doc.slug),
+        data,
+    )
+    .into_response())
 }
