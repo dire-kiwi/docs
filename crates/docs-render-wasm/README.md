@@ -53,7 +53,21 @@ Calling `init()` in Node does nothing, so shared code can always call it. `@dire
 </div>
 ```
 
-The colours are CSS variables on `.docs-render` (`--bg`, `--bg-soft`, `--fg`, `--fg-muted`, `--border`, `--accent`, `--accent-fg`, `--danger`, `--success`, `--warning`, `--radius`, `--font`, `--mono`), with a dark set under `prefers-color-scheme: dark`. Override them to match your theme.
+The look is print: ink on paper, with an ink line and a hard offset shadow around what the reader can use. It is all CSS variables on `.docs-render`, to override to match your theme:
+
+| Variables | |
+|-----------|-|
+| `--bg`, `--bg-soft`, `--fg`, `--fg-muted`, `--border` | Paper, sunken paper (table heads, inline code), ink, quieter ink and hairlines. |
+| `--line`, `--shadow` | The line around fields, inputs and collapsible sections, and their offset shadow (`transparent` for none). |
+| `--accent`, `--accent-fg` | Links, the chosen answer, focus; and text on the accent. |
+| `--success`, `--warning`, `--danger` | Callouts and the three approval stamps. |
+| `--bg-mark`, `--mark-fg` | Highlighter (hover on scale points and collapsible sections), and text on it. |
+| `--code-bg`, `--code-fg` | Code blocks. |
+| `--radius`, `--font`, `--font-display`, `--mono` | Corners, body type, headings and labels. |
+
+Each colour is a `light-dark()` pair and `.docs-render` has `color-scheme: light dark`, so pages follow the reader's system. Set `color-scheme: light` or `dark` on `.docs-render` to pick one (or `inherit`, to follow your page's).
+
+The fonts (Fraunces for headings, Atkinson Hyperlegible Next for text and Atkinson Hyperlegible Mono for code and labels) are not in the package: load them yourself, e.g. from `@fontsource-variable`, or set `--font`, `--font-display` and `--mono`. Without them the stacks fall back to system serif, sans and mono fonts.
 
 The site's form autosave and text-selection comments (`frontend/src/fields.ts`, `selection.ts`) are not in the package yet. Form fields render with `data-field` and `data-kind` attributes, so you can read the answers yourself.
 

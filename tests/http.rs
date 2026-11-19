@@ -578,6 +578,25 @@ async fn dev_login_sets_a_session() {
 }
 
 #[tokio::test]
+async fn pages_load_the_theme_script_before_they_are_drawn() {
+    let t = TestApp::new().await;
+    // The policy allows no inline scripts, so the reader's light or dark choice is applied by a file of its own.
+    let page = t.get("/components", "").await;
+    let head = &page.body[..page.body.find("</head>").unwrap()];
+    assert!(head.contains(r#"<script src="/theme.js"></script>"#), "{head}");
+    assert!(page.body.contains(r#"class="theme-toggle""#));
+    let script = t.get("/theme.js", "").await;
+    assert_eq!(script.status, StatusCode::OK);
+    assert!(
+        script.headers[header::CONTENT_TYPE]
+            .to_str()
+            .unwrap()
+            .starts_with("text/javascript")
+    );
+    assert!(script.body.contains("docs.theme") && script.body.contains("dataset.theme"));
+}
+
+#[tokio::test]
 async fn removing_a_user_from_the_allowlist_revokes_access() {
     let t = TestApp::new().await;
     let (cookie, pat) = t.user("erin").await;

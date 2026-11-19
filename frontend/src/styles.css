@@ -1,54 +1,118 @@
 @import "./reader.css";
 
+/*
+ * The site around the pages: a desk (dotted, a shade darker than the paper) with
+ * sheets on it. Whatever you can read or use is a sheet: paper, an ink line and
+ * an offset shadow. Comments are sticky notes.
+ */
+
+:root {
+  --desk: light-dark(#f0e9d9, #131210);
+  --dots: light-dark(#d9cfb9, #2b2822);
+  --note: light-dark(#ffec8f, #4b4215);
+  --note-fg: light-dark(#1d1b16, #f6edc9);
+  --note-line: light-dark(#d6bb3a, #8a7a2c);
+  --topbar: 56px;
+  --lift: 3px 3px 0 var(--shadow);
+  --sheet: 6px 6px 0 var(--shadow);
+}
+
+/* The reader's choice (theme.ts), over the system's. */
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
+
 html {
   scroll-padding-top: calc(var(--topbar) + 16px);
 }
 
 body {
   margin: 0;
-  background: var(--bg);
+  min-height: 100vh;
+  background: var(--desk) radial-gradient(var(--dots) 1px, transparent 1.5px) 0 0 / 22px 22px;
   color: var(--fg);
-  font: 16px/1.6 var(--font);
+  font: 16.5px/1.6 var(--font);
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  line-height: 1.15;
+  letter-spacing: -0.015em;
 }
 
 button,
 .button {
   display: inline-block;
-  border: 1px solid var(--border);
-  background: var(--bg-soft);
-  border-radius: 6px;
-  padding: 6px 14px;
+  border: 1.5px solid var(--line);
+  background: var(--bg);
+  border-radius: 3px;
+  padding: 6px 15px;
+  font-weight: 650;
+  white-space: nowrap;
   cursor: pointer;
   text-decoration: none;
+  color: var(--fg);
+  box-shadow: 2px 2px 0 var(--shadow);
+  transition:
+    transform 0.08s ease,
+    box-shadow 0.08s ease;
 }
 
 button:hover,
 .button:hover {
-  border-color: var(--fg-muted);
+  transform: translate(-1px, -1px);
+  box-shadow: var(--lift);
+}
+
+button:active,
+.button:active {
+  transform: translate(2px, 2px);
+  box-shadow: 0 0 0 var(--shadow);
 }
 
 button.primary,
 .button.primary {
   background: var(--accent);
-  border-color: var(--accent);
   color: var(--accent-fg);
+}
+
+button.danger {
+  color: var(--danger);
 }
 
 button.link {
   border: 0;
   background: none;
   padding: 0;
+  font-weight: inherit;
   color: var(--accent);
+  box-shadow: none;
+  transform: none;
+  text-decoration: underline;
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 3px;
 }
 
-button.danger,
 button.link.danger {
   color: var(--danger);
 }
 
 .row {
   display: flex;
-  gap: 8px;
+  gap: 10px;
   align-items: center;
 }
 
@@ -62,11 +126,16 @@ button.link.danger {
 
 .badge {
   display: inline-block;
-  font-size: 0.75em;
-  padding: 0 8px;
-  border-radius: 999px;
-  background: var(--bg-soft);
-  border: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 0.68em;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 1px 7px;
+  border-radius: 3px;
+  background: var(--fg);
+  color: var(--bg);
+  vertical-align: 0.1em;
 }
 
 /* ---------- top bar ---------- */
@@ -78,101 +147,255 @@ button.link.danger {
   height: var(--topbar);
   display: flex;
   align-items: center;
-  gap: 20px;
-  padding: 0 20px;
-  background: color-mix(in srgb, var(--bg) 92%, transparent);
-  backdrop-filter: blur(6px);
-  border-bottom: 1px solid var(--border);
+  gap: 22px;
+  padding: 0 22px;
+  background: var(--bg);
+  border-bottom: 1.5px solid var(--line);
 }
 
 .brand {
-  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
   color: var(--fg);
   text-decoration: none;
+}
+
+/* The mark: a pilcrow, set on a block of the accent. */
+.brand-mark {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 1.5px solid var(--line);
+  border-radius: 3px;
+  background: var(--accent);
+  color: var(--accent-fg);
+  box-shadow: 2px 2px 0 var(--shadow);
+  font: 700 19px/1 var(--font-display);
+  transition: transform 0.12s ease;
+}
+
+.brand:hover .brand-mark {
+  transform: rotate(-6deg);
+}
+
+.brand-name {
+  font: italic 650 1.45em/1 var(--font-display);
+  letter-spacing: -0.02em;
 }
 
 .topnav {
   display: flex;
-  gap: 16px;
+  gap: 4px;
 }
 
 .topnav a,
 .user-menu a {
-  color: var(--fg-muted);
+  color: var(--fg);
   text-decoration: none;
+  font-size: 0.92em;
+  font-weight: 600;
+  padding: 4px 9px;
+  border-radius: 3px;
 }
 
 .topnav a:hover,
 .user-menu a:hover {
-  color: var(--fg);
+  background: var(--bg-mark);
+  color: var(--mark-fg);
 }
 
 .user-menu {
   margin-left: auto;
   display: flex;
   align-items: center;
-  gap: 14px;
-  font-size: 0.9em;
+  gap: 10px;
+  font-size: 0.95em;
 }
 
 .user-menu form {
   margin: 0;
 }
 
+.user-menu .login {
+  font-family: var(--mono);
+  font-size: 0.85em;
+  color: var(--fg-muted);
+}
+
+.user-menu button.link {
+  color: var(--fg);
+  font-size: 0.92em;
+  font-weight: 600;
+  text-decoration: none;
+  padding: 4px 9px;
+  border-radius: 3px;
+}
+
+.user-menu button.link:hover {
+  background: var(--bg-mark);
+  color: var(--mark-fg);
+}
+
 .avatar {
   border-radius: 50%;
+  border: 1.5px solid var(--line);
 }
 
 .nav-toggle {
   display: none;
-  padding: 2px 10px;
+  padding: 3px 10px;
+}
+
+/* Light or dark: a half-inked disc that turns over. */
+.theme-toggle {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+}
+
+.theme-toggle span {
+  width: 16px;
+  height: 16px;
+  border: 1.5px solid var(--fg);
+  border-radius: 50%;
+  background: linear-gradient(90deg, var(--fg) 50%, transparent 50%);
+  transition: transform 0.25s ease;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .theme-toggle span {
+    transform: rotate(180deg);
+  }
+}
+
+:root[data-theme="dark"] .theme-toggle span {
+  transform: rotate(180deg);
 }
 
 /* ---------- simple pages ---------- */
 
 main.page {
-  max-width: 980px;
+  max-width: 1000px;
   margin: 0 auto;
-  padding: 24px 20px 64px;
+  padding: 36px 22px 72px;
+}
+
+main.page > h1 {
+  font-size: clamp(2em, 1.4em + 3vw, 2.7em);
+  line-height: 1.05;
+  letter-spacing: -0.025em;
+  margin: 0 0 0.6em;
+}
+
+main.page > h1::after {
+  content: "";
+  display: block;
+  width: 2.2em;
+  height: 5px;
+  margin-top: 0.35em;
+  background: var(--accent);
+}
+
+main.page > h2 {
+  font-size: 1.5em;
+  margin: 2em 0 0.6em;
+}
+
+/* A table on the desk gets a sheet of its own. */
+main.page > .table-wrap {
+  border: 1.5px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  box-shadow: var(--sheet);
+}
+
+main.page > .table-wrap table {
+  border: 0;
 }
 
 .card {
-  border: 1px solid var(--border);
+  border: 1.5px solid var(--line);
   border-radius: var(--radius);
-  padding: 20px 24px;
+  padding: 22px 26px;
   background: var(--bg);
+  box-shadow: var(--sheet);
+}
+
+.card h1 {
+  font-size: 1.9em;
+  margin: 0 0 0.5em;
 }
 
 .card.narrow {
   max-width: 460px;
-  margin: 48px auto;
+  margin: 56px auto;
 }
 
 .dev-login {
   margin-top: 24px;
   padding-top: 16px;
-  border-top: 1px solid var(--border);
+  border-top: 1.5px dashed var(--border);
 }
 
 .dev-login label {
   display: block;
-  font-size: 0.85em;
+  font-family: var(--mono);
+  font-size: 0.72em;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
   color: var(--fg-muted);
-  margin-bottom: 4px;
+  margin-bottom: 6px;
 }
 
 .new-token {
   border-color: var(--success);
-  margin-bottom: 24px;
+  box-shadow: 6px 6px 0 color-mix(in srgb, var(--success) 35%, transparent);
+  margin-bottom: 28px;
 }
 
 .crumbs {
+  font-family: var(--mono);
+  font-size: 0.78em;
+  letter-spacing: 0.04em;
   color: var(--fg-muted);
-  font-size: 0.9em;
+  margin: 0 0 10px;
+}
+
+.versions {
+  padding-left: 0;
+  list-style: none;
+  border-left: 1.5px solid var(--line);
+  margin-left: 6px;
 }
 
 .versions li {
-  margin-bottom: 10px;
+  position: relative;
+  padding: 0 0 18px 24px;
+}
+
+/* Each version is a point on the line. */
+.versions li::before {
+  content: "";
+  position: absolute;
+  left: -6.5px;
+  top: 0.45em;
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid var(--line);
+  border-radius: 50%;
+  background: var(--bg);
+}
+
+.versions li:first-child::before {
+  background: var(--accent);
+}
+
+.versions li > a {
+  font-weight: 650;
 }
 
 .versions p {
@@ -180,38 +403,85 @@ main.page {
 }
 
 details.connect {
-  margin-top: 32px;
+  margin-top: 40px;
+  border: 1.5px dashed var(--border);
+  border-radius: var(--radius);
+  padding: 10px 16px;
+}
+
+details.connect summary {
+  cursor: pointer;
+  font-weight: 650;
 }
 
 /* ---------- components page ---------- */
 
 .lead {
-  font-size: 1.05em;
+  font-size: 1.1em;
+  max-width: 46em;
   color: var(--fg-muted);
 }
 
 .component-index {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px 14px;
-  margin: 16px 0 24px;
+  gap: 8px;
+  margin: 20px 0 8px;
+}
+
+.component-index a {
+  font-family: var(--mono);
+  font-size: 0.8em;
+  font-weight: 600;
+  padding: 3px 10px;
+  border: 1.5px solid var(--line);
+  border-radius: 3px;
+  background: var(--bg);
+  color: var(--fg);
+  text-decoration: none;
+}
+
+.component-index a:hover {
+  background: var(--bg-mark);
+  color: var(--mark-fg);
 }
 
 .component {
-  border-top: 1px solid var(--border);
-  padding-top: 8px;
-  margin-top: 32px;
+  margin-top: 44px;
+  padding: 6px 26px 26px;
+  border: 1.5px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  box-shadow: var(--sheet);
+}
+
+.component h2 {
+  font-size: 1.5em;
+  margin: 0.8em 0 0.3em;
+}
+
+.component h2 code {
+  font-size: 0.85em;
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--accent);
+}
+
+.props {
+  margin: 1em 0 1.4em;
 }
 
 .props th {
   width: 140px;
   white-space: nowrap;
+  font-weight: 600;
 }
 
 .example {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 16px;
+  gap: 24px;
   align-items: start;
 }
 
@@ -220,15 +490,41 @@ details.connect {
   white-space: pre-wrap;
 }
 
+/* What the example renders, as a specimen. */
 .preview {
-  border: 1px dashed var(--border);
+  position: relative;
+  border: 1.5px dashed var(--border);
   border-radius: var(--radius);
-  padding: 4px 16px;
+  padding: 18px 20px 6px;
+  min-width: 0;
+}
+
+.preview::before {
+  content: "Preview";
+  position: absolute;
+  top: -0.8em;
+  right: 12px;
+  padding: 0 6px;
+  background: var(--bg);
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 0.66em;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.preview > :first-child {
+  margin-top: 0.4em;
+}
+
+.preview > .callout:first-child,
+.preview > .field:first-child {
+  margin-top: 2em;
 }
 
 @media (max-width: 800px) {
   .example {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
@@ -236,9 +532,9 @@ details.connect {
 
 .doc-layout {
   display: grid;
-  grid-template-columns: 260px minmax(0, 1fr) 220px;
-  gap: 40px;
-  max-width: 1400px;
+  grid-template-columns: 250px minmax(0, 1fr) 210px;
+  gap: 36px;
+  max-width: 1440px;
   margin: 0 auto;
   padding: 0 24px;
 }
@@ -250,23 +546,38 @@ details.connect {
   align-self: start;
   max-height: calc(100vh - var(--topbar));
   overflow-y: auto;
-  padding: 24px 0;
+  padding: 30px 6px 30px 0;
   font-size: 0.92em;
 }
 
 .doc-title {
   display: block;
-  font-weight: 700;
+  font: 650 1.4em/1.15 var(--font-display);
+  letter-spacing: -0.015em;
   color: var(--fg);
   text-decoration: none;
-  font-size: 1.05em;
+  text-wrap: balance;
 }
 
 .version-link {
   display: inline-block;
-  font-size: 0.85em;
-  color: var(--fg-muted);
-  margin: 2px 0 16px;
+  margin: 10px 0 16px;
+  padding: 1px 8px;
+  border: 1.5px solid var(--line);
+  border-radius: 3px;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 0.74em;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  text-decoration: none;
+}
+
+.version-link:hover {
+  background: var(--bg-mark);
+  color: var(--mark-fg);
 }
 
 .doc-nav ul {
@@ -276,75 +587,117 @@ details.connect {
 }
 
 .doc-nav ul ul {
-  padding-left: 14px;
-  border-left: 1px solid var(--border);
-  margin-left: 6px;
+  padding-left: 12px;
+  border-left: 1.5px solid var(--border);
+  margin: 2px 0 4px 10px;
 }
 
 .doc-nav li a,
 .doc-nav .folder {
   display: block;
-  padding: 3px 8px;
-  border-radius: 6px;
+  margin: 2px 4px 2px 0;
+  padding: 4px 10px;
+  border: 1.5px solid transparent;
+  border-radius: 3px;
   color: var(--fg);
   text-decoration: none;
 }
 
 .doc-nav .folder {
-  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 0.74em;
   font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+  padding-top: 10px;
 }
 
 .doc-nav li a:hover {
   background: var(--bg-soft);
 }
 
+/* The page you're on is a label stuck to the menu. */
 .doc-nav li a[aria-current="page"] {
-  background: var(--bg-soft);
-  color: var(--accent);
-  font-weight: 600;
+  background: var(--bg);
+  border-color: var(--line);
+  box-shadow: 2px 2px 0 var(--shadow);
+  font-weight: 650;
 }
 
 .doc-links {
-  margin-top: 20px;
-  padding-top: 12px;
-  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 22px;
+  padding-top: 14px;
+  border-top: 1.5px dashed var(--border);
+}
+
+.doc-links a {
+  color: var(--fg);
+  font-weight: 600;
 }
 
 .doc-main {
-  padding: 24px 0 96px;
+  padding: 30px 0 96px;
   min-width: 0;
 }
 
+/* The page itself: a sheet of paper on the desk. */
+.doc-text {
+  min-width: 0;
+  padding: clamp(22px, 4vw, 52px) clamp(20px, 5vw, 64px) clamp(28px, 5vw, 60px);
+  border: 1.5px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  box-shadow: var(--sheet);
+}
+
 .toc h2 {
-  font-size: 0.8em;
+  font-family: var(--mono);
+  font-size: 0.72em;
+  font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.12em;
   color: var(--fg-muted);
-  margin: 0 0 8px;
+  margin: 0 0 10px;
 }
 
 .toc ul {
   list-style: none;
   padding: 0;
-  margin: 0 0 24px;
+  margin: 0 0 26px;
+  border-left: 1.5px solid var(--border);
 }
 
 .toc li {
-  margin: 4px 0;
-}
-
-.toc .toc-3 {
-  padding-left: 12px;
+  margin: 0;
 }
 
 .toc a {
+  display: block;
+  margin-left: -1.5px;
+  padding: 3px 0 3px 12px;
+  border-left: 1.5px solid transparent;
   color: var(--fg-muted);
   text-decoration: none;
+  line-height: 1.35;
+}
+
+.toc .toc-3 a {
+  padding-left: 24px;
+  font-size: 0.94em;
 }
 
 .toc a:hover {
   color: var(--fg);
+  border-left-color: var(--accent);
+}
+
+.doc-aside > p {
+  padding-top: 12px;
+  border-top: 1.5px dashed var(--border);
 }
 
 .banner,
@@ -352,23 +705,37 @@ details.connect {
 .render-error {
   border-radius: var(--radius);
   padding: 10px 14px;
-  margin-bottom: 16px;
-  border: 1px solid var(--border);
-  background: var(--bg-soft);
+  margin-bottom: 18px;
+  border: 1.5px solid var(--line);
+  background: var(--bg);
+}
+
+.banner {
+  background: var(--note);
+  color: var(--note-fg);
+  border-color: var(--note-line);
+  box-shadow: 3px 3px 0 color-mix(in srgb, var(--note-line) 45%, transparent);
+}
+
+.banner a {
+  color: inherit;
+  font-weight: 650;
 }
 
 .render-warning {
   border-color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 9%, var(--bg));
   font-size: 0.9em;
 }
 
 .render-error {
   border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 9%, var(--bg));
 }
 
 @media (max-width: 1100px) {
   .doc-layout {
-    grid-template-columns: 240px minmax(0, 1fr);
+    grid-template-columns: 230px minmax(0, 1fr);
   }
   .doc-aside {
     display: none;
@@ -381,19 +748,23 @@ details.connect {
   }
   .doc-layout {
     grid-template-columns: minmax(0, 1fr);
-    padding: 0 16px;
+    padding: 0 14px;
+  }
+  .doc-main {
+    padding-top: 18px;
   }
   .doc-nav {
     display: none;
     position: fixed;
     top: var(--topbar);
     left: 0;
-    width: min(300px, 85vw);
+    width: min(310px, 86vw);
     height: calc(100dvh - var(--topbar));
     max-height: none;
     background: var(--bg);
-    border-right: 1px solid var(--border);
-    padding: 20px;
+    border-right: 1.5px solid var(--line);
+    box-shadow: var(--sheet);
+    padding: 22px 16px;
     z-index: 15;
   }
   .nav-open .doc-nav {
@@ -403,7 +774,7 @@ details.connect {
 
 @media (max-width: 560px) {
   .topbar {
-    gap: 12px;
+    gap: 10px;
     padding: 0 12px;
   }
   .topnav,
@@ -411,35 +782,58 @@ details.connect {
   .user-menu .avatar {
     display: none;
   }
+  .doc-text {
+    box-shadow: var(--lift);
+  }
 }
 
-/* ---------- selections ---------- */
+/* ---------- comments ---------- */
 
+/* Commented text is run over with a highlighter. */
 ::highlight(doc-comment) {
   background-color: var(--bg-mark);
+  color: var(--mark-fg);
+}
+
+::highlight(doc-comment-active),
+::highlight(doc-comment-draft) {
+  background-color: light-dark(#ffb43d, #ff9f3f);
+  color: var(--mark-fg);
 }
 
 .selection-list {
   list-style: none;
   padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 18px;
+}
+
+.selection,
+.comment-bubble,
+.comment-editor {
+  background: var(--note);
+  color: var(--note-fg);
+  border: 1px solid var(--note-line);
+  border-radius: 2px;
+  box-shadow: 2px 3px 0 rgb(0 0 0 / 0.16);
 }
 
 .selection {
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 10px 14px;
-  margin-bottom: 10px;
-  cursor: pointer;
+  padding: 12px 14px;
+}
+
+:is(.selection, .comment-bubble) blockquote {
+  margin: 0 0 6px;
+  padding-left: 9px;
+  border-left: 3px solid var(--note-line);
+  font-style: italic;
+  white-space: pre-wrap;
+  overflow: hidden;
 }
 
 .selection blockquote {
-  margin: 0 0 6px;
-  padding-left: 10px;
-  border-left: 3px solid var(--bg-mark);
-  color: var(--fg-muted);
-  white-space: pre-wrap;
   max-height: 8em;
-  overflow: hidden;
 }
 
 .selection p {
@@ -447,20 +841,27 @@ details.connect {
   white-space: pre-wrap;
 }
 
-.selection footer {
+:is(.selection, .comment-bubble) footer {
   display: flex;
   justify-content: space-between;
-  font-size: 0.8em;
-  color: var(--fg-muted);
+  align-items: baseline;
+  gap: 8px;
+  font-family: var(--mono);
+  font-size: 0.72em;
+  letter-spacing: 0.02em;
+  opacity: 0.8;
+}
+
+:is(.selection, .comment-bubble) :is(a, button.link) {
+  color: inherit;
+}
+
+.selection footer {
+  display: block;
 }
 
 .selection.orphaned blockquote {
   text-decoration: line-through dotted;
-}
-
-::highlight(doc-comment-active),
-::highlight(doc-comment-draft) {
-  background-color: color-mix(in srgb, var(--bg-mark), var(--warning) 40%);
 }
 
 /* The popup on selected text: a Comment button, then the comment box. */
@@ -469,30 +870,43 @@ details.connect {
   z-index: 30;
 }
 
-.comment-start,
-.comment-editor {
-  box-shadow: 0 4px 16px rgb(0 0 0 / 0.15);
-}
-
 .comment-start {
   background: var(--fg);
   color: var(--bg);
   border-color: var(--fg);
   font-size: 0.85em;
-  padding: 4px 12px;
+  padding: 5px 13px;
+  box-shadow: 3px 3px 0 var(--accent);
+}
+
+.comment-start:hover {
+  box-shadow: 4px 4px 0 var(--accent);
 }
 
 .comment-editor {
   width: min(320px, calc(100vw - 16px));
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 10px;
+  padding: 10px 12px;
+  box-shadow: 4px 5px 0 rgb(0 0 0 / 0.22);
 }
 
 .comment-editor textarea {
   display: block;
   resize: vertical;
+  border: 0;
+  border-bottom: 1.5px dashed var(--note-line);
+  border-radius: 0;
+  background: transparent;
+  padding: 2px 0 6px;
+}
+
+.comment-editor textarea:focus-visible {
+  box-shadow: none;
+  border-color: var(--note-fg);
+}
+
+.comment-editor textarea::placeholder {
+  color: inherit;
+  opacity: 0.55;
 }
 
 .comment-editor .error {
@@ -506,16 +920,18 @@ details.connect {
 }
 
 .comment-hint {
-  color: var(--fg-muted);
-  font-size: 0.78em;
-  margin: 6px 0 0;
+  font-family: var(--mono);
+  font-size: 0.68em;
+  letter-spacing: 0.02em;
+  opacity: 0.75;
+  margin: 8px 0 0;
 }
 
-/* Comments beside the page: bubbles placed next to their quotes (selection.ts). */
+/* Comments beside the page: notes stuck next to their quotes (selection.ts). */
 .doc-body.has-comments {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 250px;
-  gap: 28px;
+  grid-template-columns: minmax(0, 1fr) 240px;
+  gap: 30px;
 }
 
 .doc-body:not(.has-comments) .comment-rail {
@@ -530,26 +946,29 @@ details.connect {
   position: absolute;
   left: 0;
   right: 0;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 8px 12px;
-  font-size: 0.88em;
+  padding: 10px 12px 8px;
+  font-size: 0.9em;
+  line-height: 1.45;
   cursor: pointer;
-  box-shadow: 0 1px 3px rgb(0 0 0 / 0.08);
+  transform: rotate(-0.7deg);
   transition:
     top 0.15s ease,
+    transform 0.15s ease,
     box-shadow 0.15s ease;
+}
+
+.comment-bubble:nth-child(even) {
+  transform: rotate(0.6deg);
 }
 
 .comment-bubble.active {
   z-index: 1;
-  border-color: var(--fg-muted);
-  box-shadow: 0 4px 16px rgb(0 0 0 / 0.15);
+  transform: rotate(0) translate(-2px, -2px);
+  box-shadow: 5px 6px 0 rgb(0 0 0 / 0.24);
 }
 
 .comment-bubble p {
-  margin: 0 0 4px;
+  margin: 0 0 6px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -557,13 +976,7 @@ details.connect {
 /* The quote shows only when there's no comment, or it's no longer in the page. */
 .comment-bubble blockquote {
   display: none;
-  margin: 0 0 4px;
-  padding-left: 8px;
-  border-left: 3px solid var(--bg-mark);
-  color: var(--fg-muted);
-  white-space: pre-wrap;
   max-height: 6em;
-  overflow: hidden;
 }
 
 .comment-bubble.quote-only blockquote,
@@ -575,22 +988,14 @@ details.connect {
   text-decoration: line-through dotted;
 }
 
-.comment-bubble footer {
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 0.85em;
-  color: var(--fg-muted);
-}
-
-/* Room for the bubbles: a wider page, and no contents column when it's tight. */
+/* Room for the notes: a wider page, and no contents column when it's tight. */
 .doc-layout:has(.doc-body.has-comments) {
-  max-width: 1680px;
+  max-width: 1700px;
 }
 
 @media (min-width: 1101px) and (max-width: 1500px) {
   .doc-layout:has(.doc-body.has-comments) {
-    grid-template-columns: 260px minmax(0, 1fr);
+    grid-template-columns: 250px minmax(0, 1fr);
   }
   .doc-layout:has(.doc-body.has-comments) .doc-aside {
     display: none;
@@ -603,25 +1008,19 @@ details.connect {
     display: block;
   }
   .comment-rail {
-    margin-top: 48px;
-    padding-top: 16px;
-    border-top: 1px solid var(--border);
+    margin-top: 40px;
+    padding-top: 20px;
+    border-top: 1.5px dashed var(--border);
     min-height: 0 !important;
   }
   .comment-bubble {
     position: static;
-    margin-bottom: 10px;
+    margin-bottom: 14px;
   }
 }
 
 [hidden] {
   display: none !important;
-}
-
-.doc-links {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
 }
 
 form.inline {
@@ -630,18 +1029,34 @@ form.inline {
 }
 
 .share-list {
-  padding-left: 1.2em;
+  list-style: none;
+  padding: 0;
+  border-top: 1.5px solid var(--line);
+  border-bottom: 1.5px solid var(--line);
+  background: var(--bg);
 }
 
 .share-list li {
-  margin: 4px 0;
+  padding: 8px 12px;
+}
+
+.share-list li + li {
+  border-top: 1px solid var(--border);
+}
+
+main.page form.row input[type="text"] {
+  max-width: 420px;
 }
 
 /* ---------- home: the folder tree ---------- */
 
+/* The documents, as a ledger on a sheet. */
 .doc-tree {
-  border-top: 1px solid var(--border);
-  margin-bottom: 24px;
+  margin-bottom: 30px;
+  border: 1.5px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  box-shadow: var(--sheet);
 }
 
 .doc-tree .tree {
@@ -653,32 +1068,82 @@ form.inline {
 .tree-head,
 .tree-doc {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 5.5rem 3.5rem 9rem 4rem;
+  grid-template-columns: minmax(0, 1fr) 5rem 4.5rem 8rem 4rem;
   gap: 12px;
   align-items: baseline;
-  padding: 8px 0;
+  padding: 9px 16px;
   border-bottom: 1px solid var(--border);
 }
 
+.doc-tree > .tree:last-child > li:last-child,
+.doc-tree > .tree:last-child > li:last-child .tree > li:last-child,
+.doc-tree > .tree:last-child > li:last-child > details:not([open]) > summary {
+  border-bottom: 0;
+}
+
 .tree-head {
-  font-size: 0.85em;
+  font-family: var(--mono);
+  font-size: 0.7em;
   font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
   color: var(--fg-muted);
+  background: var(--bg-soft);
+  border-bottom: 1.5px solid var(--line);
+  border-radius: calc(var(--radius) - 1.5px) calc(var(--radius) - 1.5px) 0 0;
+}
+
+.tree-doc:hover {
+  background: color-mix(in srgb, var(--bg-mark) 22%, var(--bg));
 }
 
 .tree-title,
 .tree-folder > details.folder > summary {
-  padding-left: calc(var(--depth, 0) * 1.5em);
+  padding-left: calc(16px + var(--depth, 0) * 1.6em);
 }
 
 .tree-title {
+  padding-left: calc(var(--depth, 0) * 1.6em + 1.45em);
   overflow-wrap: anywhere;
+}
+
+.tree-title > a:first-child {
+  color: var(--fg);
+  font-weight: 650;
+  text-decoration-color: color-mix(in srgb, var(--fg) 30%, transparent);
+}
+
+.tree-title > a:first-child:hover {
+  color: var(--accent);
+  text-decoration-color: currentColor;
+}
+
+.tree-title small {
+  font-family: var(--mono);
+  font-size: 0.72em;
 }
 
 .tree-pages,
 .tree-updated {
   color: var(--fg-muted);
-  font-size: 0.9em;
+  font-size: 0.88em;
+}
+
+.tree-version {
+  justify-self: start;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 0.76em;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.tree-version:hover {
+  background: var(--bg-mark);
+  color: var(--mark-fg);
 }
 
 .tree-folder {
@@ -686,16 +1151,50 @@ form.inline {
 }
 
 .tree-folder > details.folder > summary {
-  padding-top: 8px;
-  padding-bottom: 8px;
-  padding-right: 5em;
+  padding-top: 9px;
+  padding-bottom: 9px;
+  padding-right: 5.5em;
   border-bottom: 1px solid var(--border);
   cursor: pointer;
-  font-weight: 600;
+  list-style: none;
+  font: 650 1.08em/1.4 var(--font-display);
+}
+
+.tree-folder > details.folder > summary::-webkit-details-marker {
+  display: none;
+}
+
+/* A folder's mark turns down when it's open. */
+.tree-folder > details.folder > summary::before {
+  content: "";
+  display: inline-block;
+  width: 0;
+  height: 0;
+  margin-right: 0.75em;
+  border: 0.32em solid transparent;
+  border-left: 0.5em solid var(--accent);
+  border-right: 0;
+  vertical-align: 0.05em;
+  transition: transform 0.12s ease;
+}
+
+.tree-folder > details.folder[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.tree-folder > details.folder > summary:hover {
+  background: var(--bg-soft);
 }
 
 .tree-folder > details.folder > summary .muted {
-  font-weight: normal;
+  font-family: var(--mono);
+  font-size: 0.68em;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  vertical-align: 0.15em;
 }
 
 /* Move and rename: a small popover form, opened without JavaScript. */
@@ -706,8 +1205,8 @@ form.inline {
 
 .tree-folder > .tree-edit {
   position: absolute;
-  right: 0;
-  top: 8px;
+  right: 16px;
+  top: 10px;
   z-index: 1;
 }
 
@@ -718,8 +1217,16 @@ form.inline {
 .tree-edit > summary {
   list-style: none;
   cursor: pointer;
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 0.72em;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.tree-edit > summary:hover,
+.tree-edit[open] > summary {
   color: var(--accent);
-  font-size: 0.85em;
 }
 
 .tree-edit > summary::-webkit-details-marker {
@@ -729,18 +1236,18 @@ form.inline {
 .tree-edit > form {
   position: absolute;
   right: 0;
-  top: calc(100% + 4px);
+  top: calc(100% + 6px);
   z-index: 10;
-  width: min(320px, 80vw);
+  width: min(330px, 80vw);
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 12px;
+  gap: 10px;
+  padding: 14px;
   text-align: left;
   background: var(--bg);
-  border: 1px solid var(--border);
+  border: 1.5px solid var(--line);
   border-radius: var(--radius);
-  box-shadow: 0 4px 16px rgb(0 0 0 / 12%);
+  box-shadow: var(--sheet);
 }
 
 .tree-edit > form label {
@@ -774,25 +1281,28 @@ form.inline {
 
 .view-toggle {
   display: inline-flex;
-  margin-bottom: 12px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  margin-bottom: 18px;
+  border: 1.5px solid var(--line);
+  border-radius: 3px;
   overflow: hidden;
+  background: var(--bg);
+  box-shadow: 2px 2px 0 var(--shadow);
 }
 
 .view-toggle a {
-  padding: 4px 14px;
+  padding: 4px 16px;
   color: var(--fg);
+  font-weight: 650;
   text-decoration: none;
 }
 
 .view-toggle a + a {
-  border-left: 1px solid var(--border);
+  border-left: 1.5px solid var(--line);
 }
 
 .view-toggle a[aria-current="true"] {
-  background: var(--accent);
-  color: var(--accent-fg);
+  background: var(--fg);
+  color: var(--bg);
 }
 
 .labels {
@@ -803,19 +1313,31 @@ form.inline {
   vertical-align: baseline;
 }
 
+/* A label is a tag, punched at one end. */
 .label-chip {
   display: inline-flex;
   align-items: baseline;
-  gap: 4px;
-  padding: 0 8px;
-  border-radius: 999px;
-  font-size: 0.75rem;
-  font-weight: normal;
-  line-height: 1.6;
-  color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 10%, var(--bg));
-  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--bg));
+  gap: 5px;
+  padding: 0 8px 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px 3px 3px 999px;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  font-weight: 500;
+  line-height: 1.65;
   text-decoration: none;
+}
+
+.label-chip::before {
+  content: "";
+  align-self: center;
+  width: 5px;
+  height: 5px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--desk);
 }
 
 .label-chip a {
@@ -823,46 +1345,54 @@ form.inline {
   text-decoration: none;
 }
 
-.label-chip a:hover,
-a.label-chip:hover {
-  text-decoration: underline;
+a.label-chip:hover,
+.label-chip:has(a:hover) {
+  background: var(--bg-mark);
+  color: var(--mark-fg);
 }
 
 .label-remove {
-  font-size: 1em;
+  font-size: 1.1em;
   line-height: 1;
+  text-decoration: none !important;
 }
 
 .label-filter {
-  font-size: 0.8em;
-  font-weight: normal;
+  margin-left: 6px;
+  font-family: var(--mono);
+  font-size: 0.66em;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
 .label-filter-bar {
-  margin: 0 0 12px;
+  margin: 0 0 16px;
 }
 
 .doc-labels {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
-  margin: 8px 0 12px;
+  gap: 5px;
+  margin: 0 4px 16px 0;
 }
 
 .label-add {
   display: flex;
-  gap: 4px;
+  gap: 6px;
   width: 100%;
+  margin-top: 2px;
 }
 
 .label-add input {
   flex: 1;
   min-width: 0;
   font-size: 0.85em;
-  padding: 2px 6px;
+  padding: 2px 8px;
 }
 
 .label-add button {
   font-size: 0.85em;
-  padding: 2px 8px;
+  padding: 2px 9px;
+  box-shadow: none;
 }
