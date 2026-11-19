@@ -31,6 +31,9 @@ export const INSTRUCTIONS =
   "or run npm packages, renderers or other tools to check pages. The user can also select text in a document on the board " +
   "and comment on it for you: `get_feedback` has the comments and answers (pass its `cursor` as `since` next time for only " +
   "new ones), and the board sends them to the task that published the document as a message when the user chooses Send. " +
+  "The user can also edit a document themselves on the board, which publishes a new version (with no task): before you " +
+  "publish a new version of a document they may have edited, read its latest pages (`get_document`, `read_page`) so you " +
+  "don't undo their changes. " +
   "Documents belong to your profile on this board. A new " +
   "document goes in a folder named after your task's project unless you give `folder`; a `folder` you give is used as " +
   'it is (`"plans"` is a top-level folder, `"<project>/plans"` one inside the project\'s), and later versions stay ' +

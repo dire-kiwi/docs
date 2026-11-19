@@ -26,6 +26,11 @@ It replaces the documents Huntaway had built in. Its id is `docs`, so:
 - **Comments** on the text, as the hosted reader has them (DOC-14): select text, write in the popup, and it saves when
   you click away; comments show as bubbles beside their quotes. **Send** puts the unsent ones in one message to the
   task that published the newest version, and agents read them with `get_feedback`.
+- **Editing** (DOC-18): **Edit** on a document opens the hosted site's editor (`frontend/src/editor.ts`): every page's
+  source beside a live preview, a Markdown toolbar, pages to add, rename, reorder and delete, and images to upload.
+  **Save** publishes all the pages as a new version (with no task), and **New document** on the home page writes one.
+  Unsaved changes are kept in the plugin's database as a draft (the board reloads its pages whenever a document
+  changes), and come back when the editor opens again.
 - **Publishing to a hosted docs site**: connect a profile from the home page (the OAuth device sign-in, or a pasted
   personal access token), then **Publish** a version from its page. Publishing again adds a version to the same
   document there. Tokens stay in the plugin's database on the host and are renewed there.
@@ -84,7 +89,8 @@ Layout:
   `publish_document`; `src/images.ts`: AVIF conversion
 - `src/hosted.ts`, `src/siteRepo.ts`: connecting to and publishing on a hosted docs site
 - `src/pages/`: the pages (HTML, rendered on the host) and `src/calls.ts`, what they call
-- `client/page.ts`: the pages' script (forms, answers, comments), sharing `frontend/src/answer.ts`, `quote.ts` and `bubbles.ts` with the site
+- `client/page.ts`: the pages' script (forms, answers, comments, the editor), sharing `frontend/src/answer.ts`, `quote.ts`,
+  `bubbles.ts` and `editor.ts` (with `editor.css`, bundled as text) with the site
 - `vendor/huntaway-plugin/`: a copy of Huntaway's plugin API, to type-check and test against until Huntaway publishes it
 
 ## Release
