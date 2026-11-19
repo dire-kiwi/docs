@@ -81,8 +81,18 @@
   font-size: 0.85em;
 }
 
-.editor-error {
+.editor-messages {
   grid-area: error;
+}
+
+.editor-notice {
+  margin: 8px 16px 0;
+  padding: 8px 12px;
+  border: 1px solid var(--warning);
+  border-radius: 6px;
+}
+
+.editor-error {
   margin: 8px 16px 0;
   padding: 8px 12px;
   border: 1px solid var(--danger);

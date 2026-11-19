@@ -181,7 +181,7 @@ export function continueList(s: TextState): TextState | null {
   const line = s.value.slice(from, s.start);
   const m = /^(\s*)([-*+] \[[ xX]\] |[-*+] |(\d+)([.)]) |> )/.exec(line);
   if (!m) return null;
-  const [whole, indent, marker, num, punct] = m;
+  const [whole, indent = "", marker = "", num, punct = "."] = m;
   if (line.length === whole.length) {
     // An empty item: end the list (or the quote).
     return { value: s.value.slice(0, from) + s.value.slice(s.start), start: from, end: from };

@@ -2,7 +2,7 @@ import { Clock, DateTime, Effect, Option, Result, Schema } from "effect"
 import { PluginError } from "@huntaway/plugin"
 import type { PluginHostShape } from "@huntaway/plugin"
 import type { Images } from "./images.ts"
-import type { Answer, Doc, DocPage, Repo, VersionRow } from "./repo.ts"
+import type { Answer, Doc, DocPage, Format, Repo, VersionRow } from "./repo.ts"
 import { renderMessage, rendered } from "./render.ts"
 import type { RenderLib } from "./render.ts"
 import { chars, docBase, feedbackMessage, labelTree, quoted, renamedFolders, spelt } from "./rules.ts"
@@ -24,6 +24,8 @@ export class DocsRefused extends Schema.TaggedError<DocsRefused>()("DocsRefused"
 export const MAX_QUOTE_CHARS = 10_000
 export const MAX_COMMENT_CHARS = 20_000
 export const MAX_CONTEXT_CHARS = 500
+/** The biggest draft the editor keeps, as JSON (images it uploaded are in it, as base64). */
+export const MAX_DRAFT_BYTES = 50_000_000
 /** The longest answer, as JSON, in bytes (the hosted site's limit). */
 export const MAX_ANSWER_BYTES = 100_000
 
@@ -63,6 +65,27 @@ export interface NewAnswer {
   readonly page: string
   readonly field: string
   readonly value: unknown
+}
+
+/** A page the editor previews. */
+export interface EditorPreview {
+  readonly path: string
+  readonly format: string
+  readonly content: string
+}
+
+/** What the editor saves: every page of the document, and images uploaded in it (checked by `publish_document`'s rules). */
+export interface EditorSave {
+  /** The document, or null for a new one. */
+  readonly slug: string | null
+  /** The version the editor opened. */
+  readonly base_version: number | null
+  readonly title: string
+  /** A new document's folder. */
+  readonly folder: string | null
+  readonly message: string | null
+  readonly pages: ReadonlyArray<unknown>
+  readonly images: ReadonlyArray<unknown>
 }
 
 export interface DocsDeps {
@@ -168,6 +191,32 @@ export const makeDocs = (deps: DocsDeps) => {
     return null
   })
 
+  /**
+   * The images of version `versionId` that page `p` shows, as `data:` URLs by name: only those, as a version may have 200
+   * of up to 500 KB each.
+   */
+  const shownImages = Effect.fnUntraced(function* (d: Doc, versionId: string, p: { readonly path: string; readonly format: Format; readonly source: string }, base: string) {
+    const images: Record<string, string> = {}
+    const refs = yield* repo.imageRefs(versionId)
+    if (refs.length === 0) return images
+    const srcs = Result.getOrElse(
+      Result.try(() => lib.render(p.source, p.format, { pagePath: p.path, baseUrl: base }).imageSrcs),
+      () => [],
+    )
+    const byName = new Map(refs.map((im) => [im.name, im.sha256]))
+    for (const src of srcs) {
+      const name = lib.imageCandidates(p.path, src).find((n) => byName.has(n))
+      const sha = name === undefined ? undefined : byName.get(name)
+      if (name === undefined || sha === undefined || name in images) continue
+      const data = yield* repo.imageData(d.profile_id, sha)
+      if (data !== null) images[name] = `data:image/avif;base64,${toBase64(data)}`
+    }
+    return images
+  })
+
+  /** A page path from the editor, or `index`. */
+  const editorPath = (raw: string) => Option.getOrElse(Option.liftThrowable(() => lib.normalizePath(raw))(), () => "index")
+
   const forAgent = Effect.fnUntraced(function* (caller: Caller, slug: string) {
     const d = yield* repo.get(caller.profile, slug)
     if (d === null) return yield* new DocsRefused({ message: `no document ${quoted(slug)}; call list_documents to see what exists` })
@@ -252,23 +301,7 @@ export const makeDocs = (deps: DocsDeps) => {
       const p = pages.find((x) => x.path === path) ?? pages.find((x) => x.path === `${path}/index`) ?? (rawPath === "" ? pages[0] : undefined)
       if (p === undefined) return yield* PluginError.notFound(`version ${v.number} has no page ${quoted(path)}`)
       const base = docBase(d.profile_id, d.slug, number)
-      // Only the images this page shows go in it (a version may have 200 of up to 500 KB each).
-      const images: Record<string, string> = {}
-      const refs = yield* repo.imageRefs(v.id)
-      if (refs.length > 0) {
-        const srcs = Result.getOrElse(
-          Result.try(() => lib.render(p.source, p.format, { pagePath: p.path, baseUrl: base }).imageSrcs),
-          () => [],
-        )
-        const byName = new Map(refs.map((im) => [im.name, im.sha256]))
-        for (const src of srcs) {
-          const name = lib.imageCandidates(p.path, src).find((n) => byName.has(n))
-          const sha = name === undefined ? undefined : byName.get(name)
-          if (name === undefined || sha === undefined || name in images) continue
-          const data = yield* repo.imageData(d.profile_id, sha)
-          if (data !== null) images[name] = `data:image/avif;base64,${toBase64(data)}`
-        }
-      }
+      const images = yield* shownImages(d, v.id, p, base)
       const answers = Object.fromEntries((yield* repo.pageAnswers(v.id, p.path)).map((a) => [a.field, valueOf(a)]))
       const shown = Result.try({ try: () => lib.render(p.source, p.format, { pagePath: p.path, baseUrl: base, images, answers }), catch: renderMessage })
       const r = Result.getOrNull(shown)
@@ -284,6 +317,94 @@ export const makeDocs = (deps: DocsDeps) => {
         error: Result.isFailure(shown) ? shown.failure : null,
       }
       return { version: v, nav, page, pages: pages.map((x) => ({ path: x.path, title: x.title })) }
+    }),
+    /** What the editor opens a document with: its latest version's pages, their sources, and its images' names. */
+    editorData: Effect.fn("Docs.editorData")(function* (d: Doc, rawPath: string) {
+      const v = yield* repo.version(d.id, null)
+      if (v === null) return yield* PluginError.notFound(`document ${quoted(d.slug)} has no versions`)
+      const pages = yield* repo.pagesFull(v.id)
+      const path = editorPath(rawPath)
+      const open = (pages.find((p) => p.path === path) ?? pages.find((p) => p.path === `${path}/index`) ?? pages[0])?.path ?? "index"
+      return {
+        version: v.number,
+        open,
+        pages: pages.map((p) => ({ path: p.path, title: p.title, format: p.format, content: p.source })),
+        images: (yield* repo.imageRefs(v.id)).map((im) => im.name),
+      }
+    }),
+    /** The editor's draft of a document (or, `slug` null, of a new one), as it gave it; null if there's none. */
+    draft: Effect.fn("Docs.draft")(function* (profile: string, slug: string | null) {
+      const data = yield* repo.draft(profile, slug ?? "")
+      if (data === null) return null
+      try {
+        return JSON.parse(data) as unknown
+      } catch {
+        return null
+      }
+    }),
+    /** Keeps the editor's draft (any JSON, at most `MAX_DRAFT_BYTES`), or with `draft` null, drops it. */
+    keepDraft: Effect.fn("Docs.keepDraft")(function* (profile: string, slug: string | null, draft: unknown) {
+      yield* profileOf(profile)
+      if (slug !== null) yield* docOf(profile, slug)
+      if (draft === null) return yield* repo.dropDraft(profile, slug ?? "")
+      const data = JSON.stringify(draft)
+      if (data.length > MAX_DRAFT_BYTES) return yield* PluginError.invalid("the draft is too big to keep")
+      yield* repo.putDraft(profile, slug ?? "", data, yield* nowIso)
+    }),
+    /** A page as it would render, for the editor's preview, with the images of the document's latest version. */
+    preview: Effect.fn("Docs.preview")(function* (profile: string, slug: string | null, input: EditorPreview) {
+      yield* profileOf(profile)
+      const d = slug === null ? null : yield* repo.get(profile, slug)
+      const v = d === null ? null : yield* repo.version(d.id, null)
+      const format: Format = input.format === "mdx" ? "mdx" : "md"
+      const p = { path: editorPath(input.path), format, source: input.content }
+      const base = d === null ? `/docs/${encodeURIComponent(profile)}/` : docBase(profile, d.slug, null)
+      const images = d === null || v === null ? {} : yield* shownImages(d, v.id, p, base)
+      const shown = Result.try({ try: () => lib.render(p.source, format, { pagePath: p.path, baseUrl: base, images }), catch: renderMessage })
+      if (Result.isFailure(shown)) return { html: null, has_h1: false, warnings: [], error: `This page isn't valid ${format}: ${shown.failure}` }
+      return { html: shown.success.html, has_h1: shown.success.hasH1, warnings: shown.success.warnings, error: null }
+    }),
+    /**
+     * The editor's pages as a new version of a document (`slug`), or a new document. Pages it had that the editor
+     * doesn't are deleted; images the pages still use are kept. If a version was published after `base_version`, it
+     * publishes nothing and says which is the latest.
+     */
+    save: Effect.fn("Docs.save")(function* (profile: string, input: EditorSave) {
+      yield* profileOf(profile)
+      const title = input.title.trim()
+      if (title === "") return yield* PluginError.invalid("give the document a title")
+      if (input.pages.length === 0) return yield* PluginError.invalid("a document needs at least one page")
+      const caller: Caller = { profile, task: null, run: null, project: null }
+      const common = { title: chars(title) > 200 ? [...title].slice(0, 200).join("") : title, message: input.message, labels: null, pages: input.pages, images: input.images }
+      let input2: PublishInput
+      if (input.slug !== null) {
+        const d = yield* docOf(profile, input.slug)
+        if (input.base_version !== null && input.base_version !== d.latest_version) {
+          return { conflict: d.latest_version, message: `Version ${d.latest_version} was published while you were editing.` }
+        }
+        const v = yield* repo.version(d.id, null)
+        const kept = new Set(
+          input.pages.flatMap((p) => {
+            const path = typeof p === "object" && p !== null && "path" in p && typeof p.path === "string" ? p.path : null
+            return path === null ? [] : Option.toArray(Option.liftThrowable(() => lib.normalizePath(path))())
+          }),
+        )
+        const gone = v === null ? [] : (yield* repo.pages(v.id)).map((p) => p.path).filter((p) => !kept.has(p))
+        // A merge with every page, so the images the pages still use carry over.
+        input2 = { ...common, slug: d.slug, mode: "merge", folder: null, delete_paths: gone }
+      } else {
+        input2 = { ...common, slug: null, mode: "replace", folder: input.folder ?? "", delete_paths: [] }
+      }
+      // The editor goes to the document once it's saved: the board doesn't reload its pages for this change (which would
+      // reload the editor first). Its draft is saved now.
+      const changed = (profile: string, slug: string) =>
+        Effect.andThen(repo.dropDraft(profile, input.slug === null ? "" : slug), host.emit({ topic: "documents", profile_id: profile, data: { slug, deleted: false } }))
+      const out = yield* publishFor(
+        { repo, images: deps.images, lib, transaction: tx, boardUrl: host.boardUrl, uuid: deps.uuid, changed },
+        caller,
+        input2,
+      ).pipe(Effect.mapError((e) => PluginError.invalid(e.message)))
+      return { slug: out.slug, version: out.version, url: docBase(profile, out.slug, null), warnings: out.warnings }
     }),
     /** The documents a task published, newest version first, each once. */
     ofTask: Effect.fn("Docs.ofTask")(function* (profile: string, task: string) {

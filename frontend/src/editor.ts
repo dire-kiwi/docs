@@ -71,11 +71,34 @@ export type SaveResult =
   /** Someone published `latest` since the editor opened. */
   | { conflict: number; message: string };
 
+/** Unsaved changes, kept as the user edits so that leaving or reloading the page doesn't lose them. */
+export interface Draft {
+  baseVersion: number | null;
+  title: string;
+  folder: string;
+  message: string;
+  pages: EditorPage[];
+  /** Images uploaded in the editor, base64 and as `data:` URLs. */
+  uploads: { name: string; data: string; url: string }[];
+  /** The page that was open. */
+  open: string;
+  savedAt: string;
+}
+
+/** Where a document's draft is kept (one per document, and one for a new document). */
+export interface DraftStore {
+  load(): Promise<Draft | null>;
+  save(draft: Draft): Promise<void>;
+  clear(): Promise<void>;
+}
+
 export interface EditorBackend {
   preview(page: { path: string; format: PageFormat; content: string }): Promise<PreviewResult>;
   save(request: SaveRequest): Promise<SaveResult>;
   /** Leave the editor for a URL (after saving, or on Cancel). */
   go(url: string): void;
+  /** Keeps drafts, if the page can. */
+  drafts?: DraftStore;
 }
 
 /** Images the server converts (SVG and the rest are refused). */
@@ -237,13 +260,14 @@ export function mountEditor(
       onclick: () => {
         if (!isDirty() || confirm("Leave without saving your changes?")) {
           saved = true;
-          backend.go(data.cancelUrl);
+          void dropDraft().then(() => backend.go(data.cancelUrl));
         }
       },
     },
     "Cancel",
   );
   const errorBox = h("div", { className: "editor-error", role: "alert", hidden: true });
+  const notice = h("div", { className: "editor-notice", role: "status", hidden: true });
 
   // ---- the pages ----------------------------------------------------------------------------------------------------
   const pageList = h("ul", { className: "editor-page-list" });
@@ -406,7 +430,7 @@ export function mountEditor(
         cancel,
         saveButton,
       ),
-      errorBox,
+      h("div", { className: "editor-messages" }, notice, errorBox),
       h(
         "nav",
         { className: "editor-pages", "aria-label": "Pages" },
@@ -447,7 +471,95 @@ export function mountEditor(
   const changed = () => {
     if (!saving) status.textContent = isDirty() ? "Unsaved changes" : "";
     renderList();
+    keepDraft();
   };
+
+  // ---- drafts -------------------------------------------------------------------------------------------------------
+  const drafts = backend.drafts;
+  let draftTimer: ReturnType<typeof setTimeout> | undefined;
+  const draftNow = (): Draft => ({
+    baseVersion,
+    title: title.value,
+    folder: folder?.value ?? "",
+    message: message.value,
+    pages: pages.map((p) => ({ ...p })),
+    uploads: [...uploads.values()],
+    open: page().path,
+    savedAt: new Date().toISOString(),
+  });
+  /** Keep the changes as a draft once the user pauses (or drop it, if they undid them all). */
+  function keepDraft(): void {
+    if (!drafts) return;
+    clearTimeout(draftTimer);
+    draftTimer = setTimeout(() => {
+      if (saved) return;
+      void (isDirty() ? drafts.save(draftNow()) : drafts.clear()).catch(() => {
+        // Not kept; the page still has the changes.
+      });
+    }, 800);
+  }
+  async function dropDraft(): Promise<void> {
+    clearTimeout(draftTimer);
+    await drafts?.clear().catch(() => {});
+  }
+  /** Put back the changes of a draft (from before the page was left or reloaded). */
+  function restore(d: Draft): void {
+    if (JSON.stringify([d.title, d.folder, d.pages, d.uploads.map((u) => u.name)]) === initial) {
+      void dropDraft();
+      return;
+    }
+    load(d.title, d.folder, d.message, d.pages, d.uploads, d.baseVersion, d.open);
+    const newer =
+      d.baseVersion !== null && data.baseVersion !== null && d.baseVersion !== data.baseVersion
+        ? ` Version ${data.baseVersion} has been published since you started them.`
+        : "";
+    notice.replaceChildren(
+      `Your unsaved changes from ${new Date(d.savedAt).toLocaleString()} are back.${newer} `,
+      h(
+        "button",
+        {
+          type: "button",
+          className: "link",
+          onclick: () => {
+            notice.hidden = true;
+            void dropDraft();
+            load(data.title, data.folder, "", data.pages, [], data.baseVersion, data.open);
+          },
+        },
+        "Discard them",
+      ),
+    );
+    notice.hidden = false;
+  }
+  function load(
+    t: string,
+    f: string,
+    m: string,
+    ps: EditorPage[],
+    ups: Upload[],
+    base: number | null,
+    open: string,
+  ): void {
+    pages.splice(
+      0,
+      pages.length,
+      ...(ps.length > 0 ? ps.map((p) => ({ ...p })) : [newPage("index", "")]),
+    );
+    title.value = t;
+    if (folder) folder.value = f;
+    message.value = m;
+    uploads.clear();
+    for (const u of ups) uploads.set(u.name, u);
+    baseVersion = base;
+    select(
+      Math.max(
+        0,
+        pages.findIndex((p) => p.path === open),
+      ),
+    );
+    changed();
+  }
+  message.addEventListener("input", keepDraft);
 
   function renderList(): void {
     pageList.replaceChildren(
@@ -788,6 +900,7 @@ export function mountEditor(
     };
     saving = true;
     saveButton.disabled = true;
+    clearTimeout(draftTimer);
     status.textContent = request.images.length > 0 ? "Saving (converting images)…" : "Saving…";
     try {
       const out = await backend.save(request);
@@ -813,10 +926,12 @@ export function mountEditor(
       }
       saved = true;
       status.textContent = `Saved as version ${out.version}`;
+      await dropDraft();
       backend.go(out.url);
     } catch (e) {
       status.textContent = "";
       showError(messageOf(e));
+      keepDraft();
     } finally {
       saving = false;
       saveButton.disabled = false;
@@ -834,5 +949,11 @@ export function mountEditor(
   changed();
   if (data.isNew) title.focus();
   else source.focus();
+  void drafts
+    ?.load()
+    .then((d) => {
+      if (d && !saved) restore(d);
+    })
+    .catch(() => {});
   return { dirty: isDirty };
 }

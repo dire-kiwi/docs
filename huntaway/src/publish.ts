@@ -12,10 +12,10 @@ import { docBase, docSlug, quoted, spelt } from "./rules.ts"
 // for a merge, warnings for images a page shows that the version doesn't have, and only then the slow part (converting
 // to AVIF); then one transaction makes the version (and the document, if it's new).
 
-/** Who publishes: the profile its documents belong to, and the task and run that publish. */
+/** Who publishes: the profile its documents belong to, and the task and run that publish (none: the user, in the editor). */
 export interface Caller {
   readonly profile: string
-  readonly task: string
+  readonly task: string | null
   readonly run: string | null
   /** The task's project's name, for a new document's folder (none: the top level). */
   readonly project: string | null

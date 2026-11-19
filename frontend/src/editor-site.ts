@@ -1,6 +1,38 @@
 import { api } from "./api.ts";
 import { mountEditor } from "./editor.ts";
-import type { EditorData, PreviewResult, SaveRequest, SaveResult } from "./editor.ts";
+import type {
+  Draft,
+  DraftStore,
+  EditorData,
+  PreviewResult,
+  SaveRequest,
+  SaveResult,
+} from "./editor.ts";
+
+/** Drafts in the browser's storage, one per document (and one for a new document). */
+export function localDrafts(key: string): DraftStore {
+  return {
+    async load() {
+      try {
+        const raw = localStorage.getItem(key);
+        return raw === null ? null : (JSON.parse(raw) as Draft);
+      } catch {
+        return null;
+      }
+    },
+    async save(draft) {
+      try {
+        localStorage.setItem(key, JSON.stringify(draft));
+      } catch {
+        // Too big with its images (or storage is off): keep the text at least.
+        localStorage.setItem(key, JSON.stringify({ ...draft, uploads: [] }));
+      }
+    },
+    async clear() {
+      localStorage.removeItem(key);
+    },
+  };
+}
 
 /**
  * The editor on the hosted site (`/d/<slug>/-/edit/…` and `/new`): it previews with
@@ -56,6 +88,7 @@ export function initEditor(): void {
     go(url) {
       window.location.assign(url);
     },
+    drafts: localDrafts(`docs-draft:${slug ?? "new"}`),
   });
   window.addEventListener("beforeunload", (e) => {
     if (editor.dirty()) e.preventDefault();

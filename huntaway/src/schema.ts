@@ -177,4 +177,20 @@ export const migrations: ReadonlyArray<PluginMigration> = [
       ) STRICT`)
     }),
   },
+  {
+    // What the user has changed in the editor and not saved (`data`: the editor's draft as JSON), so the board reloading
+    // the page (as it does when any document changes) doesn't lose it. One per document, and one (slug '') for a new
+    // document; gone once it's saved.
+    name: "0004-drafts",
+    run: Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient
+      yield* sql.unsafe(`CREATE TABLE doc_drafts (
+        profile_id TEXT NOT NULL,
+        slug TEXT NOT NULL,
+        data TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (profile_id, slug)
+      ) STRICT`)
+    }),
+  },
 ]

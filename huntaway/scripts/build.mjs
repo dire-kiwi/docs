@@ -19,6 +19,8 @@ await build({
   target: "es2022",
   minify: true,
   legalComments: "none",
+  // The editor's styles (frontend/src/editor.css), which the script adds to its page.
+  loader: { ".css": "text" },
   logLevel: "warning",
 })
 if (!clientOnly) execFileSync(join(root, "node_modules/.bin/tsc"), ["-p", join(root, "tsconfig.build.json")], { stdio: "inherit" })
