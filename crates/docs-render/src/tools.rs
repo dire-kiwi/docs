@@ -146,7 +146,7 @@ pub fn tool_definitions() -> Value {
             "description": "Move a document to another folder, or to another organization, e.g. when the user asks you to. \
     Folders are '/'-separated paths (\"docs/plans\"); \"\" is the top level. Your documents and each organization's have their own folders, \
     and a folder exists while it has documents in it. Moving a document does not change its URL. \
-    Its owner can move it, and so can its organization's members; only its owner can take it out of an organization.",
+    Its owner can move it, and so can its organization's members; only its owner can take it out of an organization, to their own documents or another organization.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

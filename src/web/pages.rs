@@ -248,13 +248,13 @@ fn doc_row(d: &DocumentSummary, indent: &str, view: &TreeView) -> Markup {
                         input type="text" name="folder" value=(d.folder) list=(view.folder_list) maxlength="200"
                             placeholder="Top level" aria-label={ "Folder for " (d.title) };
                         p.muted.small { "Type a new path like " code { "docs/plans" } " to make a folder." }
-                        @if !view.orgs.is_empty() {
+                        // Only its creator can take a document out of an organization (to
+                        // their own documents or another organization), so others can only
+                        // change its folder.
+                        @if !view.orgs.is_empty() && (d.org_id.is_none() || d.owner_id == view.user_id) {
                             label { "in" }
                             select name="organization" aria-label={ "Where " (d.title) " belongs" } {
-                                // Only its creator can take a document out of an organization.
-                                @if d.org_id.is_none() || d.owner_id == view.user_id {
-                                    option value="" selected[d.org_id.is_none()] { "Your documents" }
-                                }
+                                option value="" selected[d.org_id.is_none()] { "Your documents" }
                                 @for o in view.orgs {
                                     option value=(o.slug) selected[d.org_id == Some(o.id)] { (o.name) }
                                 }

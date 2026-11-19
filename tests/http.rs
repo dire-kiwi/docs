@@ -2395,6 +2395,38 @@ async fn organizations_share_documents() {
         )
         .await;
     assert!(err.contains("only bob"), "{err}");
+    // Nor into another organization, where acme-corp's members would lose it: not with
+    // move_document, nor with the Move form (which doesn't offer it).
+    t.post_form("/orgs", &alice_cookie, &[("csrf", &csrf), ("name", "Alice only")])
+        .await;
+    let err = t
+        .tool_error(
+            &alice,
+            "move_document",
+            json!({ "slug": "roadmap", "folder": "", "organization": "alice-only" }),
+        )
+        .await;
+    assert!(err.contains("only bob"), "{err}");
+    let refused = t
+        .post_form(
+            "/d/roadmap/-/move",
+            &alice_cookie,
+            &[("csrf", &csrf), ("folder", "plans"), ("organization", "alice-only")],
+        )
+        .await;
+    assert!(refused.body.contains("only bob"), "{}", refused.body);
+    assert_eq!(
+        t.tool(&bob, "get_document", json!({ "slug": "roadmap" })).await["organization"],
+        "acme-corp"
+    );
+    let home = t.get("/", &alice_cookie).await;
+    let form = &home.body[home.body.find(r#"action="/d/roadmap/-/move""#).unwrap()..];
+    let form = &form[..form.find("</form>").unwrap()];
+    assert!(!form.contains("<select"), "{form}");
+    let res = t
+        .post_form("/orgs/alice-only/delete", &alice_cookie, &[("csrf", &csrf)])
+        .await;
+    assert_eq!(res.status, StatusCode::SEE_OTHER);
     let moved = t
         .tool(
             &bob,

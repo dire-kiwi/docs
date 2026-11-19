@@ -730,12 +730,13 @@ fn editors(doc: &DocumentSummary) -> String {
 
 /// Whether `user` may file `doc` in the organization `org_id` (`None`: its owner's own
 /// documents); the caller has checked they are a member of `org_id`. They need to be able
-/// to edit it, and only its owner can take it out of an organization.
+/// to edit it, and only its owner can take it out of an organization, whether to their
+/// own documents or to another organization (where its members could lose it).
 pub(crate) fn check_move(doc: &DocumentSummary, user: &User, org_id: Option<i64>) -> Result<(), String> {
     if !doc.can_edit {
         return Err(format!("only {} can move {:?}", editors(doc), doc.slug));
     }
-    if org_id.is_none() && doc.org_id.is_some() && doc.owner_id != user.id {
+    if doc.org_id.is_some() && org_id != doc.org_id && doc.owner_id != user.id {
         return Err(format!(
             "only {} (who created it) can take {:?} out of its organization",
             doc.owner, doc.slug
