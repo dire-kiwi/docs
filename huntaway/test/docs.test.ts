@@ -1,6 +1,8 @@
 import { assert, describe, it } from "@effect/vitest"
 import { Effect } from "effect"
 import sharp from "sharp"
+import { loadRenderer } from "../src/render.ts"
+import { definitions } from "../src/tools.ts"
 import { BOARD, call, OTHER, TASK, withHarness } from "./harness.ts"
 
 // The docs plugin's MCP server, as an agent on the board uses it: the hosted server's tools, arguments, checks,
@@ -218,7 +220,7 @@ describe("labels and lists", () => {
     ),
   )
 
-  it.effect("list_components is the renderer's reference, and share_document isn't offered", () =>
+  it.effect("list_components is the renderer's reference, and share_document and organizations aren't offered", () =>
     withHarness({}, (h) =>
       Effect.gen(function* () {
         assert.match((yield* h.tool("list_components", {})).text, /Callout/)
@@ -234,6 +236,9 @@ describe("labels and lists", () => {
           "get_feedback",
           "list_components",
         ])
+        for (const d of definitions(yield* yield* loadRenderer)) {
+          assert.notProperty(d.inputSchema["properties"] ?? {}, "organization", d.name)
+        }
         assert.strictEqual(h.parts.mcp?.preApproved, true)
       }),
     ),

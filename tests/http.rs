@@ -440,7 +440,7 @@ async fn versions_merge_and_validation() {
             json!({ "slug": "research-notes", "pages": [{ "path": "a", "content": "pwned" }] }),
         )
         .await;
-    assert!(err.contains("is taken by another user"), "{err}");
+    assert!(err.contains("taken by a document you can't publish to"), "{err}");
 
     let warn = t
         .tool(
@@ -792,7 +792,7 @@ async fn documents_are_private_until_shared() {
             json!({ "slug": "secret", "pages": [{ "path": "index", "content": "x" }] }),
         )
         .await;
-    assert!(err.contains("taken by another user"), "{err}");
+    assert!(err.contains("taken by a document you can't publish to"), "{err}");
 
     // Share link: carol joins by opening it; turning it off stops new joins.
     let shared = t
@@ -1697,7 +1697,7 @@ async fn labels_organise_documents() {
             json!({ "slug": "bobs", "labels": ["mine"], "pages": page("x") }),
         )
         .await;
-    assert!(err.contains("taken by another user"), "{err}");
+    assert!(err.contains("taken by a document you can't publish to"), "{err}");
     let bobs = t.tool(&bob, "list_documents", json!({ "label": "research" })).await;
     assert_eq!(
         slugs(&bobs),
@@ -2523,6 +2523,299 @@ async fn owners_edit_documents_in_the_editor() {
         )
         .await;
     assert_eq!(untitled.status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn organizations_share_documents() {
+    let t = TestApp::new().await;
+    let (alice_cookie, alice) = t.user("alice").await;
+    let (bob_cookie, bob) = t.user("bob").await;
+    let (carol_cookie, carol) = t.user("carol").await;
+    let csrf = csrf_of(&t.get("/orgs", &alice_cookie).await.body);
+    let bob_csrf = csrf_of(&t.get("/orgs", &bob_cookie).await.body);
+
+    // Alice creates an organization (the slug comes from the name) and adds bob.
+    let created = t
+        .post_form("/orgs", &alice_cookie, &[("csrf", &csrf), ("name", "Acme Corp")])
+        .await;
+    assert_eq!(created.status, StatusCode::SEE_OTHER, "{}", created.body);
+    assert_eq!(created.location(), "/orgs/acme-corp");
+    let taken = t
+        .post_form(
+            "/orgs",
+            &bob_cookie,
+            &[("csrf", &bob_csrf), ("name", "Other"), ("slug", "Acme-Corp")],
+        )
+        .await;
+    assert!(taken.body.contains("already an organization"), "{}", taken.body);
+    let added = t
+        .post_form(
+            "/orgs/acme-corp/members",
+            &alice_cookie,
+            &[("csrf", &csrf), ("action", "member"), ("login", "@Bob")],
+        )
+        .await;
+    assert_eq!(added.status, StatusCode::SEE_OTHER, "{}", added.body);
+    let orgs = t.tool(&bob, "list_organizations", json!({})).await;
+    assert_eq!(orgs["organizations"][0]["slug"], "acme-corp");
+    assert_eq!(orgs["organizations"][0]["your_role"], "member");
+    assert_eq!(
+        orgs["organizations"][0]["members"],
+        json!([{ "login": "alice", "role": "owner" }, { "login": "bob", "role": "member" }])
+    );
+    assert_eq!(
+        t.tool(&carol, "list_organizations", json!({})).await["organizations"],
+        json!([])
+    );
+    assert_eq!(
+        t.get("/orgs/acme-corp", &carol_cookie).await.status,
+        StatusCode::NOT_FOUND
+    );
+
+    // Bob's agent publishes for the organization; members see it, others don't.
+    let err = t
+        .tool_error(
+            &carol,
+            "publish_document",
+            json!({ "organization": "acme-corp", "pages": [{ "path": "index", "content": "# Nope" }] }),
+        )
+        .await;
+    assert!(err.contains("aren't a member"), "{err}");
+    let published = t
+        .tool(
+            &bob,
+            "publish_document",
+            json!({ "slug": "roadmap", "organization": "acme-corp", "folder": "plans", "labels": ["q1"],
+                    "pages": [{ "path": "index", "content": "# Roadmap" }] }),
+        )
+        .await;
+    assert_eq!(published["organization"], "acme-corp");
+    assert_eq!(published["folder"], "plans");
+    // Its pages are at /d/<uuid>/.
+    let d = published["url"].as_str().unwrap().replace("http://docs.test", "");
+    let d = d.trim_end_matches('/');
+    let listed = t
+        .tool(&alice, "list_documents", json!({ "organization": "acme-corp" }))
+        .await;
+    assert_eq!(slugs(&listed), ["roadmap"]);
+    assert_eq!(listed["documents"][0]["shared_with_you"], false);
+    assert_eq!(labels_of(&listed, "roadmap"), json!(["q1"]));
+    assert_eq!(
+        slugs(&t.tool(&alice, "list_documents", json!({ "organization": "" })).await),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        t.tool(&carol, "list_documents", json!({})).await["documents"],
+        json!([])
+    );
+    let err = t.tool_error(&carol, "get_document", json!({ "slug": "roadmap" })).await;
+    assert!(err.contains("no document"), "{err}");
+    let err = t
+        .tool_error(
+            &carol,
+            "publish_document",
+            json!({ "slug": "roadmap", "pages": [{ "path": "index", "content": "x" }] }),
+        )
+        .await;
+    assert!(err.contains("can't publish to"), "{err}");
+
+    // Any member publishes versions (with images, stored once for the document), labels it and shares it.
+    let v2 = t
+        .tool(
+            &alice,
+            "publish_document",
+            json!({ "slug": "roadmap", "mode": "merge",
+                    "pages": [{ "path": "chart", "content": "![chart](images/chart.png)" }],
+                    "images": [{ "name": "images/chart.png", "data": b64(&png(32, 24)) }] }),
+        )
+        .await;
+    assert_eq!(v2["version"], 2);
+    let image_url = v2["images"][0]["url"].as_str().unwrap().replace("http://docs.test", "");
+    assert_eq!(t.get(&image_url, &bob_cookie).await.status, StatusCode::OK);
+    assert_eq!(t.get(&image_url, &carol_cookie).await.status, StatusCode::NOT_FOUND);
+    t.tool(
+        &alice,
+        "set_document_labels",
+        json!({ "document": "roadmap", "labels": ["Q1/Planning"] }),
+    )
+    .await;
+    let labels = t
+        .tool(&bob, "list_labels", json!({ "organization": "acme-corp" }))
+        .await;
+    assert_eq!(labels["labels"][0]["name"], "q1", "spelled as first used: {labels}");
+    assert_eq!(labels["documents"], 1);
+    assert_eq!(t.tool(&bob, "list_labels", json!({})).await["documents"], 0);
+    t.tool(
+        &alice,
+        "share_document",
+        json!({ "slug": "roadmap", "add_users": ["carol"] }),
+    )
+    .await;
+    let shared = t.tool(&carol, "list_documents", json!({})).await;
+    assert_eq!(shared["documents"][0]["shared_with_you"], true);
+    assert_eq!(shared["documents"][0]["labels"], json!([]));
+    let err = t
+        .tool_error(
+            &carol,
+            "set_document_labels",
+            json!({ "document": "roadmap", "labels": [] }),
+        )
+        .await;
+    assert!(err.contains("members of the organization"), "{err}");
+
+    // The home page has a section for the organization; the document page links to it.
+    let home = t.get("/", &alice_cookie).await;
+    assert!(home.body.contains(r#"id="org-acme-corp""#), "{}", home.body);
+    assert!(home.body.contains(r#"data-folder-key="org:acme-corp:plans""#));
+    assert!(home.body.contains(&format!(r#"href="{d}/""#)));
+    let page = t.get(&format!("{d}/"), &alice_cookie).await;
+    assert!(page.body.contains(r#"href="/orgs/acme-corp""#));
+    assert!(page.body.contains(&format!("{d}/-/labels")), "members can label it");
+    assert!(page.body.contains(&format!("{d}/-/edit/")), "and edit it");
+
+    // Folders are the organization's: rename one from the home page.
+    let renamed = t
+        .post_form(
+            "/folders/rename",
+            &alice_cookie,
+            &[
+                ("csrf", &csrf),
+                ("organization", "acme-corp"),
+                ("from", "plans"),
+                ("to", "roadmaps"),
+            ],
+        )
+        .await;
+    assert_eq!(renamed.status, StatusCode::SEE_OTHER, "{}", renamed.body);
+    assert_eq!(
+        t.tool(&bob, "get_document", json!({ "slug": "roadmap" })).await["folder"],
+        "roadmaps"
+    );
+
+    // Only its creator can take it out of the organization.
+    let err = t
+        .tool_error(
+            &alice,
+            "move_document",
+            json!({ "slug": "roadmap", "folder": "", "organization": "" }),
+        )
+        .await;
+    assert!(err.contains("only bob"), "{err}");
+    // Nor into another organization, where acme-corp's members would lose it: not with
+    // move_document, nor with the Move form (which doesn't offer it).
+    t.post_form("/orgs", &alice_cookie, &[("csrf", &csrf), ("name", "Alice only")])
+        .await;
+    let err = t
+        .tool_error(
+            &alice,
+            "move_document",
+            json!({ "slug": "roadmap", "folder": "", "organization": "alice-only" }),
+        )
+        .await;
+    assert!(err.contains("only bob"), "{err}");
+    let refused = t
+        .post_form(
+            "/d/roadmap/-/move",
+            &alice_cookie,
+            &[("csrf", &csrf), ("folder", "plans"), ("organization", "alice-only")],
+        )
+        .await;
+    assert!(refused.body.contains("only bob"), "{}", refused.body);
+    assert_eq!(
+        t.tool(&bob, "get_document", json!({ "slug": "roadmap" })).await["organization"],
+        "acme-corp"
+    );
+    let home = t.get("/", &alice_cookie).await;
+    let form = &home.body[home.body.find(&format!(r#"action="{d}/-/move""#)).unwrap()..];
+    let form = &form[..form.find("</form>").unwrap()];
+    assert!(!form.contains("<select"), "{form}");
+    let res = t
+        .post_form("/orgs/alice-only/delete", &alice_cookie, &[("csrf", &csrf)])
+        .await;
+    assert_eq!(res.status, StatusCode::SEE_OTHER);
+    let moved = t
+        .tool(
+            &bob,
+            "move_document",
+            json!({ "slug": "roadmap", "folder": "mine", "organization": "" }),
+        )
+        .await;
+    assert_eq!(moved["organization"], Value::Null);
+    let err = t.tool_error(&alice, "get_document", json!({ "slug": "roadmap" })).await;
+    assert!(err.contains("no document"), "{err}");
+    let moved = t
+        .post_form(
+            "/d/roadmap/-/move",
+            &bob_cookie,
+            &[("csrf", &bob_csrf), ("folder", "plans"), ("organization", "acme-corp")],
+        )
+        .await;
+    assert_eq!(moved.status, StatusCode::SEE_OTHER, "{}", moved.body);
+    assert_eq!(
+        t.tool(&alice, "get_document", json!({ "slug": "roadmap" })).await["organization"],
+        "acme-corp"
+    );
+
+    // Only owners manage members, and an organization keeps an owner.
+    let refused = t
+        .post_form(
+            "/orgs/acme-corp/members",
+            &bob_cookie,
+            &[("csrf", &bob_csrf), ("action", "member"), ("login", "carol")],
+        )
+        .await;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN);
+    let last_owner = t
+        .post_form(
+            "/orgs/acme-corp/members",
+            &alice_cookie,
+            &[("csrf", &csrf), ("action", "remove"), ("login", "alice")],
+        )
+        .await;
+    assert!(last_owner.body.contains("at least one owner"), "{}", last_owner.body);
+    let in_use = t
+        .post_form("/orgs/acme-corp/delete", &alice_cookie, &[("csrf", &csrf)])
+        .await;
+    assert!(in_use.body.contains("documents first"), "{}", in_use.body);
+
+    // A removed member loses access, even to the documents they created there.
+    t.post_form(
+        "/orgs/acme-corp/members",
+        &alice_cookie,
+        &[("csrf", &csrf), ("action", "remove"), ("login", "bob")],
+    )
+    .await;
+    assert_eq!(t.get(&format!("{d}/"), &bob_cookie).await.status, StatusCode::NOT_FOUND);
+    let err = t
+        .tool_error(
+            &bob,
+            "publish_document",
+            json!({ "slug": "roadmap", "pages": [{ "path": "index", "content": "x" }] }),
+        )
+        .await;
+    assert!(err.contains("can't publish to"), "{err}");
+
+    // Members can make it public too: then anyone with its link reads it, read-only.
+    let shared = t
+        .tool(&alice, "share_document", json!({ "slug": "roadmap", "public": true }))
+        .await;
+    assert_eq!(shared["public"], true, "{shared}");
+    let page = t.get(&format!("{d}/"), &bob_cookie).await;
+    assert_eq!(page.status, StatusCode::OK);
+    assert!(page.body.contains("Public document by acme-corp"), "{}", page.body);
+
+    // An empty organization can be deleted.
+    t.post_form(
+        "/orgs",
+        &alice_cookie,
+        &[("csrf", &csrf), ("name", "Spare"), ("slug", "spare")],
+    )
+    .await;
+    let deleted = t
+        .post_form("/orgs/spare/delete", &alice_cookie, &[("csrf", &csrf)])
+        .await;
+    assert_eq!(deleted.status, StatusCode::SEE_OTHER, "{}", deleted.body);
+    assert_eq!(t.get("/orgs/spare", &alice_cookie).await.status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

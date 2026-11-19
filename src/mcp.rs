@@ -162,7 +162,8 @@ impl Server<'_> {
                 let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
                 let outcome = match name {
                     "list_documents" => self.list_documents(arguments).await,
-                    "list_labels" => self.list_labels().await,
+                    "list_labels" => self.list_labels(arguments).await,
+                    "list_organizations" => self.list_organizations().await,
                     "set_document_labels" => self.set_labels(arguments).await,
                     "get_document" => self.get_document(arguments).await,
                     "read_page" => self.read_page(arguments).await,
@@ -218,15 +219,42 @@ impl Server<'_> {
         #[derive(Deserialize)]
         struct A {
             label: Option<String>,
+            organization: Option<String>,
         }
         let a: A = args(a)?;
-        let docs = list_documents(&self.state.db, self.user, a.label.as_deref()).await?;
-        Ok(documents_json(&self.state.config.base_url, self.user, &docs))
+        let docs = list_documents(&self.state.db, self.user, a.label.as_deref(), a.organization.as_deref()).await?;
+        Ok(documents_json(&self.state.config.base_url, &docs))
     }
 
-    async fn list_labels(&self) -> ToolResult {
-        let docs = db::list_documents(&self.state.db, self.user).await?;
-        Ok(labels_json(self.user, &docs))
+    async fn list_labels(&self, a: Value) -> ToolResult {
+        #[derive(Deserialize)]
+        struct A {
+            organization: Option<String>,
+        }
+        let a: A = args(a)?;
+        list_labels(&self.state.db, self.user, a.organization.as_deref()).await
+    }
+
+    async fn list_organizations(&self) -> ToolResult {
+        let orgs = db::user_organizations(&self.state.db, self.user).await?;
+        let mut out = Vec::new();
+        for o in &orgs {
+            let members = db::org_members(&self.state.db, o.id).await?;
+            out.push(json!({
+                "slug": o.slug,
+                "name": o.name,
+                "your_role": o.role,
+                "documents": o.documents,
+                "members": members.iter().map(|m| json!({ "login": m.login, "role": m.role })).collect::<Vec<_>>(),
+                "url": format!("{}/orgs/{}", self.state.config.base_url, o.slug),
+            }));
+        }
+        Ok(json!({ "organizations": out }))
+    }
+
+    /// An organization the user is a member of, by slug.
+    async fn org(&self, slug: &str) -> Result<db::Organization, ToolError> {
+        member_org(&self.state.db, self.user, slug).await
     }
 
     async fn set_labels(&self, a: Value) -> ToolResult {
@@ -238,17 +266,14 @@ impl Server<'_> {
         }
         let a: A = args(a)?;
         let doc = self.doc(&a.document).await?;
-        if doc.owner_id != self.user.id {
-            return Err(ToolError(format!(
-                "only the owner ({}) can label {:?}",
-                doc.owner, doc.slug
-            )));
+        if !doc.can_edit {
+            return Err(ToolError(format!("only {} can label {:?}", editors(&doc), doc.slug)));
         }
         let wanted = labels::normalize_labels(&a.labels).map_err(ToolError)?;
-        let stored = db::set_labels(&self.state.db, self.user.id, &doc.slug, &wanted).await?;
+        let stored = db::set_labels(&self.state.db, doc.id, &wanted).await?;
         Ok(json!({
             "slug": doc.slug,
-            "labels": stored.unwrap_or_default(),
+            "labels": stored,
             "url": self.url(&doc.uuid, None, "index"),
         }))
     }
@@ -265,7 +290,7 @@ impl Server<'_> {
         let pages = db::pages(&self.state.db, version.id).await?;
         let version_images = self.images_json(&doc.uuid, version.id).await?;
         let versions = db::versions(&self.state.db, doc.id).await?;
-        let sharing = if doc.owner_id == self.user.id {
+        let sharing = if doc.can_edit {
             Some(self.sharing(&doc).await?)
         } else {
             None
@@ -274,6 +299,7 @@ impl Server<'_> {
             "sharing": sharing,
             "slug": doc.slug,
             "title": doc.title,
+            "organization": doc.organization,
             "folder": doc.folder,
             "labels": doc.labels,
             "owner": doc.owner,
@@ -325,6 +351,7 @@ impl Server<'_> {
         struct A {
             slug: Option<String>,
             title: Option<String>,
+            organization: Option<String>,
             folder: Option<String>,
             labels: Option<Vec<String>>,
             message: Option<String>,
@@ -346,6 +373,10 @@ impl Server<'_> {
             return Err(ToolError("pass at least one page".into()));
         }
         let folder = paths::normalize_folder(a.folder.as_deref().unwrap_or("")).map_err(ToolError)?;
+        let org = match a.organization.as_deref().map(str::trim).filter(|o| !o.is_empty()) {
+            Some(o) => Some(self.org(o).await?),
+            None => None,
+        };
         let labels = a
             .labels
             .as_deref()
@@ -419,7 +450,8 @@ impl Server<'_> {
         let (slug, number) = db::publish(
             &self.state.db,
             db::Publish {
-                user_id: self.user.id,
+                user: self.user,
+                org_id: org.as_ref().map(|o| o.id),
                 slug: a.slug.as_deref(),
                 title: title.as_deref(),
                 folder: &folder,
@@ -446,14 +478,20 @@ impl Server<'_> {
         let all = db::pages(&self.state.db, version.id).await?;
         let version_images = self.images_json(&doc.uuid, version.id).await?;
         // An existing document stays where it is, so a publish doesn't undo the user's move.
-        let note = (a.folder.is_some() && doc.folder != folder).then(|| {
+        let moved_org = org.is_some() && doc.org_id != org.as_ref().map(|o| o.id);
+        let note = ((a.folder.is_some() && doc.folder != folder) || moved_org).then(|| {
             format!(
-                "The document stays in its folder {:?}; call move_document only if the user asks to move it.",
+                "The document stays where it is ({}, folder {:?}); call move_document only if the user asks to move it.",
+                match &doc.organization {
+                    Some(o) => format!("organization {o:?}"),
+                    None => format!("{}'s documents", doc.owner),
+                },
                 doc.folder
             )
         });
         Ok(json!({
             "slug": slug,
+            "organization": doc.organization,
             "folder": doc.folder,
             "labels": doc.labels,
             "note": note,
@@ -560,11 +598,8 @@ impl Server<'_> {
         }
         let a: A = args(a)?;
         let mut doc = self.doc(&a.slug).await?;
-        if doc.owner_id != self.user.id {
-            return Err(ToolError(format!(
-                "only the owner ({}) can share {:?}",
-                doc.owner, doc.slug
-            )));
+        if !doc.can_edit {
+            return Err(ToolError(format!("only {} can share {:?}", editors(&doc), doc.slug)));
         }
         let login =
             |l: &String| db::normalize_login(l).ok_or_else(|| ToolError(format!("{l:?} is not a valid username")));
@@ -610,20 +645,23 @@ impl Server<'_> {
         struct A {
             slug: String,
             folder: String,
+            organization: Option<String>,
         }
         let a: A = args(a)?;
         let doc = self.doc(&a.slug).await?;
-        if doc.owner_id != self.user.id {
-            return Err(ToolError(format!(
-                "only the owner ({}) can move {:?}",
-                doc.owner, doc.slug
-            )));
-        }
         let folder = paths::normalize_folder(&a.folder).map_err(ToolError)?;
-        db::move_document(&self.state.db, self.user.id, &doc.slug, &folder).await?;
+        let org_id = match a.organization.as_deref().map(str::trim) {
+            None => doc.org_id,
+            Some("") => None,
+            Some(o) => Some(self.org(o).await?.id),
+        };
+        check_move(&doc, self.user, org_id).map_err(ToolError)?;
+        db::move_document(&self.state.db, doc.id, org_id, &folder).await?;
+        let doc = self.doc(&doc.slug).await?;
         Ok(json!({
             "slug": doc.slug,
-            "folder": folder,
+            "organization": doc.organization,
+            "folder": doc.folder,
             "url": self.url(&doc.uuid, None, "index"),
         }))
     }
@@ -694,27 +732,78 @@ impl Server<'_> {
     }
 }
 
-/// Documents `user` can see, only those with `label` or a label under it when given.
-/// An invalid `label` is an error for the caller to show.
+/// Who can edit a document, for errors: its owner or its organization's members.
+fn editors(doc: &DocumentSummary) -> String {
+    match &doc.organization {
+        Some(o) => format!("members of the organization {o:?}"),
+        None => format!("the owner ({})", doc.owner),
+    }
+}
+
+/// Whether `user` may file `doc` in the organization `org_id` (`None`: its owner's own
+/// documents); the caller has checked they are a member of `org_id`. They need to be able
+/// to edit it, and only its owner can take it out of an organization, whether to their
+/// own documents or to another organization (where its members could lose it).
+pub(crate) fn check_move(doc: &DocumentSummary, user: &User, org_id: Option<i64>) -> Result<(), String> {
+    if !doc.can_edit {
+        return Err(format!("only {} can move {:?}", editors(doc), doc.slug));
+    }
+    if doc.org_id.is_some() && org_id != doc.org_id && doc.owner_id != user.id {
+        return Err(format!(
+            "only {} (who created it) can take {:?} out of its organization",
+            doc.owner, doc.slug
+        ));
+    }
+    Ok(())
+}
+
+/// An organization `user` is a member of, by slug.
+pub(crate) async fn member_org(db: &db::Db, user: &User, slug: &str) -> Result<db::Organization, ToolError> {
+    db::organization(db, slug, user).await?.ok_or_else(|| {
+        ToolError(format!(
+            "you aren't a member of an organization {slug:?}; call list_organizations to see yours"
+        ))
+    })
+}
+
+/// Documents `user` can see, only those with `label` or a label under it when given,
+/// and only the organization's when `organization` is given ("" for none: the user's own).
+/// An invalid `label` or organization is an error for the caller to show.
 pub(crate) async fn list_documents(
     db: &db::Db,
     user: &User,
     label: Option<&str>,
+    organization: Option<&str>,
 ) -> Result<Vec<DocumentSummary>, ToolError> {
     let filter = label.map(labels::normalize_label).transpose().map_err(ToolError)?;
+    let space = space_of(db, user, organization).await?;
     let mut docs = db::list_documents(db, user).await?;
     if let Some(f) = &filter {
         docs.retain(|d| d.labels.iter().any(|l| labels::label_matches(l, f)));
     }
+    if let Some(space) = space {
+        docs.retain(|d| d.space() == space);
+    }
     Ok(docs)
 }
 
+/// The space an `organization` argument names: an organization of the user's, or their
+/// own documents for "". `None` when it isn't given.
+async fn space_of(db: &db::Db, user: &User, organization: Option<&str>) -> Result<Option<db::Space>, ToolError> {
+    Ok(match organization.map(str::trim) {
+        None => None,
+        Some("") => Some(db::Space::User(user.id)),
+        Some(o) => Some(db::Space::Org(member_org(db, user, o).await?.id)),
+    })
+}
+
 /// The `list_documents` result (also `GET /api/documents`).
-pub fn documents_json(base_url: &str, user: &User, docs: &[DocumentSummary]) -> Value {
+pub fn documents_json(base_url: &str, docs: &[DocumentSummary]) -> Value {
     json!({
         "documents": docs.iter().map(|d| json!({
             "slug": d.slug,
             "title": d.title,
+            "organization": d.organization,
             "folder": d.folder,
             "labels": d.labels,
             "url": format!("{base_url}{}", doc_base(&d.uuid, None)),
@@ -722,17 +811,27 @@ pub fn documents_json(base_url: &str, user: &User, docs: &[DocumentSummary]) -> 
             "latest_version": d.latest_version,
             "pages": d.page_count,
             "owner": d.owner,
-            "shared_with_you": d.owner_id != user.id,
+            "shared_with_you": !d.can_edit,
             "updated_at": d.updated_at,
         })).collect::<Vec<_>>()
     })
 }
 
-/// The `list_labels` result (also `GET /api/labels`): the tree of `user`'s labels.
-pub fn labels_json(user: &User, docs: &[DocumentSummary]) -> Value {
+/// The `list_labels` result (also `GET /api/labels`): the tree of the labels of `user`'s
+/// own documents, or of an organization's.
+pub(crate) async fn list_labels(db: &db::Db, user: &User, organization: Option<&str>) -> Result<Value, ToolError> {
+    let space = space_of(db, user, organization)
+        .await?
+        .unwrap_or(db::Space::User(user.id));
+    let docs = db::list_documents(db, user).await?;
+    Ok(labels_json(&docs, space))
+}
+
+/// The tree of the labels of a space's documents, with counts.
+pub fn labels_json(docs: &[DocumentSummary], space: db::Space) -> Value {
     let own: Vec<&[String]> = docs
         .iter()
-        .filter(|d| d.owner_id == user.id)
+        .filter(|d| d.can_edit && d.space() == space)
         .map(|d| d.labels.as_slice())
         .collect();
     let tree = labels::label_tree(&own);

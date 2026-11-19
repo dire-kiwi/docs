@@ -1,6 +1,7 @@
 pub mod api;
 pub mod auth;
 pub mod layout;
+pub mod orgs;
 pub mod pages;
 
 use axum::Router;
@@ -75,6 +76,10 @@ pub fn router(state: AppState) -> Router {
         .route("/d/{slug}/-/edit/{*path}", get(pages::edit_page))
         .route("/new", get(pages::new_document))
         .route("/folders/rename", post(pages::rename_folder))
+        .route("/orgs", get(orgs::list).post(orgs::create))
+        .route("/orgs/{slug}", get(orgs::show))
+        .route("/orgs/{slug}/members", post(orgs::update_members))
+        .route("/orgs/{slug}/delete", post(orgs::delete))
         .route("/s/{token}", get(pages::share_link))
         .route("/d/{slug}/-/v/{n}/", get(pages::version_root))
         .route("/d/{slug}/-/v/{n}/{*path}", get(pages::version_page))

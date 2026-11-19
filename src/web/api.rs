@@ -86,9 +86,10 @@ async fn api_user(state: &AppState, viewer: &Viewer, headers: &HeaderMap, write:
 #[derive(Deserialize)]
 pub struct DocumentsQuery {
     label: Option<String>,
+    organization: Option<String>,
 }
 
-/// `GET /api/documents[?label=research]`: what `list_documents` returns.
+/// `GET /api/documents[?label=research][&organization=acme]`: what `list_documents` returns.
 pub async fn list_documents(
     State(state): State<AppState>,
     viewer: Viewer,
@@ -96,22 +97,29 @@ pub async fn list_documents(
     Query(q): Query<DocumentsQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let user = api_user(&state, &viewer, &headers, false).await?;
-    let docs = match mcp::list_documents(&state.db, &user, q.label.as_deref()).await {
-        Ok(d) => d,
-        Err(ToolError(e)) => return Err(bad(e)),
-    };
-    Ok(Json(mcp::documents_json(&state.config.base_url, &user, &docs)))
+    let docs = mcp::list_documents(&state.db, &user, q.label.as_deref(), q.organization.as_deref())
+        .await
+        .map_err(|ToolError(e)| bad(e))?;
+    Ok(Json(mcp::documents_json(&state.config.base_url, &docs)))
 }
 
-/// `GET /api/labels`: what `list_labels` returns.
+#[derive(Deserialize)]
+pub struct LabelsQuery {
+    organization: Option<String>,
+}
+
+/// `GET /api/labels[?organization=acme]`: what `list_labels` returns.
 pub async fn list_labels(
     State(state): State<AppState>,
     viewer: Viewer,
     headers: HeaderMap,
+    Query(q): Query<LabelsQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let user = api_user(&state, &viewer, &headers, false).await?;
-    let docs = db::list_documents(&state.db, &user).await?;
-    Ok(Json(mcp::labels_json(&user, &docs)))
+    let labels = mcp::list_labels(&state.db, &user, q.organization.as_deref())
+        .await
+        .map_err(|ToolError(e)| bad(e))?;
+    Ok(Json(labels))
 }
 
 #[derive(Deserialize)]
@@ -131,16 +139,14 @@ pub async fn set_labels(
     let doc = db::get_document(&state.db, &slug, &user)
         .await?
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "no such document".into()))?;
-    if doc.owner_id != user.id {
+    if !doc.can_edit {
         return Err(ApiError(
             StatusCode::FORBIDDEN,
-            "only the owner can label this document".into(),
+            "only the owner, or its organization's members, can label this document".into(),
         ));
     }
     let wanted = labels::normalize_labels(&req.labels).map_err(bad)?;
-    let stored = db::set_labels(&state.db, user.id, &doc.slug, &wanted)
-        .await?
-        .unwrap_or_default();
+    let stored = db::set_labels(&state.db, doc.id, &wanted).await?;
     Ok(Json(json!({ "slug": doc.slug, "labels": stored })))
 }
 
@@ -392,10 +398,10 @@ pub async fn save_version(
     let doc = db::get_document(&state.db, &slug, &user)
         .await?
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "no such document".into()))?;
-    if doc.owner_id != user.id {
+    if !doc.can_edit {
         return Err(ApiError(
             StatusCode::FORBIDDEN,
-            "only the owner can edit this document".into(),
+            "only the owner, or its organization's members, can edit this document".into(),
         ));
     }
     if req.base_version.is_some_and(|b| b != doc.latest_version) {
