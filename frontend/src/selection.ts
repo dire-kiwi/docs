@@ -36,7 +36,7 @@ export function initSelections(): void {
   popup.className = "comment-popup";
   popup.hidden = true;
   popup.innerHTML = `
-    <button type="button" class="comment-start">💬 Comment</button>
+    <button type="button" class="comment-start">✎ Comment</button>
     <div class="comment-editor" hidden>
       <textarea rows="3" placeholder="Add a comment" aria-label="Comment"></textarea>
       <p class="error" role="alert"></p>

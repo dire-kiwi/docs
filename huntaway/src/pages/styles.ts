@@ -6,7 +6,11 @@ export const READER_VARS = `.docs-render.docs-render{
   --fg-muted:var(--color-muted,#9a9aab);--border:var(--color-line-strong,#33333f);--accent:var(--color-accent,#7c7cf8);
   --accent-fg:#fff;--bg-mark:color-mix(in srgb,var(--accent) 30%,transparent);--success:var(--color-st-done,#34d399);
   --warning:var(--color-st-attention,#f59e0b);--danger:#fca5a5;--font:var(--font-sans,ui-sans-serif,system-ui,sans-serif);
-  --mono:var(--font-mono,ui-monospace,monospace);background:transparent}`
+  --mono:var(--font-mono,ui-monospace,monospace);background:transparent;
+  /* The reader's print look, in the board's colours: its lines for the ink line, a faint offset shadow, the board's own
+     sans for headings, and code on a panel. The board's theme is light or dark, not the reader's system. */
+  color-scheme:inherit;--line:var(--color-line-strong,#33333f);--shadow:color-mix(in srgb,var(--fg) 14%,transparent);
+  --mark-fg:var(--fg);--code-bg:var(--color-panel-2,#16161d);--code-fg:var(--fg);--font-display:var(--font)}`
 
 export const STYLES = `
 *{box-sizing:border-box}
