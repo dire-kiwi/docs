@@ -193,4 +193,27 @@ export const migrations: ReadonlyArray<PluginMigration> = [
       ) STRICT`)
     }),
   },
+  {
+    // Images uploaded on their own over HTTP (DOC-22), so that their bytes don't go through a tool call: an agent asks
+    // for an upload URL (`create_upload_url`), sends files to it, and names the uploads in `publish_document`'s
+    // `images`. An upload URL is kept by the SHA-256 of the random token in it; an upload's id is a random UUID and its
+    // AVIF is its profile's in `doc_images`. `expires_at` is milliseconds since the epoch.
+    name: "0005-uploads",
+    run: Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient
+      yield* sql.unsafe(`CREATE TABLE doc_upload_urls (
+        hash TEXT PRIMARY KEY,
+        profile_id TEXT NOT NULL,
+        expires_at INTEGER NOT NULL
+      ) STRICT`)
+      yield* sql.unsafe(`CREATE TABLE doc_uploads (
+        id TEXT PRIMARY KEY,
+        profile_id TEXT NOT NULL,
+        sha256 TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at INTEGER NOT NULL
+      ) STRICT`)
+      yield* sql.unsafe(`CREATE INDEX doc_uploads_profile ON doc_uploads(profile_id, sha256)`)
+    }),
+  },
 ]

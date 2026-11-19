@@ -11,6 +11,8 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{FromRow, SqlitePool};
 
 use crate::labels;
+use docs_render::images;
+use docs_render::publish::UploadedImage;
 
 pub type Db = SqlitePool;
 
@@ -993,6 +995,8 @@ pub struct Publish<'a> {
     pub images: Vec<NewImage>,
     /// Images of the previous version to keep, `(name, sha256)`.
     pub kept_images: Vec<(String, String)>,
+    /// Images uploaded on their own before this publish (the user's own uploads).
+    pub uploaded: Vec<UploadedImage>,
     /// The version number `kept_images` (and the pages a merge keeps) were worked out from:
     /// the publish fails if another version was published since.
     pub based_on: Option<i64>,
@@ -1140,7 +1144,33 @@ pub async fn publish(db: &Db, p: Publish<'_>) -> Result<(String, i64)> {
         .execute(&mut *tx)
         .await?;
     }
+    // The user's uploads: each AVIF is copied to the document's owner, if that is someone else.
+    let mut uploaded = Vec::new();
+    for u in &p.uploaded {
+        let found: Option<(String,)> =
+            sqlx::query_as("SELECT sha256 FROM uploads WHERE uuid = ? AND owner_id = ? AND expires_at > ?")
+                .bind(&u.upload)
+                .bind(p.user.id)
+                .bind(ts)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let Some((sha256,)) = found else {
+            bail!(images::upload_missing_error(&u.label, &u.upload));
+        };
+        sqlx::query(
+            "INSERT INTO images (owner_id, sha256, data, created_at)
+             SELECT ?, sha256, data, ? FROM images WHERE owner_id = ? AND sha256 = ? ON CONFLICT DO NOTHING",
+        )
+        .bind(owner_id)
+        .bind(ts)
+        .bind(p.user.id)
+        .bind(&sha256)
+        .execute(&mut *tx)
+        .await?;
+        uploaded.push((u.name.clone(), sha256));
+    }
     let names = p.images.iter().map(|i| (&i.name, &i.sha256));
+    let names = names.chain(uploaded.iter().map(|(n, s)| (n, s)));
     for (name, sha256) in names.chain(p.kept_images.iter().map(|(n, s)| (n, s))) {
         sqlx::query("INSERT INTO version_images (version_id, name, sha256) VALUES (?, ?, ?) ON CONFLICT DO NOTHING")
             .bind(version_id)
@@ -1193,6 +1223,109 @@ pub async fn document_image(db: &Db, document_id: i64, sha256: &str) -> Result<O
     .bind(document_id)
     .fetch_optional(db)
     .await?)
+}
+
+// ---------- images uploaded on their own ----------
+
+/// A new upload URL's token for the user, good for [`images::UPLOAD_URL_SECONDS`].
+pub async fn create_upload_url(db: &Db, user_id: i64) -> Result<String> {
+    let token = random_token();
+    sqlx::query("INSERT INTO upload_urls (hash, user_id, expires_at) VALUES (?, ?, ?)")
+        .bind(hash_token(&token))
+        .bind(user_id)
+        .bind(now() + images::UPLOAD_URL_SECONDS)
+        .execute(db)
+        .await?;
+    Ok(token)
+}
+
+/// Whose uploads an upload URL's token takes, while it lasts.
+pub async fn upload_url_user(db: &Db, token: &str) -> Result<Option<User>> {
+    Ok(sqlx::query_as::<_, User>(
+        "SELECT u.id, u.login, u.name, u.avatar_url FROM upload_urls t JOIN users u ON u.id = t.user_id
+         WHERE t.hash = ? AND t.expires_at > ?",
+    )
+    .bind(hash_token(token))
+    .bind(now())
+    .fetch_optional(db)
+    .await?)
+}
+
+/// Keep an uploaded image (already AVIF) for its uploader to publish. Returns its id, a
+/// random UUID, or `Err` with the message when the uploader has too many waiting.
+pub async fn add_upload(
+    db: &Db,
+    owner_id: i64,
+    sha256: &str,
+    avif: &[u8],
+) -> Result<std::result::Result<String, String>> {
+    let mut tx = db.begin().await?;
+    let ts = now();
+    let (waiting,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM uploads WHERE owner_id = ? AND expires_at > ?")
+        .bind(owner_id)
+        .bind(ts)
+        .fetch_one(&mut *tx)
+        .await?;
+    if waiting >= images::MAX_WAITING_UPLOADS as i64 {
+        return Ok(Err(images::too_many_uploads_error()));
+    }
+    sqlx::query("INSERT INTO images (owner_id, sha256, data, created_at) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING")
+        .bind(owner_id)
+        .bind(sha256)
+        .bind(avif)
+        .bind(ts)
+        .execute(&mut *tx)
+        .await?;
+    let uuid = new_uuid();
+    sqlx::query("INSERT INTO uploads (uuid, owner_id, sha256, created_at, expires_at) VALUES (?, ?, ?, ?, ?)")
+        .bind(&uuid)
+        .bind(owner_id)
+        .bind(sha256)
+        .bind(ts)
+        .bind(ts + images::UPLOAD_KEPT_SECONDS)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(Ok(uuid))
+}
+
+/// Delete the upload URLs and uploads that have expired, and the images only they had.
+pub async fn purge_uploads(db: &Db) -> Result<u64> {
+    let mut tx = db.begin().await?;
+    let ts = now();
+    sqlx::query("DELETE FROM upload_urls WHERE expires_at <= ?")
+        .bind(ts)
+        .execute(&mut *tx)
+        .await?;
+    let gone: Vec<(i64,)> = sqlx::query_as("DELETE FROM uploads WHERE expires_at <= ? RETURNING owner_id")
+        .bind(ts)
+        .fetch_all(&mut *tx)
+        .await?;
+    let mut owners: Vec<i64> = gone.iter().map(|(o,)| *o).collect();
+    owners.sort_unstable();
+    owners.dedup();
+    for owner in owners {
+        delete_unused_images(&mut tx, owner).await?;
+    }
+    tx.commit().await?;
+    Ok(gone.len() as u64)
+}
+
+/// Delete the owner's images that nothing has any more: no version of their documents,
+/// and no upload still waiting.
+async fn delete_unused_images(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, owner_id: i64) -> Result<()> {
+    sqlx::query(
+        "DELETE FROM images WHERE owner_id = ? AND NOT EXISTS (
+           SELECT 1 FROM version_images vi JOIN versions v ON v.id = vi.version_id
+           JOIN documents d ON d.id = v.document_id
+           WHERE d.owner_id = images.owner_id AND vi.sha256 = images.sha256)
+         AND NOT EXISTS (
+           SELECT 1 FROM uploads u WHERE u.owner_id = images.owner_id AND u.sha256 = images.sha256)",
+    )
+    .bind(owner_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 pub fn doc_slug(title: &str) -> String {
@@ -1268,16 +1401,8 @@ pub async fn delete_document(db: &Db, user_id: i64, slug: &str) -> Result<bool> 
         .bind(user_id)
         .execute(&mut *tx)
         .await?;
-    // Images are kept while any version of the owner's documents has them.
-    sqlx::query(
-        "DELETE FROM images WHERE owner_id = ? AND NOT EXISTS (
-           SELECT 1 FROM version_images vi JOIN versions v ON v.id = vi.version_id
-           JOIN documents d ON d.id = v.document_id
-           WHERE d.owner_id = images.owner_id AND vi.sha256 = images.sha256)",
-    )
-    .bind(user_id)
-    .execute(&mut *tx)
-    .await?;
+    // Images are kept while any version of the owner's documents has them (or an upload waits).
+    delete_unused_images(&mut tx, user_id).await?;
     tx.commit().await?;
     Ok(res.rows_affected() > 0)
 }

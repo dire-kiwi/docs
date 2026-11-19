@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 
 use axum::Json;
+use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -17,7 +18,8 @@ use crate::render::{self, Format, Options};
 use crate::web::auth::{Viewer, constant_time_eq};
 use crate::web::pages;
 use crate::{labels, paths};
-use docs_render::publish;
+use docs_render::images;
+use docs_render::publish::{self, ImageUpload};
 
 pub struct ApiError(StatusCode, String);
 
@@ -320,6 +322,70 @@ pub async fn preview(
             json!({ "html": null, "has_h1": false, "warnings": [], "error": format!("This page isn't valid {}: {e}", format.as_str()) })
         }
     }))
+}
+
+/// `POST /api/uploads/{token}` (or `PUT`): an image file as the request body, sent to the URL
+/// `create_upload_url` gave. The token in the URL says whose upload it is, so nothing else is asked.
+pub async fn upload_to_url(
+    State(state): State<AppState>,
+    Path(token): Path<String>,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<Json<Value>, ApiError> {
+    let user = match db::upload_url_user(&state.db, &token).await? {
+        Some(u) if state.config.user_allowed(&u.login) => u,
+        _ => return Err(ApiError(StatusCode::NOT_FOUND, images::upload_url_error())),
+    };
+    store_upload(&state, &user, &headers, body).await
+}
+
+/// `POST /api/uploads`: the same, for a bearer token's user or the signed-in user.
+pub async fn upload(
+    State(state): State<AppState>,
+    viewer: Viewer,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<Json<Value>, ApiError> {
+    let user = api_user(&state, &viewer, &headers, true).await?;
+    store_upload(&state, &user, &headers, body).await
+}
+
+/// Convert an uploaded image file to AVIF and keep it for `user` to publish:
+/// `{ id, bytes, expires_in }`, the id to give as `upload` in `publish_document`'s `images`.
+/// The body is read here, once it is known whose upload it is.
+async fn store_upload(state: &AppState, user: &User, headers: &HeaderMap, body: Body) -> Result<Json<Value>, ApiError> {
+    let form = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|t| t.trim_start().to_ascii_lowercase().starts_with("multipart/"));
+    if form {
+        return Err(bad(images::upload_body_error()));
+    }
+    let body = axum::body::to_bytes(body, images::MAX_UPLOAD_BYTES)
+        .await
+        .map_err(|_| ApiError(StatusCode::PAYLOAD_TOO_LARGE, images::upload_too_big_error()))?;
+    if body.is_empty() {
+        return Err(bad(images::upload_body_error()));
+    }
+    let label = images::UPLOAD_LABEL;
+    let format = images::sniff(label, &body).map_err(bad)?;
+    let converted = crate::avif::convert_all(vec![ImageUpload {
+        name: String::new(),
+        label: label.into(),
+        format,
+        data: body.into(),
+    }])
+    .await
+    .map_err(bad)?;
+    let image = converted.first().ok_or_else(|| bad("no image"))?;
+    let id = db::add_upload(&state.db, user.id, &image.sha256, &image.avif)
+        .await?
+        .map_err(|e| ApiError(StatusCode::TOO_MANY_REQUESTS, e))?;
+    Ok(Json(json!({
+        "id": id,
+        "bytes": image.avif.len(),
+        "expires_in": images::UPLOAD_KEPT_SECONDS,
+    })))
 }
 
 /// What the editor saves: every page of the document, and the images uploaded in it.

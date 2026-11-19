@@ -1,4 +1,4 @@
-import { DateTime, Effect, Option, Schema } from "effect"
+import { Clock, DateTime, Effect, Option, Schema } from "effect"
 import type { ImageUpload } from "@dire-kiwi/docs-render"
 import type { Images } from "./images.ts"
 import { ImageRefused } from "./images.ts"
@@ -10,7 +10,8 @@ import { docBase, docSlug, quoted, spelt } from "./rules.ts"
 // `publish_document`, as the hosted site's (src/mcp.rs `publish`): the arguments checked in its order, the pages and
 // images checked by the renderer's `validatePublish` (the site's own code), the images kept from the previous version
 // for a merge, warnings for images a page shows that the version doesn't have, and only then the slow part (converting
-// to AVIF); then one transaction makes the version (and the document, if it's new).
+// to AVIF); then one transaction makes the version (and the document, if it's new). Images uploaded on their own
+// (`upload` in `images`, DOC-22) are the profile's already: the transaction looks each up and names it in the version.
 
 /** Who publishes: the profile its documents belong to, and the task and run that publish (none: the user, in the editor). */
 export interface Caller {
@@ -75,6 +76,7 @@ const ValidPublish = Schema.Struct({
     }),
   ),
   images: Schema.Array(Schema.Struct({ name: Schema.String, label: Schema.String, format: Schema.Literals(["png", "jpeg", "webp", "gif", "avif"]), data: Schema.String })),
+  uploaded: Schema.Array(Schema.Struct({ name: Schema.String, label: Schema.String, upload: Schema.String })),
   warnings: Schema.Array(Schema.Struct({ page: Schema.String, warning: Schema.String })),
 })
 
@@ -127,7 +129,8 @@ export const publishFor = Effect.fnUntraced(function* (deps: PublishDeps, caller
     ),
   )
   const warnings = [...valid.warnings]
-  const uploaded = new Set(valid.images.map((im) => im.name))
+  // The names this publish gives images: those sent with it, and those uploaded before it.
+  const uploaded = new Set([...valid.images.map((im) => im.name), ...valid.uploaded.map((u) => u.name)])
   const wanted = input.slug === null ? null : docSlug(input.slug)
 
   // A merge keeps the previous version's images that the new version's pages refer to.
@@ -164,6 +167,7 @@ export const publishFor = Effect.fnUntraced(function* (deps: PublishDeps, caller
   // A new document's title is its index page's (or its first page's), unless it's given.
   const newTitle = existing !== null ? null : ((pages.find((p) => p.path === "index") ?? pages[0])?.title ?? null)
   const now = yield* nowIso
+  const nowMillis = yield* Clock.currentTimeMillis
   const docId = yield* deps.uuid
   const versionId = yield* deps.uuid
 
@@ -197,6 +201,12 @@ export const publishFor = Effect.fnUntraced(function* (deps: PublishDeps, caller
       }
       if ((yield* repo.pageCount(versionId)) === 0) return yield* refused("a version needs at least one page")
       for (const im of converted) yield* repo.addImage(caller.profile, versionId, im, now)
+      // The profile's uploads: converted and kept already, so each only gets its name in the version.
+      for (const u of valid.uploaded) {
+        const sha256 = yield* repo.upload(caller.profile, u.upload, nowMillis)
+        if (sha256 === null) return yield* refused(lib.imageUploadMissingError(u.label, u.upload))
+        yield* repo.nameImage(versionId, u.name, sha256)
+      }
       for (const im of kept) yield* repo.nameImage(versionId, im.name, im.sha256)
       if (labels !== null) yield* repo.replaceLabels(doc.id, spelt(lib, yield* repo.knownLabels(caller.profile), labels))
       yield* repo.touch(doc.id, now)

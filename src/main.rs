@@ -27,6 +27,9 @@ async fn main() -> anyhow::Result<()> {
             if let Err(e) = docs::db::purge_device_codes(&db).await {
                 tracing::warn!("purging expired device codes: {e:#}");
             }
+            if let Err(e) = docs::db::purge_uploads(&db).await {
+                tracing::warn!("purging expired uploads: {e:#}");
+            }
         }
     });
     let listener = tokio::net::TcpListener::bind(bind)

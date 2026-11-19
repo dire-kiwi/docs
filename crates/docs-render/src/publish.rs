@@ -25,12 +25,16 @@ pub struct PageInput {
     pub title: Option<String>,
 }
 
-/// An entry of `publish_document`'s `images`: `data` is base64, `name` a relative
-/// path pages refer to it by (`![chart](images/chart.png)`).
+/// An entry of `publish_document`'s `images`: `name` is a relative path pages refer to
+/// it by (`![chart](images/chart.png)`), and the image is either `data` (base64) or
+/// `upload` (the id of an image uploaded on its own, see `create_upload_url`).
 #[derive(Debug, Clone, Deserialize)]
 pub struct ImageInput {
     pub name: String,
-    pub data: String,
+    #[serde(default)]
+    pub data: Option<String>,
+    #[serde(default)]
+    pub upload: Option<String>,
 }
 
 /// A page that passed validation.
@@ -60,11 +64,26 @@ pub struct ImageUpload {
     pub data: Vec<u8>,
 }
 
+/// An entry of `images` that names an image uploaded on its own: converted and stored
+/// already, for the server to find by its id.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UploadedImage {
+    /// Normalised name pages refer to it by.
+    pub name: String,
+    /// How errors name it.
+    pub label: String,
+    /// The upload's id ([`images::normalize_upload_id`]).
+    pub upload: String,
+}
+
 /// Everything in a publish that passed validation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ValidPublish {
     pub pages: Vec<ValidPage>,
+    /// The images whose bytes came with the publish.
     pub images: Vec<ImageUpload>,
+    /// The images uploaded on their own before it.
+    pub uploaded: Vec<UploadedImage>,
     pub warnings: Vec<PageWarning>,
 }
 
@@ -86,25 +105,33 @@ pub fn validate_pages(input: Vec<PageInput>) -> Result<(Vec<ValidPage>, Vec<Page
 /// out of the pages (which then refer to them by name) and returned with the `images`;
 /// a page's size limit doesn't count them. Image bytes are recognised here but not
 /// converted: the server converts each to AVIF and checks [`images::MAX_IMAGE_BYTES`].
+/// Images given by `upload` are returned as they are named, for the server to look up.
 pub fn validate_publish(input: Vec<PageInput>, image_input: Vec<ImageInput>) -> Result<ValidPublish, String> {
     if input.len() > MAX_PAGES {
         return Err(format!("at most {MAX_PAGES} pages per document"));
     }
     let mut uploads: Vec<ImageUpload> = Vec::new();
+    let mut uploaded: Vec<UploadedImage> = Vec::new();
     for im in image_input {
         let name = images::normalize_name(&im.name)?;
         let label = images::image_label(&name);
-        if uploads.iter().any(|u| u.name == name) {
+        if uploads.iter().any(|u| u.name == name) || uploaded.iter().any(|u| u.name == name) {
             return Err(images::duplicate_error(&name));
         }
-        let data = images::decode_base64(&label, &im.data)?;
-        let format = images::sniff(&label, &data)?;
-        uploads.push(ImageUpload {
-            name,
-            label,
-            format,
-            data,
-        });
+        match (im.data, im.upload.as_deref().map(images::normalize_upload_id)) {
+            (Some(data), None) => {
+                let data = images::decode_base64(&label, &data)?;
+                let format = images::sniff(&label, &data)?;
+                uploads.push(ImageUpload {
+                    name,
+                    label,
+                    format,
+                    data,
+                });
+            }
+            (None, Some(upload)) if !upload.is_empty() => uploaded.push(UploadedImage { name, label, upload }),
+            _ => return Err(images::source_error(&label)),
+        }
     }
     let mut pages: Vec<ValidPage> = Vec::new();
     let mut warnings = Vec::new();
@@ -123,7 +150,7 @@ pub fn validate_publish(input: Vec<PageInput>, image_input: Vec<ImageInput>) -> 
         };
         let (content, inline) = extract_page_images(&path, p.content, format)?;
         for im in inline {
-            if !uploads.iter().any(|u| u.name == im.name) {
+            if !uploads.iter().any(|u| u.name == im.name) && !uploaded.iter().any(|u| u.name == im.name) {
                 let format = images::sniff(&im.label, &im.data)?;
                 uploads.push(ImageUpload {
                     name: im.name,
@@ -164,12 +191,13 @@ pub fn validate_publish(input: Vec<PageInput>, image_input: Vec<ImageInput>) -> 
             image_srcs: rendered.image_srcs,
         });
     }
-    if uploads.len() > images::MAX_IMAGES {
-        return Err(images::too_many_error(uploads.len()));
+    if uploads.len() + uploaded.len() > images::MAX_IMAGES {
+        return Err(images::too_many_error(uploads.len() + uploaded.len()));
     }
     Ok(ValidPublish {
         pages,
         images: uploads,
+        uploaded,
         warnings,
     })
 }
@@ -263,7 +291,8 @@ mod tests {
             vec![page("big.md", &content)],
             vec![ImageInput {
                 name: "./images/x.gif".into(),
-                data: base64::engine::general_purpose::STANDARD.encode(b"GIF89a"),
+                data: Some(base64::engine::general_purpose::STANDARD.encode(b"GIF89a")),
+                upload: None,
             }],
         )
         .unwrap();
@@ -289,12 +318,58 @@ mod tests {
         let many: Vec<ImageInput> = (0..=images::MAX_IMAGES)
             .map(|i| ImageInput {
                 name: format!("{i}.gif"),
-                data: "R0lGODlh".into(),
+                data: Some("R0lGODlh".into()),
+                upload: None,
             })
             .collect();
         assert_eq!(
             validate_publish(vec![page("a", "")], many).unwrap_err(),
             "a version can have at most 200 images, not 201"
         );
+    }
+
+    #[test]
+    fn images_are_given_as_data_or_as_an_upload() {
+        let image = |name: &str, data: Option<&str>, upload: Option<&str>| ImageInput {
+            name: name.into(),
+            data: data.map(str::to_string),
+            upload: upload.map(str::to_string),
+        };
+        let id = "3F2A9C1E-0000-4000-8000-000000000001";
+        let v = validate_publish(
+            vec![page("a", "![x](images/x.png) ![y](y.gif)")],
+            vec![
+                image("images/x.png", None, Some(&format!(" {id}\n"))),
+                image("y.gif", Some("R0lGODlh"), None),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            v.uploaded,
+            [UploadedImage {
+                name: "images/x.png".into(),
+                label: "image \"images/x.png\"".into(),
+                upload: id.to_lowercase(),
+            }]
+        );
+        assert_eq!(v.images.len(), 1);
+
+        let err = |images| validate_publish(vec![page("a", "")], images).unwrap_err();
+        let needs = "image \"x.png\" needs either `data` (its bytes in base64) or `upload` \
+                     (the id of an image uploaded with create_upload_url), and not both";
+        assert_eq!(err(vec![image("x.png", None, None)]), needs);
+        assert_eq!(err(vec![image("x.png", Some("R0lGODlh"), Some(id))]), needs);
+        assert_eq!(err(vec![image("x.png", None, Some(" "))]), needs);
+        assert_eq!(
+            err(vec![
+                image("x.png", None, Some(id)),
+                image("./x.png", Some("R0lGODlh"), None)
+            ]),
+            "image \"x.png\" is given more than once"
+        );
+        let many: Vec<ImageInput> = (0..=images::MAX_IMAGES)
+            .map(|i| image(&format!("{i}.gif"), None, Some(id)))
+            .collect();
+        assert_eq!(err(many), "a version can have at most 200 images, not 201");
     }
 }
