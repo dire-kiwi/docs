@@ -483,7 +483,7 @@ export function mountEditor(
     folder: folder?.value ?? "",
     message: message.value,
     pages: pages.map((p) => ({ ...p })),
-    uploads: [...uploads.values()],
+    uploads: [...uploads.values()].filter((u) => u.data !== ""),
     open: page().path,
     savedAt: new Date().toISOString(),
   });
@@ -508,7 +508,10 @@ export function mountEditor(
       void dropDraft();
       return;
     }
-    load(d.title, d.folder, d.message, d.pages, d.uploads, d.baseVersion, d.open);
+    // A draft of an existing document is saved against the version it started from; one without
+    // (a new document's, under the same key by mistake) would save over whatever is latest unchecked.
+    const base = data.isNew ? null : (d.baseVersion ?? data.baseVersion);
+    load(d.title, d.folder, d.message, d.pages, d.uploads, base, d.open);
     const newer =
       d.baseVersion !== null && data.baseVersion !== null && d.baseVersion !== data.baseVersion
         ? ` Version ${data.baseVersion} has been published since you started them.`
@@ -755,7 +758,16 @@ export function mountEditor(
       }
       const taken = new Set([...existing, ...uploads.keys()]);
       const name = imageName(f.name || "pasted", taken, f.type);
-      const read = await readFile(f);
+      // Taken before reading the file, so an image pasted meanwhile gets a name of its own.
+      uploads.set(name, { name, data: "", url: "" });
+      let read: { data: string; url: string };
+      try {
+        read = await readFile(f);
+      } catch (e) {
+        uploads.delete(name);
+        showError(messageOf(e));
+        continue;
+      }
       uploads.set(name, { name, ...read });
       const alt = (f.name || "image").replace(/\.[^.]*$/, "").replace(/[[\]]/g, "");
       refs.push(`![${alt}](${name})`);
@@ -895,7 +907,7 @@ export function mountEditor(
         content: p.content,
       })),
       images: [...uploads.values()]
-        .filter((u) => used(u.name))
+        .filter((u) => u.data !== "" && used(u.name))
         .map((u) => ({ name: u.name, data: u.data })),
     };
     saving = true;

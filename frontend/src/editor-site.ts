@@ -88,7 +88,7 @@ export function initEditor(): void {
     go(url) {
       window.location.assign(url);
     },
-    drafts: localDrafts(`docs-draft:${slug ?? "new"}`),
+    drafts: localDrafts(slug === null ? "docs-draft-new" : `docs-draft:${slug}`),
   });
   window.addEventListener("beforeunload", (e) => {
     if (editor.dirty()) e.preventDefault();

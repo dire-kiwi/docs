@@ -178,14 +178,18 @@ export function indentLines(s: TextState, outdent: boolean): TextState {
 export function continueList(s: TextState): TextState | null {
   if (s.start !== s.end) return null;
   const from = s.value.lastIndexOf("\n", s.start - 1) + 1;
-  const line = s.value.slice(from, s.start);
+  const nl = s.value.indexOf("\n", s.start);
+  const line = s.value.slice(from, nl === -1 ? s.value.length : nl);
   const m = /^(\s*)([-*+] \[[ xX]\] |[-*+] |(\d+)([.)]) |> )/.exec(line);
   if (!m) return null;
   const [whole, indent = "", marker = "", num, punct = "."] = m;
-  if (line.length === whole.length) {
+  if (line.trim() === whole.trim()) {
     // An empty item: end the list (or the quote).
-    return { value: s.value.slice(0, from) + s.value.slice(s.start), start: from, end: from };
+    const to = from + line.length;
+    return { value: s.value.slice(0, from) + s.value.slice(to), start: from, end: from };
   }
+  // The caret in or right after the marker, with the item's text after it: Enter does what it always does.
+  if (s.start - from <= whole.length) return null;
   let next = marker;
   if (num !== undefined) next = `${Number(num) + 1}${punct} `;
   else if (/\[[ xX]\]/.test(marker)) next = `${marker.slice(0, 2)}[ ] `;

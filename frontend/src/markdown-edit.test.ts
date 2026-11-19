@@ -92,6 +92,18 @@ describe("continueList", () => {
   test("ends the list on an empty item", () => {
     expect(show(continueList(at("- one\n- |"))!)).toBe("- one\n|");
   });
+  test("keeps an item's text when the caret is before it", () => {
+    expect(continueList(at("- |foo"))).toBeNull();
+    expect(continueList(at("1. |foo"))).toBeNull();
+    expect(continueList(at("> |foo"))).toBeNull();
+    expect(continueList(at("|- foo"))).toBeNull();
+  });
+  test("splits an item at the caret", () => {
+    expect(show(continueList(at("- fo|o"))!)).toBe("- fo\n- |o");
+  });
+  test("ends the list on an empty item before other lines", () => {
+    expect(show(continueList(at("- one\n- |\nnext"))!)).toBe("- one\n|\nnext");
+  });
   test("leaves other lines alone", () => {
     expect(continueList(at("text|"))).toBeNull();
   });
