@@ -25,7 +25,9 @@ for their names, props and examples, and use format \"mdx\". \
 fix them and publish again. Don't install or run npm packages, renderers or other tools to check pages. \
 Add form fields when you need a decision or input from the reader, \
 then call `get_feedback` later to read their answers and any text they selected and commented on. \
-Documents are private to the user you act for; use `share_document` to share one with other people (by username) or to get a share link. \
+Documents are private to the user you act for, unless they belong to an organization: the user may be a member of organizations (`list_organizations`), \
+whose documents every member can read and publish to. To publish for an organization, pass its slug as `publish_document`'s `organization` when you create the document. \
+Use `share_document` to share a document with other people (by username) or to get a share link. \
 Always give the reader the URL returned by `publish_document`.";
 
 /// The `tools/list` result: one entry per tool.
@@ -39,6 +41,8 @@ pub fn tool_definitions() -> Value {
     optionally with subfolders separated by '/' (\"docs/plans\"). Only used when the document is created; \
     new versions keep the folder the document is in. Omit for the top level.",
     });
+    let organization =
+        |what: &str| json!({ "type": "string", "description": format!("{what} Its slug, from list_organizations.") });
     let labels = |what: &str| {
         json!({
             "type": "array",
@@ -51,12 +55,13 @@ pub fn tool_definitions() -> Value {
         {
             "name": "list_documents",
             "title": "List documents",
-            "description": "List the documents you can see (yours and those shared with you) with their folder, labels, latest version and URL. \
-    Labels are yours alone: documents shared with you are listed without their owner's labels.",
+            "description": "List the documents you can see (yours, your organizations' and those shared with you) with their organization, folder, labels, latest version and URL. \
+    Labels are seen only by the people who can edit a document: documents shared with you are listed without their labels.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "label": { "type": "string", "description": "Only your documents with this label or one nested under it (\"research\" includes \"research/ai\")." },
+                    "label": { "type": "string", "description": "Only documents you can edit with this label or one nested under it (\"research\" includes \"research/ai\")." },
+                    "organization": organization("Only this organization's documents (\"\" for only your own)."),
                 },
             },
             "annotations": { "readOnlyHint": true },
@@ -98,6 +103,8 @@ pub fn tool_definitions() -> Value {
                 "properties": {
                     "slug": { "type": "string", "description": "Existing document to update, or the slug for a new one. Omit to create a new document with a slug derived from the title." },
                     "title": { "type": "string", "description": "Document title. Defaults to the title of the index (or first) page for new documents." },
+                    "organization": organization("Create the document in this organization, so all its members can read it and publish to it. \
+    Only used when the document is created; omit it for your own documents."),
                     "folder": folder,
                     "labels": labels("The document's labels. When given they replace its labels; when omitted its labels are kept. Labels belong to the document, not to a version."),
                     "message": { "type": "string", "description": "What changed in this version." },
@@ -136,14 +143,16 @@ pub fn tool_definitions() -> Value {
         {
             "name": "move_document",
             "title": "Move document",
-            "description": "Move one of your documents to another folder, e.g. when the user asks you to. \
-    Folders are '/'-separated paths (\"docs/plans\"); \"\" is the top level. A folder exists while it has documents in it. \
-    Moving a document does not change its URL. Only the owner can move a document.",
+            "description": "Move a document to another folder, or to another organization, e.g. when the user asks you to. \
+    Folders are '/'-separated paths (\"docs/plans\"); \"\" is the top level. Your documents and each organization's have their own folders, \
+    and a folder exists while it has documents in it. Moving a document does not change its URL. \
+    Its owner can move it, and so can its organization's members; only its owner can take it out of an organization.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "slug": slug,
                     "folder": { "type": "string", "description": "The folder to move it to, e.g. \"docs/plans\", or \"\" for the top level." },
+                    "organization": organization("The organization to move it to, or \"\" for its owner's own documents. Omit to keep it where it is."),
                 },
                 "required": ["slug", "folder"],
             },
@@ -152,8 +161,8 @@ pub fn tool_definitions() -> Value {
         {
             "name": "set_document_labels",
             "title": "Set document labels",
-            "description": "Replace the labels of one of your documents (pass [] to remove them all). \
-    This doesn't publish a new version. Only the owner can label a document. Returns the labels as stored.",
+            "description": "Replace the labels of a document (pass [] to remove them all). \
+    This doesn't publish a new version. Its owner can label it, and so can its organization's members. Returns the labels as stored.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -168,8 +177,11 @@ pub fn tool_definitions() -> Value {
             "name": "list_labels",
             "title": "List labels",
             "description": "Your labels as a tree, with how many of your documents have each label or one nested under it, \
-    and how many have no labels. Reuse these labels when you label a document.",
-            "inputSchema": { "type": "object", "properties": {} },
+    and how many have no labels; or an organization's. Reuse these labels when you label a document.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "organization": organization("This organization's labels instead of yours.") },
+            },
             "annotations": { "readOnlyHint": true },
         },
         {
@@ -191,9 +203,9 @@ pub fn tool_definitions() -> Value {
         {
             "name": "share_document",
             "title": "Share document",
-            "description": "Documents are private to their owner. Share one with people by username (they see it after signing in), \
+            "description": "Documents are private to their owner, or to their organization's members. Share one with more people by username (they see it after signing in), \
     and/or turn on a share link: anyone who signs in and opens it gets access. People it is shared with can read it and leave feedback, \
-    but only the owner can publish versions. Only the owner can change sharing. Returns who it is shared with and the link.",
+    but can't publish versions or change sharing. Returns who it is shared with and the link.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -204,6 +216,15 @@ pub fn tool_definitions() -> Value {
                 },
                 "required": ["slug"],
             },
+        },
+        {
+            "name": "list_organizations",
+            "title": "List organizations",
+            "description": "The organizations you are a member of: their slugs (to pass as `organization`), names, members and roles, \
+    and how many documents each has. Every member can read an organization's documents and publish to them; \
+    people manage organizations on the site.",
+            "inputSchema": { "type": "object", "properties": {} },
+            "annotations": { "readOnlyHint": true },
         },
         {
             "name": "list_components",

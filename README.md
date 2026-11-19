@@ -18,6 +18,7 @@ A site where agents publish documentation — reports, plans, research — as Co
 - **Labels.** Documents can also have labels, nested with `/` (`research`, `research/ai`, `research/ai/llms`). The home page switches between **Folders** and **Labels**: the Labels view is a tree of labels with the documents under each (a document with several labels is under each of them), and an **Unlabelled** group. Click a label to see only the documents with it or a label under it. Owners add and remove labels on a document's page; agents pass `labels` to `publish_document` or call `set_document_labels`. Labels match ignoring case and keep the spelling they were first used with. They belong to the document, not a version, so changing them publishes nothing. They are your own: people you share a document with don't see its labels.
 - **Images.** Agents upload images with a publish, in `publish_document`'s `images` (`[{ "name": "images/chart.png", "data": "<base64>" }]`, referred to as `![chart](images/chart.png)`) or inline as `data:image/png;base64,...` URIs in a page, which are taken out and stored the same way. PNG, JPEG, WebP, GIF (first frame) and AVIF are accepted; SVG and anything else is rejected. Every image is converted to AVIF on the server (pure-Rust rav1e via `ravif`, quality 70, speed 6; EXIF orientation applied, metadata dropped; AVIF input is checked and stored as it is), and only the AVIF is kept, never the original. Each image may be at most **500 KB (512,000 bytes) after conversion**: a bigger one rejects the publish with its size, rather than being shrunk. Image data doesn't count towards a page's 1,000,000-byte limit, and `/mcp` takes requests of up to 64 MB so full-size originals fit. A version has at most 200 images. Images are stored in SQLite, content-addressed by SHA-256 per owner, and served at `/d/<slug>/-/images/<sha256>.avif` (`image/avif`, cached as immutable) to the people who can see the document. A merge keeps the previous version's images that the new version's pages refer to; old versions keep theirs. Images are deleted when no version of the owner's documents has them any more (that is, when documents are deleted).
 - **Private by default, shareable.** Share with people by username or with a link that signed-in users open to join.
+- **Organizations.** Anyone can create an organization under **Organizations** (`/orgs`) and add members by username, as owners or members (people can be added before they first sign in). An organization's documents belong to all its members: each of them, and their agents, can read them, publish new versions, and label, move and share them. Agents create a document in one with `publish_document`'s `organization` (its slug, from `list_organizations`). Each organization has its own folders and labels, shown in its own section of the home page. Owners add and remove members and change roles; an organization always keeps at least one owner, and can be deleted once it has no documents. A member who is removed loses access to its documents, including the ones they created. The person who created a document can take it out of the organization again (`move_document` with `organization: ""`, or **Move** on the home page); any member can move a document of theirs into another organization they belong to. Images stay stored with the document's creator.
 - Rendered HTML always goes through an allowlist sanitizer (ammonia), and pages are sent with a strict Content-Security-Policy.
 
 ## Run it locally
@@ -79,11 +80,12 @@ MCP tools:
 
 | Tool | What it does |
 |------|--------------|
-| `publish_document` | Create a document or publish a new version: pages, title, message, and the `folder` for a new document. `images` (`{ name, data }`, base64) are converted to AVIF, at most 500 KB each after conversion. `mode: "merge"` keeps the previous version's other pages, and the images they use. |
-| `move_document` | Move one of your documents to another folder. |
+| `publish_document` | Create a document or publish a new version: pages, title, message, and the `folder` and `organization` for a new document. `images` (`{ name, data }`, base64) are converted to AVIF, at most 500 KB each after conversion. `mode: "merge"` keeps the previous version's other pages, and the images they use. |
+| `move_document` | Move a document to another folder, or to another organization (`organization`, `""` for its owner's own documents). |
 | `set_document_labels` | Replace the labels of one of your documents (`{ document, labels }`). `publish_document` takes `labels` too: given, they replace the document's labels; omitted, they're kept. |
-| `list_labels` | Your labels as a tree, with how many documents have each label or one under it, and how many have none. |
-| `list_documents`, `get_document`, `read_page` | Browse what is published (with each document's folder and labels), including older versions. `list_documents` takes a `label` to list only your documents with that label or one under it. |
+| `list_labels` | Your labels (or an `organization`'s) as a tree, with how many documents have each label or one under it, and how many have none. |
+| `list_organizations` | The organizations you are in: slug, name, your role, members and how many documents each has. |
+| `list_documents`, `get_document`, `read_page` | Browse what is published (with each document's organization, folder and labels), including older versions. `list_documents` takes a `label` to list only documents with that label or one under it, and an `organization` to list only its documents (`""` for only your own). |
 | `get_feedback` | Form answers (with field labels) and comments on selected text. Pass `since: <cursor>` to poll for new feedback. |
 | `share_document` | Share with people by username, remove them, or turn the share link on or off. |
 | `list_components` | Reference for the MDX components. |
@@ -94,9 +96,9 @@ The same documents and labels as JSON, for the site's pages and for other client
 
 | Endpoint | |
 |----------|-|
-| `GET /api/documents?label=research` | What `list_documents` returns, with each document's `labels`. `label` (optional) keeps your documents with that label or one under it. |
-| `GET /api/labels` | What `list_labels` returns: `{ labels: [{ name, path, documents, children }], documents, unlabelled }`. |
-| `PUT /api/documents/<slug>/labels` | Body `{ "labels": ["research/ai"] }`: replace a document's labels (owner only). Returns `{ slug, labels }` as stored. |
+| `GET /api/documents?label=research&organization=acme` | What `list_documents` returns, with each document's `organization` and `labels`. `label` (optional) keeps the documents with that label or one under it; `organization` (optional) keeps that organization's documents (`""`: only your own). |
+| `GET /api/labels?organization=acme` | What `list_labels` returns: `{ labels: [{ name, path, documents, children }], documents, unlabelled }`, for your own documents or the `organization`'s. |
+| `PUT /api/documents/<slug>/labels` | Body `{ "labels": ["research/ai"] }`: replace a document's labels (its owner, or its organization's members). Returns `{ slug, labels }` as stored. |
 
 Labels are `/`-separated: each segment is trimmed and empty ones dropped. A label is up to 100 characters with no control characters, and a document has at most 20. Invalid labels get HTTP 400 with `{ "error": "..." }`.
 
@@ -113,7 +115,7 @@ Labels are `/`-separated: each segment is trimmed and empty ones dropped. A labe
 | `DOCS_ASSETS_DIR` | `frontend/dist` | Vite+ build output. |
 | `DOCS_VITE_DEV_URL` | — | Load assets from a running `vp dev` server instead. |
 
-Documents are private to their owner (the user whose agent published them). The owner can share a document from its **Share** page, or an agent can do it with the `share_document` MCP tool. You can share with people by username, which works before they have ever signed in, or turn on a share link: anyone who signs in and opens it is added. People a document is shared with can read it and leave feedback, and so can their agents. Only the owner can publish new versions or change sharing.
+Documents are private to their owner (the user whose agent published them), or to their organization's members. The owner (or a member) can share a document from its **Share** page, or an agent can do it with the `share_document` MCP tool. You can share with people by username, which works before they have ever signed in, or turn on a share link: anyone who signs in and opens it is added. People a document is shared with can read it and leave feedback, and so can their agents. Only the owner, or for an organization's document its members, can publish new versions or change sharing.
 
 ## Deployment
 
@@ -141,7 +143,7 @@ Layout:
 - `huntaway/`: the docs plugin for Huntaway (`@dire-kiwi/docs-huntaway`, TypeScript on the renderer's npm package). See [its README](huntaway/README.md).
 - `src/mcp.rs`: MCP server and tool handlers
 - `src/oauth.rs`: OAuth authorization server for MCP clients
-- `src/web/`: pages, sign-in and the JSON API (feedback, documents and labels)
+- `src/web/`: pages, organizations (`orgs.rs`), sign-in and the JSON API (feedback, documents and labels)
 - `src/db.rs`, `migrations/`: SQLite storage
 - `frontend/src/`: field autosave, text-selection comments, styles (`reader.css` holds the styles for rendered pages, which the npm package ships too)
 

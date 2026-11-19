@@ -8,12 +8,21 @@ import { quoted } from "./rules.ts"
 
 // The `docs` MCP server agents on the board get (`mcp__docs__<tool>`): they publish documents to their profile on this
 // host exactly as they would to the hosted site. The tools, their schemas, checks, errors and warnings are the hosted
-// server's, from the renderer (`toolDefinitions`), but `share_document` (documents on the board aren't shared). A tool's
+// server's, from the renderer (`toolDefinitions`), but `share_document` (documents on the board aren't shared) and
+// organizations (`list_organizations` and the `organization` arguments: the board has none). A tool's
 // result is its JSON as text and as `structuredContent`; a failure is its message as a tool error, without anything
 // before it, as the hosted server's.
 
 /** The hosted server's tools this one leaves out. */
-const LEFT_OUT = new Set(["share_document"])
+const LEFT_OUT = new Set(["share_document", "list_organizations"])
+
+/** A tool's input schema without the hosted server's `organization` argument. */
+const withoutOrganization = (schema: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> => {
+  const properties = schema["properties"]
+  if (typeof properties !== "object" || properties === null || !("organization" in properties)) return schema
+  const { organization: _, ...rest } = properties as Record<string, unknown>
+  return { ...schema, properties: rest }
+}
 
 /** What the server tells agents (Claude Code adds it to its system prompt). */
 export const INSTRUCTIONS =
@@ -59,6 +68,7 @@ export const definitions = (lib: RenderLib): ReadonlyArray<Definition> =>
   lib
     .toolDefinitions()
     .filter((t) => !LEFT_OUT.has(t.name))
+    .map((t) => ({ ...t, inputSchema: withoutOrganization(t.inputSchema) }))
     .map((t) => (t.name === "move_document" ? { ...t, inputSchema: { ...t.inputSchema, required: ["slug"] } } : t))
 
 // ---- arguments, read as the hosted server's serde structs read them ----------------------------------------------------

@@ -866,3 +866,19 @@ a.label-chip:hover {
   font-size: 0.85em;
   padding: 2px 8px;
 }
+
+/* A form with one field under another (creating an organization). */
+form.stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  max-width: 420px;
+}
+
+form.stack label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+}

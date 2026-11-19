@@ -33,6 +33,7 @@ pub fn shell(s: Shell, main: Markup) -> Markup {
                     nav.topnav {
                         @if s.user.is_some() {
                             a href="/" { "Documents" }
+                            a href="/orgs" { "Organizations" }
                         }
                         a href="/components" { "Components" }
                     }
