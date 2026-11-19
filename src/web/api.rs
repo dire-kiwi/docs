@@ -12,10 +12,12 @@ use serde_json::{Value, json};
 
 use crate::AppState;
 use crate::db::{self, User};
-use crate::labels;
 use crate::mcp::{self, ToolError};
 use crate::render::{self, Format, Options};
 use crate::web::auth::{Viewer, constant_time_eq};
+use crate::web::pages;
+use crate::{labels, paths};
+use docs_render::publish;
 
 pub struct ApiError(StatusCode, String);
 
@@ -256,4 +258,191 @@ pub async fn delete_selection(
     } else {
         Err(ApiError(StatusCode::NOT_FOUND, "not found".into()))
     }
+}
+
+// ---------- the editor ----------
+
+#[derive(Deserialize)]
+pub struct PreviewRequest {
+    /// The document the page is in, for its images and links.
+    slug: Option<String>,
+    /// The version whose images to show (the latest when omitted).
+    version: Option<i64>,
+    #[serde(default)]
+    path: String,
+    #[serde(default)]
+    format: String,
+    content: String,
+}
+
+/// `POST /api/preview`: a page as it would render (for the editor's preview), with the
+/// images of the document's version, without storing anything.
+pub async fn preview(
+    State(state): State<AppState>,
+    viewer: Viewer,
+    headers: HeaderMap,
+    Json(req): Json<PreviewRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let user = api_user(&state, &viewer, &headers, false).await?;
+    if req.content.len() > publish::MAX_PAGE_BYTES * 2 {
+        return Err(bad("the page is too large to preview"));
+    }
+    let path = paths::normalize(&req.path).unwrap_or_else(|_| "index".into());
+    let format = Format::parse(&req.format).unwrap_or(Format::Md);
+    let mut images = HashMap::new();
+    let mut base = "/".to_string();
+    if let Some(slug) = &req.slug
+        && let Some(doc) = db::get_document(&state.db, slug, &user).await?
+    {
+        base = pages::doc_base(&doc.uuid, None);
+        if let Some(v) = db::version(&state.db, doc.id, req.version).await? {
+            for i in db::version_images(&state.db, v.id).await? {
+                images.insert(i.name, pages::image_path(&doc.uuid, &i.sha256));
+            }
+        }
+    }
+    let answers = HashMap::new();
+    let opts = Options {
+        page_path: &path,
+        base_url: &base,
+        answers: &answers,
+        images: &images,
+    };
+    Ok(Json(match render::render(&req.content, format, &opts) {
+        Ok(r) => json!({ "html": r.html, "has_h1": r.has_h1, "warnings": r.warnings, "error": null }),
+        Err(e) => {
+            json!({ "html": null, "has_h1": false, "warnings": [], "error": format!("This page isn't valid {}: {e}", format.as_str()) })
+        }
+    }))
+}
+
+/// What the editor saves: every page of the document, and the images uploaded in it.
+#[derive(Deserialize)]
+pub struct SaveDocument {
+    /// The version the editor opened; saving fails with 409 if another was published since.
+    base_version: Option<i64>,
+    title: String,
+    /// A new document's folder.
+    folder: Option<String>,
+    message: Option<String>,
+    pages: Vec<Value>,
+    #[serde(default)]
+    images: Vec<Value>,
+}
+
+fn saved(doc: &db::DocumentSummary, number: i64, published: &Value) -> Json<Value> {
+    Json(json!({
+        "slug": doc.slug,
+        "uuid": doc.uuid,
+        "version": number,
+        "url": pages::doc_base(&doc.uuid, None),
+        "warnings": published.get("warnings").cloned().unwrap_or_else(|| json!([])),
+    }))
+}
+
+fn title_of(raw: &str) -> Result<String, ApiError> {
+    let title = raw.trim();
+    if title.is_empty() {
+        return Err(bad("give the document a title"));
+    }
+    Ok(title.chars().take(publish::MAX_TITLE_CHARS).collect())
+}
+
+/// `POST /api/documents`: a new document from the editor.
+pub async fn create_document(
+    State(state): State<AppState>,
+    viewer: Viewer,
+    headers: HeaderMap,
+    Json(req): Json<SaveDocument>,
+) -> Result<Json<Value>, ApiError> {
+    let user = api_user(&state, &viewer, &headers, true).await?;
+    let title = title_of(&req.title)?;
+    let published = mcp::publish_as(
+        &state,
+        &user,
+        json!({
+            "title": title,
+            "folder": req.folder.unwrap_or_default(),
+            "message": req.message,
+            "pages": req.pages,
+            "images": req.images,
+        }),
+    )
+    .await
+    .map_err(|ToolError(e)| bad(e))?;
+    let slug = published["slug"].as_str().unwrap_or_default();
+    let number = published["version"].as_i64().unwrap_or_default();
+    let doc = db::get_document(&state.db, slug, &user)
+        .await?
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "no such document".into()))?;
+    Ok(saved(&doc, number, &published))
+}
+
+/// `POST /api/documents/{uuid}/versions` (or its slug): a new version of one of your documents from the
+/// editor, with all its pages (pages left out are deleted; images it still uses are kept).
+/// 409 with `latest_version` if a version was published after `base_version`.
+pub async fn save_version(
+    State(state): State<AppState>,
+    viewer: Viewer,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+    Json(req): Json<SaveDocument>,
+) -> Result<Response, ApiError> {
+    let user = api_user(&state, &viewer, &headers, true).await?;
+    let doc = db::get_document(&state.db, &slug, &user)
+        .await?
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "no such document".into()))?;
+    if doc.owner_id != user.id {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "only the owner can edit this document".into(),
+        ));
+    }
+    if req.base_version.is_some_and(|b| b != doc.latest_version) {
+        return Ok((
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": format!("Version {} was published while you were editing.", doc.latest_version),
+                "latest_version": doc.latest_version,
+            })),
+        )
+            .into_response());
+    }
+    if req.pages.is_empty() {
+        return Err(bad("a document needs at least one page"));
+    }
+    let title = title_of(&req.title)?;
+    // The pages it had that the editor no longer has.
+    let kept: Vec<String> = req
+        .pages
+        .iter()
+        .filter_map(|p| p.get("path").and_then(Value::as_str))
+        .filter_map(|p| paths::normalize(p).ok())
+        .collect();
+    let mut delete = Vec::new();
+    if let Some(v) = db::version(&state.db, doc.id, None).await? {
+        for p in db::pages(&state.db, v.id).await? {
+            if !kept.contains(&p.path) {
+                delete.push(p.path);
+            }
+        }
+    }
+    // A merge with every page, so the images the pages still use carry over.
+    let published = mcp::publish_as(
+        &state,
+        &user,
+        json!({
+            "slug": doc.slug,
+            "title": title,
+            "message": req.message,
+            "pages": req.pages,
+            "images": req.images,
+            "mode": "merge",
+            "delete_paths": delete,
+        }),
+    )
+    .await
+    .map_err(|ToolError(e)| bad(e))?;
+    let number = published["version"].as_i64().unwrap_or_default();
+    Ok(saved(&doc, number, &published).into_response())
 }

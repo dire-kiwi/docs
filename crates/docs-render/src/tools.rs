@@ -25,6 +25,8 @@ for their names, props and examples, and use format \"mdx\". \
 fix them and publish again. Don't install or run npm packages, renderers or other tools to check pages. \
 Add form fields when you need a decision or input from the reader, \
 then call `get_feedback` later to read their answers and any text they selected and commented on. \
+People can also edit a document themselves on the site, which publishes a new version: before you publish a new version \
+of a document they may have edited, read its latest pages (`get_document`, `read_page`) so you don't undo their changes. \
 Documents are private to the user you act for; use `share_document` to share one with other people (by username), to get a share link, \
 or to make it public (anyone with its URL can read it, without signing in) when the user asks. \
 Always give the reader the URL returned by `publish_document`.";

@@ -6,7 +6,7 @@ import { Comment } from "./repo.ts"
 import type { Hosted } from "./hosted.ts"
 
 // What the plugin's pages call (`huntaway.call(method, payload)` in their frames, over the board's `plugins.call`):
-// changing documents, comments and answers, and the profile's connection to a hosted docs site. All need `operate`.
+// changing documents (and editing them: previews, drafts and saving a version), comments and answers, and the profile's connection to a hosted docs site. All but `doc.preview` and `site.status` need `operate`.
 
 const Where = { profile: Schema.String, slug: Schema.String }
 const Ok = Schema.Struct({ ok: Schema.Boolean })
@@ -44,6 +44,33 @@ export const makeCalls = (docs: Docs, hosted: Hosted): Readonly<Record<string, P
     payload: Schema.Struct({ profile: Schema.String, from: Schema.String, to: Schema.String }),
     success: Schema.Struct({ moved: Schema.Array(Schema.String) }),
     handle: ({ profile, from, to }) => docs.renameFolder(profile, from, to),
+  }),
+  "doc.preview": pluginCall({
+    scope: "read",
+    payload: Schema.Struct({ profile: Schema.String, slug: Schema.NullOr(Schema.String), path: Schema.String, format: Schema.String, content: Schema.String }),
+    success: Anything,
+    handle: ({ profile, slug, ...page }) => docs.preview(profile, slug, page),
+  }),
+  "doc.save": pluginCall({
+    scope: "operate",
+    payload: Schema.Struct({
+      profile: Schema.String,
+      slug: Schema.NullOr(Schema.String),
+      base_version: Schema.NullOr(Schema.Int),
+      title: Schema.String,
+      folder: Schema.NullOr(Schema.String),
+      message: Schema.NullOr(Schema.String),
+      pages: Schema.Array(Schema.Unknown),
+      images: Schema.Array(Schema.Unknown),
+    }),
+    success: Anything,
+    handle: ({ profile, ...input }) => docs.save(profile, input),
+  }),
+  "draft.keep": pluginCall({
+    scope: "operate",
+    payload: Schema.Struct({ profile: Schema.String, slug: Schema.NullOr(Schema.String), draft: Schema.Unknown }),
+    success: Ok,
+    handle: ({ profile, slug, draft }) => Effect.as(docs.keepDraft(profile, slug, draft ?? null), ok),
   }),
   "comment.add": pluginCall({
     scope: "operate",

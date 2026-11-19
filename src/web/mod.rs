@@ -70,12 +70,26 @@ pub fn router(state: AppState) -> Router {
         .route("/d/{slug}/-/move", post(pages::move_document))
         .route("/d/{slug}/-/labels", post(pages::update_labels))
         .route("/d/{slug}/-/images/{file}", get(pages::document_image))
+        .route("/d/{slug}/-/edit", get(pages::edit_root))
+        .route("/d/{slug}/-/edit/", get(pages::edit_root))
+        .route("/d/{slug}/-/edit/{*path}", get(pages::edit_page))
+        .route("/new", get(pages::new_document))
         .route("/folders/rename", post(pages::rename_folder))
         .route("/s/{token}", get(pages::share_link))
         .route("/d/{slug}/-/v/{n}/", get(pages::version_root))
         .route("/d/{slug}/-/v/{n}/{*path}", get(pages::version_page))
         .route("/d/{slug}/{*path}", get(pages::doc_page))
-        .route("/api/documents", get(api::list_documents))
+        .route(
+            "/api/documents",
+            get(api::list_documents)
+                .post(api::create_document)
+                .layer(DefaultBodyLimit::max(mcp::MAX_REQUEST_BYTES)),
+        )
+        .route(
+            "/api/documents/{slug}/versions",
+            post(api::save_version).layer(DefaultBodyLimit::max(mcp::MAX_REQUEST_BYTES)),
+        )
+        .route("/api/preview", post(api::preview))
         .route("/api/documents/{slug}/labels", put(api::set_labels))
         .route("/api/labels", get(api::list_labels))
         .route("/api/responses", post(api::save_response))
