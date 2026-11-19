@@ -71,6 +71,7 @@ pub fn router(state: AppState) -> Router {
         .route("/d/{slug}/-/labels", post(pages::update_labels))
         .route("/d/{slug}/-/images/{file}", get(pages::document_image))
         .route("/d/{slug}/-/edit", get(pages::edit_root))
+        .route("/d/{slug}/-/edit/", get(pages::edit_root))
         .route("/d/{slug}/-/edit/{*path}", get(pages::edit_page))
         .route("/new", get(pages::new_document))
         .route("/folders/rename", post(pages::rename_folder))

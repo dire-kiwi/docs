@@ -29,6 +29,15 @@
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 4px 8px;
+  width: auto;
+}
+
+.editor button {
+  padding: 4px 10px;
+}
+
+.editor-bar button {
+  padding: 6px 14px;
 }
 
 .editor input.invalid {
@@ -256,6 +265,7 @@
 
 .editor .editor-source {
   width: 100%;
+  margin: 0;
   height: 100%;
   min-height: 300px;
   resize: none;
