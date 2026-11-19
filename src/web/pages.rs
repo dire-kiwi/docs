@@ -12,7 +12,7 @@ use serde::Deserialize;
 
 use crate::AppState;
 use crate::components::COMPONENTS;
-use crate::db::{self, DocumentSummary, User, Version};
+use crate::db::{self, DocumentSummary, User};
 use crate::error::{AppError, AppResult};
 use crate::labels::{self, LabelNode};
 use crate::paths::{self, NavNode};
@@ -20,16 +20,17 @@ use crate::render::{self, Format, Options};
 use crate::web::auth::{Viewer, safe_next};
 use crate::web::layout::{self, Shell, shell, time};
 
-pub fn doc_base(slug: &str, version: Option<i64>) -> String {
+/// A document's pages, at its UUID (`DocumentSummary::uuid`) so the URL can't be guessed.
+pub fn doc_base(uuid: &str, version: Option<i64>) -> String {
     match version {
-        Some(n) => format!("/d/{slug}/-/v/{n}/"),
-        None => format!("/d/{slug}/"),
+        Some(n) => format!("/d/{uuid}/-/v/{n}/"),
+        None => format!("/d/{uuid}/"),
     }
 }
 
 /// Where one of a document's images is served (by the SHA-256 of its AVIF, so it never changes).
-pub fn image_path(slug: &str, sha256: &str) -> String {
-    format!("/d/{slug}/-/images/{sha256}.avif")
+pub fn image_path(uuid: &str, sha256: &str) -> String {
+    format!("/d/{uuid}/-/images/{sha256}.avif")
 }
 
 fn mcp_help(base: &str) -> Markup {
@@ -222,17 +223,18 @@ fn doc_row(d: &DocumentSummary, indent: &str, view: &TreeView) -> Markup {
     html! {
         li.tree-doc {
             span.tree-title style=(indent) {
-                a href=(doc_base(&d.slug, None)) { (d.title) }
+                a href=(doc_base(&d.uuid, None)) { (d.title) }
                 " " small.muted { (d.slug) }
+                @if d.public { " " span.badge { "public" } }
                 (label_chips(&d.labels))
             }
             span.tree-pages { (d.page_count) " " (if d.page_count == 1 { "page" } else { "pages" }) }
-            a.tree-version href={ "/d/" (d.slug) "/-/versions" } { "v" (d.latest_version) }
+            a.tree-version href={ "/d/" (d.uuid) "/-/versions" } { "v" (d.latest_version) }
             span.tree-updated { (time(d.updated_at)) }
             @if view.editable {
                 details.tree-edit {
                     summary { "Move" }
-                    form method="post" action={ "/d/" (d.slug) "/-/move" } {
+                    form method="post" action={ "/d/" (d.uuid) "/-/move" } {
                         input type="hidden" name="csrf" value=(view.csrf);
                         label { "Move " strong { (d.title) } " to the folder" }
                         input type="text" name="folder" value=(d.folder) list="folder-options" maxlength="200"
@@ -514,43 +516,60 @@ pub async fn components_page(viewer: Viewer) -> Markup {
 
 // ---------- documents ----------
 
-async fn load_doc(
-    state: &AppState,
-    slug: &str,
-    number: Option<i64>,
-    user: &User,
-) -> AppResult<(DocumentSummary, Version)> {
-    // Documents the viewer can't see are reported as missing.
-    let doc = db::get_document(&state.db, slug, user)
-        .await?
-        .ok_or(AppError::NotFound)?;
-    let version = db::version(&state.db, doc.id, number)
-        .await?
-        .ok_or(AppError::NotFound)?;
-    Ok((doc, version))
+/// A document the viewer can read.
+struct Found<'v> {
+    doc: DocumentSummary,
+    /// The viewer, when they own the document or it is shared with them: they can answer,
+    /// comment and see the feedback. `None` when they can read it only because it is public.
+    member: Option<&'v User>,
 }
 
-/// `/d/{slug}/-/images/{sha256}.avif`: an image of the document, for people who can see it.
+/// The document `key` (its UUID, or its slug in older links) names, if the viewer can read
+/// it: theirs or shared with them, or public (by UUID only). Others are reported as missing.
+async fn find_doc<'v>(state: &AppState, key: &str, viewer: &'v Viewer) -> AppResult<Found<'v>> {
+    if let Some(user) = &viewer.user
+        && let Some(doc) = db::get_document(&state.db, key, user).await?
+    {
+        return Ok(Found {
+            doc,
+            member: Some(user),
+        });
+    }
+    if let Some(doc) = db::get_public_document(&state.db, key).await? {
+        return Ok(Found { doc, member: None });
+    }
+    viewer.require()?;
+    Err(AppError::NotFound)
+}
+
+/// Older links name a document by its slug: send them to the same page at its UUID.
+fn to_uuid(viewer: &Viewer, key: &str, doc: &DocumentSummary) -> Option<Response> {
+    (key != doc.uuid).then(|| {
+        let path = viewer
+            .path()
+            .replacen(&format!("/d/{key}"), &format!("/d/{}", doc.uuid), 1);
+        Redirect::to(&path).into_response()
+    })
+}
+
+/// `/d/{uuid}/-/images/{sha256}.avif`: an image of the document, for people who can see it.
 pub async fn document_image(
     State(state): State<AppState>,
     viewer: Viewer,
-    Path((slug, file)): Path<(String, String)>,
+    Path((key, file)): Path<(String, String)>,
 ) -> AppResult<Response> {
-    let user = viewer.require()?;
     let sha256 = file.strip_suffix(".avif").ok_or(AppError::NotFound)?;
     if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) {
         return Err(AppError::NotFound);
     }
-    let doc = db::get_document(&state.db, &slug, user)
-        .await?
-        .ok_or(AppError::NotFound)?;
+    let doc = find_doc(&state, &key, &viewer).await?.doc;
     let data = db::document_image(&state.db, doc.id, sha256)
         .await?
         .ok_or(AppError::NotFound)?;
     Ok((
         [
             (header::CONTENT_TYPE, "image/avif"),
-            // Private: only people who can see the document may fetch it.
+            // Private even for a public document, which can be made private again.
             (header::CACHE_CONTROL, "private, max-age=31536000, immutable"),
         ],
         data,
@@ -597,9 +616,14 @@ async fn show_page(
     number: Option<i64>,
     suffix: String,
 ) -> AppResult<Response> {
-    let user = viewer.require()?;
-    let (doc, version) = load_doc(&state, &slug, number, user).await?;
-    let base = doc_base(&doc.slug, number);
+    let Found { doc, member } = find_doc(&state, &slug, &viewer).await?;
+    if let Some(r) = to_uuid(&viewer, &slug, &doc) {
+        return Ok(r);
+    }
+    let version = db::version(&state.db, doc.id, number)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let base = doc_base(&doc.uuid, number);
     let pages = db::pages(&state.db, version.id).await?;
 
     let mut page = None;
@@ -623,12 +647,15 @@ async fn show_page(
         return Ok(Redirect::to(&format!("{base}{canonical}")).into_response());
     }
 
-    let answers = db::user_answers(&state.db, version.id, &page.path, user.id).await?;
+    let answers = match member {
+        Some(user) => db::user_answers(&state.db, version.id, &page.path, user.id).await?,
+        None => HashMap::new(),
+    };
     let format = Format::parse(&page.format).unwrap_or(Format::Md);
     let images: HashMap<String, String> = db::version_images(&state.db, version.id)
         .await?
         .into_iter()
-        .map(|i| (i.name, image_path(&doc.slug, &i.sha256)))
+        .map(|i| (i.name, image_path(&doc.uuid, &i.sha256)))
         .collect();
     let opts = Options {
         page_path: &page.path,
@@ -637,7 +664,12 @@ async fn show_page(
         images: &images,
     };
     let rendered = render::render(&page.source, format, &opts);
-    let selections = db::page_selections(&state.db, version.id, &page.path).await?;
+    // Comments are between the owner and the people it is shared with.
+    let selections = match member {
+        Some(_) => db::page_selections(&state.db, version.id, &page.path).await?,
+        None => Vec::new(),
+    };
+    let owner = member.filter(|u| u.id == doc.owner_id);
     let nav = paths::nav_tree(
         &pages
             .iter()
@@ -646,7 +678,7 @@ async fn show_page(
     );
     let is_latest = number.is_none() || number == Some(doc.latest_version);
     let title = format!("{} · {}", page.title, doc.title);
-    let known_labels = if doc.owner_id == user.id {
+    let known_labels = if let Some(user) = owner {
         db::owner_labels(&state.db, user.id).await?
     } else {
         Vec::new()
@@ -656,27 +688,31 @@ async fn show_page(
         div.doc-layout {
             nav.doc-nav #doc-nav aria-label="Pages" {
                 a.doc-title href=(base) { (doc.title) }
-                a.version-link href={ "/d/" (doc.slug) "/-/versions" } {
+                a.version-link href={ "/d/" (doc.uuid) "/-/versions" } {
                     "Version " (version.number)
                     @if is_latest { " (latest)" }
                 }
-                @if doc.owner_id == user.id {
+                @if owner.is_some() {
                     (labels_editor(&doc, &known_labels, &viewer.csrf, &format!("{base}{canonical}")))
                 }
                 (nav_list(&nav, &base, &page.path))
                 div.doc-links {
-                    a href={ "/d/" (doc.slug) "/-/feedback" } { "All feedback" }
-                    @if doc.owner_id == user.id {
-                        a href={ "/d/" (doc.slug) "/-/share" } { "Share" }
-                    } @else {
+                    @if member.is_some() {
+                        a href={ "/d/" (doc.uuid) "/-/feedback" } { "All feedback" }
+                    }
+                    @if owner.is_some() {
+                        a href={ "/d/" (doc.uuid) "/-/share" } { (if doc.public { "Share (public)" } else { "Share" }) }
+                    } @else if member.is_some() {
                         span.muted { "Shared by " (doc.owner) }
+                    } @else {
+                        span.muted { "Public document by " (doc.owner) }
                     }
                 }
             }
             main.doc-main {
-                @if doc.owner_id == user.id && is_latest {
+                @if owner.is_some() && is_latest {
                     div.doc-actions {
-                        a.button href={ "/d/" (doc.slug) "/-/edit/" (canonical) } title="Edit the document's pages and save them as a new version" {
+                        a.button href={ "/d/" (doc.uuid) "/-/edit/" (canonical) } title="Edit the document's pages and save them as a new version" {
                             "✎ Edit"
                         }
                     }
@@ -684,7 +720,7 @@ async fn show_page(
                 @if !is_latest {
                     div.banner {
                         "You are viewing version " (version.number) ". "
-                        a href={ (doc_base(&doc.slug, None)) (canonical) } { "Go to the latest version (v" (doc.latest_version) ")" }
+                        a href={ (doc_base(&doc.uuid, None)) (canonical) } { "Go to the latest version (v" (doc.latest_version) ")" }
                     }
                 }
                 div.doc-body.has-comments[!selections.is_empty()] {
@@ -692,7 +728,9 @@ async fn show_page(
                         @match &rendered {
                             Ok(r) => {
                                 @for w in &r.warnings { div.render-warning { "⚠ " (w) } }
-                                article.doc-content data-version-id=(version.id) data-page=(page.path) {
+                                // Readers who aren't members can't answer or comment: without
+                                // `data-version-id` the page script saves nothing.
+                                article.doc-content data-version-id=[member.map(|_| version.id)] data-readonly[member.is_none()] data-page=(page.path) {
                                     @if !r.has_h1 { h1 { (page.title) } }
                                     (PreEscaped(&r.html))
                                 }
@@ -703,7 +741,7 @@ async fn show_page(
                             }
                         }
                     }
-                    (comment_rail(&selections, user.id))
+                    @if let Some(user) = member { (comment_rail(&selections, user.id)) }
                 }
             }
             aside.doc-aside {
@@ -727,7 +765,7 @@ async fn show_page(
     Ok(shell(
         Shell {
             title: &title,
-            user: Some(user),
+            user: viewer.user.as_ref(),
             csrf: &viewer.csrf,
             body_class: "doc",
         },
@@ -760,7 +798,7 @@ fn comment_rail(selections: &[db::Selection], user_id: i64) -> Markup {
 /// The document's labels, which its owner can add to and remove from (with
 /// suggestions from the labels they already use).
 fn labels_editor(doc: &DocumentSummary, known: &[String], csrf: &str, next: &str) -> Markup {
-    let action = format!("/d/{}/-/labels", doc.slug);
+    let action = format!("/d/{}/-/labels", doc.uuid);
     html! {
         div.doc-labels {
             @for l in &doc.labels {
@@ -822,7 +860,7 @@ pub async fn update_labels(
     db::set_labels(&state.db, user.id, &doc.slug, &wanted).await?;
     Ok(Redirect::to(&match f.next {
         Some(n) => safe_next(Some(&n)),
-        None => doc_base(&doc.slug, None),
+        None => doc_base(&doc.uuid, None),
     }))
 }
 
@@ -846,24 +884,24 @@ fn nav_list(nodes: &[NavNode], base: &str, current: &str) -> Markup {
 pub async fn versions_page(
     State(state): State<AppState>,
     viewer: Viewer,
-    Path(slug): Path<String>,
-) -> AppResult<Markup> {
-    let user = viewer.require()?;
-    let doc = db::get_document(&state.db, &slug, user)
-        .await?
-        .ok_or(AppError::NotFound)?;
+    Path(key): Path<String>,
+) -> AppResult<Response> {
+    let doc = find_doc(&state, &key, &viewer).await?.doc;
+    if let Some(r) = to_uuid(&viewer, &key, &doc) {
+        return Ok(r);
+    }
     let versions = db::versions(&state.db, doc.id).await?;
     Ok(layout::simple(
         &format!("Versions · {}", doc.title),
-        Some(user),
+        viewer.user.as_ref(),
         &viewer.csrf,
         html! {
-            p.crumbs { a href=(doc_base(&doc.slug, None)) { (doc.title) } " / Versions" }
+            p.crumbs { a href=(doc_base(&doc.uuid, None)) { (doc.title) } " / Versions" }
             h1 { "Versions" }
             ol.versions reversed {
                 @for v in &versions {
                     li {
-                        a href=(doc_base(&doc.slug, Some(v.number))) { "Version " (v.number) }
+                        a href=(doc_base(&doc.uuid, Some(v.number))) { "Version " (v.number) }
                         @if v.number == doc.latest_version { " " span.badge { "latest" } }
                         " — " (v.author) ", " (time(v.created_at))
                         @if let Some(m) = &v.message { p.muted { (m) } }
@@ -871,26 +909,31 @@ pub async fn versions_page(
                 }
             }
         },
-    ))
+    )
+    .into_response())
 }
 
+/// Everyone's answers and comments: for the owner and the people it is shared with only.
 pub async fn feedback_page(
     State(state): State<AppState>,
     viewer: Viewer,
-    Path(slug): Path<String>,
-) -> AppResult<Markup> {
+    Path(key): Path<String>,
+) -> AppResult<Response> {
     let user = viewer.require()?;
-    let doc = db::get_document(&state.db, &slug, user)
+    let doc = db::get_document(&state.db, &key, user)
         .await?
         .ok_or(AppError::NotFound)?;
+    if let Some(r) = to_uuid(&viewer, &key, &doc) {
+        return Ok(r);
+    }
     let (responses, selections) = db::feedback(&state.db, doc.id, None, 0).await?;
-    let link = |version: i64, page: &str| format!("{}{}", doc_base(&doc.slug, Some(version)), paths::url_suffix(page));
+    let link = |version: i64, page: &str| format!("{}{}", doc_base(&doc.uuid, Some(version)), paths::url_suffix(page));
     Ok(layout::simple(
         &format!("Feedback · {}", doc.title),
         Some(user),
         &viewer.csrf,
         html! {
-            p.crumbs { a href=(doc_base(&doc.slug, None)) { (doc.title) } " / Feedback" }
+            p.crumbs { a href=(doc_base(&doc.uuid, None)) { (doc.title) } " / Feedback" }
             h1 { "Feedback" }
             p.muted { "Everything readers have answered or commented. Agents get the same data from the "
                 code { "get_feedback" } " MCP tool." }
@@ -925,7 +968,8 @@ pub async fn feedback_page(
                 }
             }
         },
-    ))
+    )
+    .into_response())
 }
 
 fn answer_text(v: &serde_json::Value) -> String {
@@ -1043,10 +1087,13 @@ pub async fn revoke_token(
 
 const SHARE_FORBIDDEN: &str = "Only the owner can change who this document is shared with.";
 
-pub async fn share_page(State(state): State<AppState>, viewer: Viewer, Path(slug): Path<String>) -> AppResult<Markup> {
+pub async fn share_page(State(state): State<AppState>, viewer: Viewer, Path(key): Path<String>) -> AppResult<Response> {
     let user = viewer.require()?;
-    let doc = owned_doc(&state, &slug, user, SHARE_FORBIDDEN).await?;
-    render_share(&state, &viewer, user, &doc, None).await
+    let doc = owned_doc(&state, &key, user, SHARE_FORBIDDEN).await?;
+    if let Some(r) = to_uuid(&viewer, &key, &doc) {
+        return Ok(r);
+    }
+    Ok(render_share(&state, &viewer, user, &doc, None).await?.into_response())
 }
 
 async fn owned_doc(state: &AppState, slug: &str, user: &User, forbidden: &str) -> AppResult<DocumentSummary> {
@@ -1068,7 +1115,7 @@ async fn render_share(
 ) -> AppResult<Markup> {
     let shares = db::shares(&state.db, doc.id).await?;
     let token = db::share_token(&state.db, doc.id).await?;
-    let action = format!("/d/{}/-/share", doc.slug);
+    let action = format!("/d/{}/-/share", doc.uuid);
     let button = |label: &str, act: &str, login: Option<&str>, class: &str| {
         html! {
             form.inline method="post" action=(action) {
@@ -1084,10 +1131,11 @@ async fn render_share(
         Some(user),
         &viewer.csrf,
         html! {
-            p.crumbs { a href=(doc_base(&doc.slug, None)) { (doc.title) } " / Share" }
+            p.crumbs { a href=(doc_base(&doc.uuid, None)) { (doc.title) } " / Share" }
             h1 { "Share" }
-            p { "Only you and the people listed here can see this document, answer its questions and comment on it. "
-                "Only you (and your agents) can publish new versions." }
+            p { "Only you and the people listed here can see this document, answer its questions and comment on it"
+                @if doc.public { " (anyone with the link can read it: it's public)" }
+                ". Only you (and your agents) can publish new versions." }
             @if let Some(e) = &error { div.render-error { (e) } }
             h2 { "People" }
             ul.share-list {
@@ -1117,6 +1165,17 @@ async fn render_share(
                     p.muted { "Link sharing is off." }
                     (button("Create a share link", "link_on", None, "primary"))
                 }
+            }
+            h2 { "Public" }
+            @if doc.public {
+                p { "Anyone with this link can read the document and its earlier versions, without signing in:" }
+                pre { code { (state.config.base_url) (doc_base(&doc.uuid, None)) } }
+                p.muted.small { "They can't answer its questions, comment, or see the feedback: that stays with the people above. "
+                    "The link has a random ID in it, so the document can't be found by guessing." }
+                (button("Make private", "public_off", None, "danger"))
+            } @else {
+                p.muted { "Private: only you and the people above can open it. Make it public to let anyone with its link read it, without signing in." }
+                (button("Make public", "public_on", None, "primary"))
             }
         },
     ))
@@ -1166,9 +1225,12 @@ pub async fn share_update(
         "link_off" => {
             db::set_share_token(&state.db, doc.id, false).await?;
         }
+        "public_on" | "public_off" => {
+            db::set_public(&state.db, doc.id, f.action == "public_on").await?;
+        }
         _ => return Err(AppError::BadRequest("unknown action".into())),
     }
-    Ok(Redirect::to(&format!("/d/{}/-/share", doc.slug)).into_response())
+    Ok(Redirect::to(&format!("/d/{}/-/share", doc.uuid)).into_response())
 }
 
 /// `/s/{token}`: join a document through its share link.
@@ -1179,7 +1241,7 @@ pub async fn share_link(
 ) -> AppResult<Redirect> {
     let user = viewer.require()?;
     match db::accept_share_link(&state.db, &token, user).await? {
-        Some(slug) => Ok(Redirect::to(&doc_base(&slug, None))),
+        Some(uuid) => Ok(Redirect::to(&doc_base(&uuid, None))),
         None => Err(AppError::NotFound),
     }
 }
@@ -1284,14 +1346,14 @@ async fn edit(State(state): State<AppState>, viewer: Viewer, slug: String, suffi
         })).collect::<Vec<_>>(),
         "open": open,
         "images": images.iter().map(|i| &i.name).collect::<Vec<_>>(),
-        "cancelUrl": format!("{}{}", doc_base(&doc.slug, None), paths::url_suffix(&open)),
+        "cancelUrl": format!("{}{}", doc_base(&doc.uuid, None), paths::url_suffix(&open)),
     });
     Ok(editor_shell(
         &viewer,
         user,
         &format!("Edit · {}", doc.title),
-        &format!("/api/documents/{}/versions", doc.slug),
-        Some(&doc.slug),
+        &format!("/api/documents/{}/versions", doc.uuid),
+        Some(&doc.uuid),
         data,
     )
     .into_response())

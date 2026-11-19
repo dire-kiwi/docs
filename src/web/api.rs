@@ -294,10 +294,10 @@ pub async fn preview(
     if let Some(slug) = &req.slug
         && let Some(doc) = db::get_document(&state.db, slug, &user).await?
     {
-        base = pages::doc_base(&doc.slug, None);
+        base = pages::doc_base(&doc.uuid, None);
         if let Some(v) = db::version(&state.db, doc.id, req.version).await? {
             for i in db::version_images(&state.db, v.id).await? {
-                images.insert(i.name, pages::image_path(&doc.slug, &i.sha256));
+                images.insert(i.name, pages::image_path(&doc.uuid, &i.sha256));
             }
         }
     }
@@ -330,11 +330,12 @@ pub struct SaveDocument {
     images: Vec<Value>,
 }
 
-fn saved(slug: &str, number: i64, published: &Value) -> Json<Value> {
+fn saved(doc: &db::DocumentSummary, number: i64, published: &Value) -> Json<Value> {
     Json(json!({
-        "slug": slug,
+        "slug": doc.slug,
+        "uuid": doc.uuid,
         "version": number,
-        "url": pages::doc_base(slug, None),
+        "url": pages::doc_base(&doc.uuid, None),
         "warnings": published.get("warnings").cloned().unwrap_or_else(|| json!([])),
     }))
 }
@@ -369,12 +370,15 @@ pub async fn create_document(
     )
     .await
     .map_err(|ToolError(e)| bad(e))?;
-    let slug = published["slug"].as_str().unwrap_or_default().to_string();
+    let slug = published["slug"].as_str().unwrap_or_default();
     let number = published["version"].as_i64().unwrap_or_default();
-    Ok(saved(&slug, number, &published))
+    let doc = db::get_document(&state.db, slug, &user)
+        .await?
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "no such document".into()))?;
+    Ok(saved(&doc, number, &published))
 }
 
-/// `POST /api/documents/{slug}/versions`: a new version of one of your documents from the
+/// `POST /api/documents/{uuid}/versions` (or its slug): a new version of one of your documents from the
 /// editor, with all its pages (pages left out are deleted; images it still uses are kept).
 /// 409 with `latest_version` if a version was published after `base_version`.
 pub async fn save_version(
@@ -440,5 +444,5 @@ pub async fn save_version(
     .await
     .map_err(|ToolError(e)| bad(e))?;
     let number = published["version"].as_i64().unwrap_or_default();
-    Ok(saved(&doc.slug, number, &published).into_response())
+    Ok(saved(&doc, number, &published).into_response())
 }
