@@ -658,6 +658,11 @@
   padding: 0;
   font-size: 12px;
   color: var(--fg-muted);
+  /* It stays the same size on screen whatever the zoom, and no wider than its frame is there. */
+  max-width: calc(100% * var(--z));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: left;
 }
 
 .dz-active .dz-name {
