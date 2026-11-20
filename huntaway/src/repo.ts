@@ -7,7 +7,8 @@ import { byLowercase } from "./rules.ts"
 // (`doc_version_images`), and `doc_comments` and `doc_answers` on a version's pages. Single statements; `Docs` puts them in
 // transactions. SQL errors and rows that don't decode are defects.
 
-export const Format = Schema.Literals(["md", "mdx"])
+/** A page's format: Markdown, MDX, or a mockup's HTML (which the design editor shows). */
+export const Format = Schema.Literals(["md", "mdx", "html"])
 export type Format = typeof Format.Type
 
 /** A document as it's kept, with its latest version's number, how many pages that has, and its labels (sorted). */
@@ -66,6 +67,8 @@ export const Comment = Schema.Struct({
   quote: Schema.String,
   prefix: Schema.String,
   suffix: Schema.String,
+  /** For a comment on a mockup's element: a CSS selector for it ("" for one on text). */
+  anchor: Schema.String,
   comment: Schema.String,
   created_at: Schema.String,
   updated_at: Schema.String,
@@ -127,17 +130,21 @@ const SELECT_DOC = `SELECT d.id, d.profile_id, d.slug, d.title, d.folder, d.crea
   (SELECT group_concat(label, char(10)) FROM doc_labels l WHERE l.doc_id = d.id) AS labels
   FROM docs d`
 
-const SELECT_COMMENT = `SELECT m.id, v.number AS version, m.page_path AS page, m.quote, m.prefix, m.suffix, m.comment, m.created_at, m.updated_at, m.sent_at
+const SELECT_COMMENT = `SELECT m.id, v.number AS version, m.page_path AS page, m.quote, m.prefix, m.suffix, m.anchor, m.comment, m.created_at, m.updated_at, m.sent_at
   FROM doc_comments m JOIN doc_versions v ON v.id = m.version_id`
 
 const SELECT_ANSWER = `SELECT v.number AS version, a.page_path AS page, a.field, a.value, a.updated_at, a.sent_at
   FROM doc_answers a JOIN doc_versions v ON v.id = a.version_id`
 
-/** What a new comment says: the quote, its context, and the comment. */
+/** The key of the design editor's draft of a document, beside the document editor's (its slug): no slug has a space. */
+export const designDraft = (slug: string) => `${slug} design`
+
+/** What a new comment says: the quote, its context (or, on a mockup, its element), and the comment. */
 export interface CommentText {
   readonly quote: string
   readonly prefix: string
   readonly suffix: string
+  readonly anchor: string
   readonly comment: string
 }
 
@@ -244,7 +251,7 @@ export const makeRepo = (sql: SqlClient.SqlClient) => {
       Effect.gen(function* () {
         const gone = yield* idRows(sql`DELETE FROM docs WHERE profile_id = ${profile} AND slug = ${slug} RETURNING id`)
         if (gone.length === 0) return false
-        yield* sql`DELETE FROM doc_drafts WHERE profile_id = ${profile} AND slug = ${slug}`.pipe(Effect.orDie)
+        yield* sql`DELETE FROM doc_drafts WHERE profile_id = ${profile} AND slug IN (${slug}, ${designDraft(slug)})`.pipe(Effect.orDie)
         yield* sql`DELETE FROM doc_images WHERE profile_id = ${profile} AND NOT EXISTS (SELECT 1 FROM doc_version_images vi
           JOIN doc_versions v ON v.id = vi.version_id JOIN docs d ON d.id = v.doc_id
           WHERE vi.sha256 = doc_images.sha256 AND d.profile_id = ${profile})`.pipe(Effect.orDie)
@@ -270,8 +277,8 @@ export const makeRepo = (sql: SqlClient.SqlClient) => {
     comment,
     addComment: (doc: string, version: string, page: string, text: CommentText, now: string) =>
       Effect.gen(function* () {
-        const added = yield* idRows(sql`INSERT INTO doc_comments (version_id, page_path, quote, prefix, suffix, comment, created_at, updated_at)
-          VALUES (${version}, ${page}, ${text.quote}, ${text.prefix}, ${text.suffix}, ${text.comment}, ${now}, ${now}) RETURNING CAST(id AS TEXT) AS id`)
+        const added = yield* idRows(sql`INSERT INTO doc_comments (version_id, page_path, quote, prefix, suffix, anchor, comment, created_at, updated_at)
+          VALUES (${version}, ${page}, ${text.quote}, ${text.prefix}, ${text.suffix}, ${text.anchor}, ${text.comment}, ${now}, ${now}) RETURNING CAST(id AS TEXT) AS id`)
         const made = yield* comment(doc, Number(added[0]?.id))
         return made ?? (yield* Effect.die(new Error("a comment just added isn't there")))
       }),

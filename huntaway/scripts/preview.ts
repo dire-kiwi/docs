@@ -1,5 +1,5 @@
 // The plugin's pages outside Huntaway, to work on them: `pnpm preview` (after `pnpm build`), then open
-// http://localhost:4100/docs/. It runs the plugin on a database of its own (.preview/plugin.db) with a pretend board (one
+// http://localhost:4100/docs/. It runs the plugin on a database of its own (.preview/plugin.db, or in PREVIEW_DIR) with a pretend board (one
 // profile, one project, one task) and shows each page as the board does: in a sandboxed frame with no network under a
 // strict policy, with the board's theme as CSS variables and `window.huntaway` as the bridge (calls go to the plugin
 // here). Messages the plugin sends to the task (comments and answers) are printed. The first run publishes a sample document.
@@ -17,6 +17,8 @@ import plugin, { makeParts } from "../src/index.ts"
 
 const PORT = Number(process.env["PORT"] ?? 4100)
 const BOARD = `http://localhost:${PORT}`
+/** Where its database and files are kept. */
+const DIR = process.env["PREVIEW_DIR"] ?? ".preview"
 const profile = { id: "preview", name: "Preview" }
 const project = { id: "pr", key: "DOC", name: "docs", profile_id: profile.id, repo_path: process.cwd() }
 const task: PluginTask = { id: "task-1", key: "DOC-1", title: "Write the preview", kind: "task", status: "in_progress", profile_id: profile.id, project_id: project.id }
@@ -26,7 +28,7 @@ const host: PluginHostShape = {
   plugin: "docs",
   hostId: "preview",
   hostName: "preview",
-  filesDir: ".preview/files",
+  filesDir: `${DIR}/files`,
   boardUrl: Effect.succeed(BOARD),
   pageUrl: (path) => Effect.succeed(`${BOARD}/docs/${path}`),
   profiles: Effect.succeed([profile]),
@@ -38,9 +40,9 @@ const host: PluginHostShape = {
   secrets: { get: () => Effect.succeed(Option.none()), set: () => Effect.void, remove: () => Effect.void },
 }
 
-mkdirSync(".preview", { recursive: true })
+mkdirSync(DIR, { recursive: true })
 const runtime = ManagedRuntime.make(
-  Layer.mergeAll(SqliteClient.layer({ filename: ".preview/plugin.db" }).pipe(Layer.orDie), NodeFileSystem.layer, NodePath.layer, FetchHttpClient.layer),
+  Layer.mergeAll(SqliteClient.layer({ filename: `${DIR}/plugin.db` }).pipe(Layer.orDie), NodeFileSystem.layer, NodePath.layer, FetchHttpClient.layer),
 )
 
 const parts = await runtime.runPromise(
@@ -86,10 +88,52 @@ if (listed.structuredContent.documents.length === 0) {
   })
 }
 
+if (!(listed.structuredContent.documents as Array<{ slug: string }>).some((d) => d.slug === "mockups")) {
+  const logo = `<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96"><rect width="96" height="96" rx="24" fill="#d9480f"/><circle cx="48" cy="48" r="20" fill="#fff"/></svg>`
+  const style = `:root { --bg: #fbfaf7; --ink: #1c1b22; --muted: #6b6a75; --accent: #d9480f; --card: #ffffff; --line: #e7e4dc; --radius: 14px; }
+  * { box-sizing: border-box; } body { margin: 0; background: var(--bg); color: var(--ink); font: 17px/1.55 system-ui, sans-serif; }
+  .cta, button { display: inline-block; padding: 12px 24px; border: 0; border-radius: 999px; background: var(--accent); color: #fff; font: inherit; font-weight: 600; text-decoration: none; }`
+  await tool("publish_document", {
+    slug: "mockups",
+    title: "Mockups",
+    message: "Two screens to look at",
+    images: [{ name: "images/logo.png", data: (await sharp(Buffer.from(logo)).png().toBuffer()).toString("base64") }],
+    pages: [
+      { path: "index.md", content: "# Mockups\n\nTwo screens, as HTML pages: open one from the menu to see them in the design editor.\n" },
+      {
+        path: "screens/home.html",
+        content: `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Home</title><style>${style}
+  header { display: flex; align-items: center; gap: 14px; padding: 18px 48px; border-bottom: 1px solid var(--line); } header img { width: 36px; height: 36px; }
+  .hero { padding: 88px 48px 64px; max-width: 900px; } h1 { font: 700 60px/1.05 Georgia, serif; margin: 0 0 18px; } .hero p { font-size: 21px; color: var(--muted); margin: 0 0 28px; }
+  .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; padding: 0 48px 88px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 24px; } .card h3 { margin: 0 0 8px; } .card p { margin: 0; color: var(--muted); }
+  @media (max-width: 800px) { .hero { padding: 48px 20px; } h1 { font-size: 38px; } .cards { grid-template-columns: 1fr; padding: 0 20px 48px; } header { padding: 14px 20px; } }
+</style></head><body>
+<header><img src="../images/logo.png" alt=""><strong>Kea Notes</strong></header>
+<section class="hero"><h1>Notes that keep up with you</h1><p>Write once, find it anywhere.</p><a class="cta" href="/signup">Start writing free</a></section>
+<section class="cards"><div class="card"><h3>Fast capture</h3><p>One key from anywhere.</p></div><div class="card"><h3>Linked thinking</h3><p>Every note links both ways.</p></div><div class="card"><h3>Yours, offline</h3><p>Plain files on your machine.</p></div></section>
+</body></html>`,
+      },
+      {
+        path: "screens/sign-in.html",
+        content: `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Sign in</title><style>${style}
+  body { min-height: 100vh; display: grid; place-items: center; } form { width: 340px; display: grid; gap: 14px; padding: 28px; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); }
+  h1 { margin: 0; font: 700 26px Georgia, serif; } label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); } input { font: inherit; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; }
+</style></head><body><form><h1>Welcome back</h1><label>Email<input type="email" placeholder="you@example.com"></label><label>Password<input type="password"></label><button>Sign in</button></form></body></html>`,
+      },
+    ],
+  })
+}
+
 const session = { kind: "board" as const, device_id: null, scopes: ["read", "operate", "settings"] }
 const THEME =
   "color-scheme:dark;--color-bg:#0b0b0e;--color-fg:#e6e6ec;--color-muted:#9a9aab;--color-line-strong:#33333f;--color-panel-2:#16161d;--color-accent:#7c7cf8;--font-sans:ui-sans-serif,system-ui,sans-serif;--font-mono:ui-monospace,monospace"
-const FRAME_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:"
+// The board's policy for a plugin's frame (apps/web/src/components/task/htmlFrame.ts's FRAME_CSP, without its CDNs), and
+// the Trusted Types default policy it makes before the page's scripts: the design editor's frames depend on both.
+const FRAME_CSP =
+  "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' data: blob:; style-src 'unsafe-inline' data:; font-src data:; img-src data: blob:; " +
+  "media-src data: blob:; connect-src data: blob:; worker-src data: blob:; frame-src 'none'; form-action 'none'; base-uri 'none'; require-trusted-types-for 'script'"
+const TRUSTED = `<script>window.trustedTypes?.createPolicy("default", { createHTML: (s) => s, createScript: (s) => s, createScriptURL: (s) => s })</script>`
 
 /** The bridge in the frame, as the board's (apps/web/src/components/plugins/frameSource.ts), and links asking the page to follow them. */
 const bridge = (context: unknown) => `<script>(() => {
@@ -138,9 +182,9 @@ createServer(async (req, res) => {
     }
     if (!url.pathname.startsWith("/docs")) return res.writeHead(302, { location: "/docs/" }).end()
     const path = url.pathname.replace(/^\/docs\/?/, "")
-    const page = await runtime.runPromise(parts.pages!.render({ slot: "page", path, query: {}, task_id: null, session }))
+    const page = await runtime.runPromise(parts.pages!.render({ slot: "page", path, query: Object.fromEntries(url.searchParams), task_id: null, session }))
     if (page._tag === "Redirect") return res.writeHead(302, { location: `/docs/${page.path}` }).end()
-    const frame = `<!doctype html><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${FRAME_CSP}"><style>:root{${THEME}}html,body{margin:0}</style>${bridge({ host: "preview", plugin: "docs", slot: "page", path, task_id: null })}${page.html}`
+    const frame = `<!doctype html><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${FRAME_CSP}">${TRUSTED}<style>:root{${THEME}}html,body{margin:0}</style>${bridge({ host: "preview", plugin: "docs", slot: "page", path, task_id: null })}${page.html}`
     res.setHeader("content-type", "text/html; charset=utf-8")
     res.end(shell(page.title ?? "Docs", frame))
   } catch (e) {

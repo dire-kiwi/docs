@@ -11,6 +11,13 @@ import { CONTEXT, findQuote, indexText, offsetOf, rangeFor } from "../../fronten
 import { mountEditor } from "../../frontend/src/editor.ts"
 import type { Draft, EditorData, PreviewResult, SaveResult } from "../../frontend/src/editor.ts"
 import editorCss from "../../frontend/src/editor.css"
+import { mountDesign } from "../../frontend/src/design/design.ts"
+import type { DesignComment, DesignData, DesignDraft, DesignSaved } from "../../frontend/src/design/design.ts"
+import { remoteFrame } from "../../frontend/src/design/frames.ts"
+import designCss from "../../frontend/src/design/design.css"
+
+/** The design editor's script for a mockup's frame (frontend/src/design/agent.ts, bundled: see scripts/build.mjs). */
+declare const DESIGN_AGENT: string
 
 interface Bridge {
   call(method: string, payload?: unknown): Promise<unknown>
@@ -29,7 +36,10 @@ interface State {
   task?: { id: string; key: string; title: string } | null
   /** The editor's page: what it opens with, and the changes it had kept and not saved. */
   editor?: EditorData
-  draft?: Draft | null
+  /** The editor's draft, or on a mockup's page the design editor's. */
+  draft?: Draft | DesignDraft | null
+  /** A mockup's page: what the design editor opens with. */
+  design?: DesignData
 }
 declare global {
   interface Window {
@@ -598,9 +608,66 @@ if (state.page === "edit" && state.editor) {
       },
       // Kept in the plugin: the board reloads its pages when any document changes.
       drafts: {
-        load: async () => state.draft ?? null,
+        load: async () => (state.draft ?? null) as Draft | null,
         save: async (draft) => void (await bridge.call("draft.keep", { profile: state.profile, slug, draft })),
         clear: async () => void (await bridge.call("draft.keep", { profile: state.profile, slug, draft: null })),
+      },
+    })
+  }
+}
+
+// ---- the design editor ---------------------------------------------------------------------------------------------------
+
+// A mockup's page: the hosted site's design editor (frontend/src/design/design.ts), with each mockup in a frame of its
+// own that runs the editor's agent and nothing of the mockup's (frames.ts), saving and commenting through the plugin's calls.
+if (state.page === "design" && state.design) {
+  const style = document.createElement("style")
+  style.textContent = designCss
+  document.head.append(style)
+  const root = document.getElementById("design")
+  const slug = state.slug ?? null
+  const task = state.task ?? null
+  interface Made {
+    id: number
+    page: string
+    quote: string
+    anchor: string
+    comment: string
+    created_at: string
+    sent_at: string | null
+  }
+  if (root) {
+    mountDesign(root, state.design, {
+      frame: (iframe) => remoteFrame(iframe, DESIGN_AGENT),
+      async save(request) {
+        return (await bridge.call("doc.save", {
+          profile: state.profile,
+          slug,
+          title: state.design?.title ?? "",
+          folder: null,
+          images: [],
+          design: true,
+          ...request,
+        })) as DesignSaved
+      },
+      async addComment(c) {
+        const made = (await bridge.call("comment.add", { ...where, version: state.version, prefix: "", suffix: "", ...c })) as Made
+        const comment: DesignComment = { id: made.id, page: made.page, quote: made.quote, anchor: made.anchor, comment: made.comment, user: "You", mine: true, created_at: made.created_at, sent: made.sent_at !== null }
+        return comment
+      },
+      async deleteComment(id) {
+        await bridge.call("comment.delete", { ...where, id })
+      },
+      // The comments go to the task that published the document, when the user sends them (with any unsent answers).
+      send: task === null ? undefined : { to: task.key, run: async () => void (await bridge.call("feedback.send", where)) },
+      go(url) {
+        bridge.navigate(url)
+      },
+      // Kept in the plugin: the board reloads its pages when any document changes.
+      drafts: {
+        load: async () => (state.draft ?? null) as DesignDraft | null,
+        save: async (draft) => void (await bridge.call("draft.keep", { profile: state.profile, slug, draft, design: true })),
+        clear: async () => void (await bridge.call("draft.keep", { profile: state.profile, slug, draft: null, design: true })),
       },
     })
   }

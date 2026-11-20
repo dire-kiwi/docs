@@ -117,6 +117,8 @@ export interface SentComment {
   readonly page: string
   readonly quote: string
   readonly comment: string
+  /** For a comment on a mockup's element: a CSS selector for it. */
+  readonly element?: string | undefined
   /** The board's URL of the page it's on, in its version. */
   readonly url: string
 }
@@ -148,7 +150,8 @@ export const feedbackMessage = (
   const parts = [`The user ${did} on the document "${doc.title}" (slug \`${doc.slug}\`):`]
   if (comments.length > 0 && answers.length > 0) parts.push("Comments:")
   comments.forEach((m, i) => {
-    parts.push(`${i + 1}. On version ${m.version}, page \`${m.page}\` (${m.url}):\n\n${blockQuote(m.quote)}\n\n${m.comment || "(No comment: just the quote.)"}`)
+    const on = m.element ? `, element \`${m.element}\`` : ""
+    parts.push(`${i + 1}. On version ${m.version}, page \`${m.page}\`${on} (${m.url}):\n\n${blockQuote(m.quote)}\n\n${m.comment || "(No comment: just the quote.)"}`)
   })
   if (comments.length > 0 && answers.length > 0) parts.push("Answers:")
   let where = ""

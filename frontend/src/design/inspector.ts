@@ -19,7 +19,7 @@ export interface InspectorApi {
   move(by: number): void;
   editText(): void;
   /** Absent where the reader can't comment. */
-  comment?: () => void;
+  comment?: (() => void) | undefined;
 }
 
 interface FieldDef {

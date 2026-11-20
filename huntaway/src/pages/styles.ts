@@ -1,7 +1,7 @@
 // The pages' own styles, over the board's theme (`--color-*`, `--font-*` on the frame's :root); the rendered page's are
 // the renderer's (`@dire-kiwi/docs-render/styles.css`), its variables set from the board's.
 
-export const READER_VARS = `.docs-render.docs-render,.editor{
+export const READER_VARS = `.docs-render.docs-render,.editor,.dz{
   --bg:var(--color-bg,#0b0b0e);--bg-soft:var(--color-panel-2,#16161d);--fg:var(--color-fg,#e6e6ec);
   --fg-muted:var(--color-muted,#9a9aab);--border:var(--color-line-strong,#33333f);--accent:var(--color-accent,#7c7cf8);
   --accent-fg:#fff;--bg-mark:color-mix(in srgb,var(--accent) 30%,transparent);--success:var(--color-st-done,#34d399);

@@ -72,6 +72,8 @@ export interface DesignData {
     versions: string | null;
     /** The document's pages as text, in the document editor. */
     source: string | null;
+    /** The document's own page (its labels, versions, sharing and the like), with this mockup named in it. */
+    details: string | null;
   };
 }
 
@@ -97,23 +99,27 @@ export type DesignSaved =
 export interface DesignBackend {
   /** Takes a frame that is in the page and makes it one the editor can show a mockup in. */
   frame(iframe: HTMLIFrameElement): Promise<FrameDriver>;
-  save?(request: DesignSave): Promise<DesignSaved>;
-  addComment?(comment: {
-    page: string;
-    quote: string;
-    anchor: string;
-    comment: string;
-  }): Promise<DesignComment>;
-  deleteComment?(id: number): Promise<void>;
+  save?: ((request: DesignSave) => Promise<DesignSaved>) | undefined;
+  addComment?:
+    | ((comment: {
+        page: string;
+        quote: string;
+        anchor: string;
+        comment: string;
+      }) => Promise<DesignComment>)
+    | undefined;
+  deleteComment?: ((id: number) => Promise<void>) | undefined;
   /** Where comments are sent on to once written (the board's task), if they are. */
-  send?: { to: string; run(): Promise<void> };
+  send?: { to: string; run(): Promise<void> } | undefined;
   /** Leave for a URL (after saving). */
   go(url: string): void;
-  drafts?: {
-    load(): Promise<DesignDraft | null>;
-    save(draft: DesignDraft): Promise<void>;
-    clear(): Promise<void>;
-  };
+  drafts?:
+    | {
+        load(): Promise<DesignDraft | null>;
+        save(draft: DesignDraft): Promise<void>;
+        clear(): Promise<void>;
+      }
+    | undefined;
 }
 
 const PRESETS = [
@@ -308,6 +314,17 @@ export function mountDesign(
             title: "Edit the pages' sources as text",
           },
           "Edit as text…",
+        )
+      : null,
+    data.links.details
+      ? h(
+          "a",
+          {
+            className: "dz-item dz-muted",
+            href: data.links.details,
+            title: "The document's page: its labels, versions, feedback and sharing",
+          },
+          "Document details…",
         )
       : null,
     h("h3", {}, "Layers"),

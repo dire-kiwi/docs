@@ -348,7 +348,10 @@ export function createCore(win: Window, emit: (event: FrameEvent) => void): Fram
     },
 
     serialize() {
-      const clone = doc.documentElement.cloneNode(true) as Element;
+      // The copy is made in a document that shows nothing, so that putting its images'
+      // names back doesn't make the browser go and fetch them.
+      const inert = doc.implementation.createHTMLDocument("");
+      const clone = inert.importNode(doc.documentElement, true);
       if (editing) {
         // Text being edited in place stays so; the copy is as it will be when that ends.
         let copy: Element | undefined = clone;

@@ -62,15 +62,17 @@ export const makeCalls = (docs: Docs, hosted: Hosted): Readonly<Record<string, P
       message: Schema.NullOr(Schema.String),
       pages: Schema.Array(Schema.Unknown),
       images: Schema.Array(Schema.Unknown),
+      // From the design editor: only the mockups it changed (the other pages are kept).
+      design: Schema.optionalKey(Schema.Boolean),
     }),
     success: Anything,
     handle: ({ profile, ...input }) => docs.save(profile, input),
   }),
   "draft.keep": pluginCall({
     scope: "operate",
-    payload: Schema.Struct({ profile: Schema.String, slug: Schema.NullOr(Schema.String), draft: Schema.Unknown }),
+    payload: Schema.Struct({ profile: Schema.String, slug: Schema.NullOr(Schema.String), draft: Schema.Unknown, design: Schema.optionalKey(Schema.Boolean) }),
     success: Ok,
-    handle: ({ profile, slug, draft }) => Effect.as(docs.keepDraft(profile, slug, draft ?? null), ok),
+    handle: ({ profile, slug, draft, design }) => Effect.as(docs.keepDraft(profile, slug, draft ?? null, design === true), ok),
   }),
   "comment.add": pluginCall({
     scope: "operate",
@@ -81,6 +83,8 @@ export const makeCalls = (docs: Docs, hosted: Hosted): Readonly<Record<string, P
       quote: Schema.String,
       prefix: Schema.String,
       suffix: Schema.String,
+      // On a mockup: a CSS selector for the element the comment is on.
+      anchor: Schema.optionalKey(Schema.String),
       comment: Schema.String,
     }),
     success: Comment,

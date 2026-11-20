@@ -682,32 +682,47 @@ pub async fn doc_redirect(Path(slug): Path<String>) -> Redirect {
     Redirect::permanent(&doc_base(&slug, None))
 }
 
-pub async fn doc_root(state: State<AppState>, viewer: Viewer, Path(slug): Path<String>) -> AppResult<Response> {
-    show_page(state, viewer, slug, None, String::new()).await
+#[derive(Deserialize)]
+pub struct PageQuery {
+    /// On a mockup's page: show the document's own page (its menu, labels, feedback and
+    /// sharing) rather than the design editor.
+    details: Option<String>,
+}
+
+pub async fn doc_root(
+    state: State<AppState>,
+    viewer: Viewer,
+    Path(slug): Path<String>,
+    Query(q): Query<PageQuery>,
+) -> AppResult<Response> {
+    show_page(state, viewer, slug, None, String::new(), q.details.is_some()).await
 }
 
 pub async fn doc_page(
     state: State<AppState>,
     viewer: Viewer,
     Path((slug, path)): Path<(String, String)>,
+    Query(q): Query<PageQuery>,
 ) -> AppResult<Response> {
-    show_page(state, viewer, slug, None, path).await
+    show_page(state, viewer, slug, None, path, q.details.is_some()).await
 }
 
 pub async fn version_root(
     state: State<AppState>,
     viewer: Viewer,
     Path((slug, n)): Path<(String, i64)>,
+    Query(q): Query<PageQuery>,
 ) -> AppResult<Response> {
-    show_page(state, viewer, slug, Some(n), String::new()).await
+    show_page(state, viewer, slug, Some(n), String::new(), q.details.is_some()).await
 }
 
 pub async fn version_page(
     state: State<AppState>,
     viewer: Viewer,
     Path((slug, n, path)): Path<(String, i64, String)>,
+    Query(q): Query<PageQuery>,
 ) -> AppResult<Response> {
-    show_page(state, viewer, slug, Some(n), path).await
+    show_page(state, viewer, slug, Some(n), path, q.details.is_some()).await
 }
 
 async fn show_page(
@@ -716,6 +731,7 @@ async fn show_page(
     slug: String,
     number: Option<i64>,
     suffix: String,
+    details: bool,
 ) -> AppResult<Response> {
     let Found { doc, member } = find_doc(&state, &slug, &viewer).await?;
     if let Some(r) = to_uuid(&viewer, &slug, &doc) {
@@ -749,7 +765,7 @@ async fn show_page(
     }
 
     let format = Format::parse(&page.format).unwrap_or(Format::Md);
-    if format == Format::Html {
+    if format == Format::Html && !details {
         return design_view(&state, &viewer, &doc, member, &version, number, &pages, &page).await;
     }
     let answers = match member {
@@ -838,6 +854,12 @@ async fn show_page(
                                 @for w in &r.warnings { div.render-warning { "⚠ " (w) } }
                                 // Readers who aren't members can't answer or comment: without
                                 // `data-version-id` the page script saves nothing.
+                                @if format == Format::Html {
+                                    div.banner {
+                                        (page.title) " is a mockup. "
+                                        a href={ (base) (canonical) } { "Open it in the design editor" }
+                                    }
+                                }
                                 article.doc-content data-version-id=[member.map(|_| version.id)] data-readonly[member.is_none()] data-page=(page.path) {
                                     @if !r.has_h1 { h1 { (page.title) } }
                                     (PreEscaped(&r.html))
@@ -977,6 +999,7 @@ async fn design_view(
             "latest": (!is_latest).then(|| format!("{}{suffix}", doc_base(&doc.uuid, None))),
             "versions": format!("/d/{}/-/versions", doc.uuid),
             "source": can_edit.then(|| format!("/d/{}/-/edit/{suffix}", doc.uuid)),
+            "details": format!("{base}{suffix}?details=1"),
         },
     });
     Ok(shell(
