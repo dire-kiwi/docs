@@ -1,4 +1,5 @@
 import "./styles.css";
+import { initDesign } from "./design/design-site.ts";
 import { initEditor } from "./editor-site.ts";
 import { initFields } from "./fields.ts";
 import { initFolders } from "./folders.ts";
@@ -12,3 +13,4 @@ initFields();
 initFolders();
 initSelections();
 initEditor();
+initDesign();

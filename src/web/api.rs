@@ -202,6 +202,9 @@ pub struct AddSelection {
     prefix: String,
     #[serde(default)]
     suffix: String,
+    /// For a comment on a mockup's element: a CSS selector for it.
+    #[serde(default)]
+    anchor: String,
     #[serde(default)]
     comment: String,
 }
@@ -224,7 +227,7 @@ pub async fn add_selection(
     if quote.is_empty() {
         return Err(bad("select some text first"));
     }
-    if quote.chars().count() > 10_000 || req.comment.chars().count() > 20_000 {
+    if quote.chars().count() > 10_000 || req.comment.chars().count() > 20_000 || req.anchor.chars().count() > 2_000 {
         return Err(bad("selection or comment is too long"));
     }
     if !db::can_view_version(&state.db, req.version_id, user).await? {
@@ -242,6 +245,7 @@ pub async fn add_selection(
             quote,
             prefix: clip(&req.prefix, 200),
             suffix: clip(&req.suffix, 200),
+            anchor: req.anchor.trim(),
             comment: req.comment.trim(),
         },
     )
@@ -334,6 +338,9 @@ pub struct SaveDocument {
     pages: Vec<Value>,
     #[serde(default)]
     images: Vec<Value>,
+    /// Keep the pages that aren't given (the design editor saves only the mockups it changed).
+    #[serde(default)]
+    merge: bool,
 }
 
 fn saved(doc: &db::DocumentSummary, number: i64, published: &Value) -> Json<Value> {
@@ -385,7 +392,7 @@ pub async fn create_document(
 }
 
 /// `POST /api/documents/{uuid}/versions` (or its slug): a new version of one of your documents from the
-/// editor, with all its pages (pages left out are deleted; images it still uses are kept).
+/// editor, with all its pages (pages left out are deleted, unless `merge` is set; images it still uses are kept).
 /// 409 with `latest_version` if a version was published after `base_version`.
 pub async fn save_version(
     State(state): State<AppState>,
@@ -426,7 +433,9 @@ pub async fn save_version(
         .filter_map(|p| paths::normalize(p).ok())
         .collect();
     let mut delete = Vec::new();
-    if let Some(v) = db::version(&state.db, doc.id, None).await? {
+    if !req.merge
+        && let Some(v) = db::version(&state.db, doc.id, None).await?
+    {
         for p in db::pages(&state.db, v.id).await? {
             if !kept.contains(&p.path) {
                 delete.push(p.path);

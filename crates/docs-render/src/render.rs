@@ -18,6 +18,8 @@ use crate::paths;
 pub enum Format {
     Md,
     Mdx,
+    /// A mockup: a self-contained HTML document the design editor shows (see [`crate::mockup`]).
+    Html,
 }
 
 impl Format {
@@ -25,6 +27,7 @@ impl Format {
         match s.trim().trim_start_matches('.').to_ascii_lowercase().as_str() {
             "md" | "markdown" | "gfm" | "commonmark" => Some(Format::Md),
             "mdx" => Some(Format::Mdx),
+            "html" | "htm" => Some(Format::Html),
             _ => None,
         }
     }
@@ -32,6 +35,15 @@ impl Format {
         match self {
             Format::Md => "md",
             Format::Mdx => "mdx",
+            Format::Html => "html",
+        }
+    }
+    /// What the format is called in messages.
+    pub fn name(self) -> &'static str {
+        match self {
+            Format::Md => "md",
+            Format::Mdx => "mdx",
+            Format::Html => "HTML",
         }
     }
 }
@@ -79,9 +91,17 @@ pub struct Meta {
     pub order: Option<i64>,
 }
 
+/// The Markdown tree of a page. A mockup ([`Format::Html`]) has none: it parses as an empty
+/// page, and [`render`] answers for it without parsing.
 pub fn parse(source: &str, format: Format) -> Result<Node, String> {
     let gfm = Constructs::gfm();
     let constructs = match format {
+        Format::Html => {
+            return Ok(Node::Root(markdown::mdast::Root {
+                children: Vec::new(),
+                position: None,
+            }));
+        }
         Format::Md => Constructs {
             frontmatter: true,
             ..gfm
@@ -135,6 +155,9 @@ pub fn meta(root: &Node) -> Meta {
 }
 
 pub fn render(source: &str, format: Format, opts: &Options) -> Result<Rendered, String> {
+    if format == Format::Html {
+        return Ok(crate::mockup::rendered(source));
+    }
     let root = parse(source, format)?;
     Ok(render_tree(&root, opts))
 }

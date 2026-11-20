@@ -1509,13 +1509,15 @@ pub struct NewSelection<'a> {
     pub quote: &'a str,
     pub prefix: &'a str,
     pub suffix: &'a str,
+    /// For a comment on a mockup's element: a CSS selector for it.
+    pub anchor: &'a str,
     pub comment: &'a str,
 }
 
 pub async fn add_selection(db: &Db, s: NewSelection<'_>) -> Result<i64> {
     let (id,): (i64,) = sqlx::query_as(
-        "INSERT INTO selections (version_id, page_path, user_id, quote, prefix, suffix, comment, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+        "INSERT INTO selections (version_id, page_path, user_id, quote, prefix, suffix, anchor, comment, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
     )
     .bind(s.version_id)
     .bind(s.page_path)
@@ -1523,6 +1525,7 @@ pub async fn add_selection(db: &Db, s: NewSelection<'_>) -> Result<i64> {
     .bind(s.quote)
     .bind(s.prefix)
     .bind(s.suffix)
+    .bind(s.anchor)
     .bind(s.comment)
     .bind(now())
     .fetch_one(db)
@@ -1550,6 +1553,8 @@ pub struct Selection {
     pub quote: String,
     pub prefix: String,
     pub suffix: String,
+    /// A CSS selector for the element of a mockup the comment is on ("" for one on text).
+    pub anchor: String,
     pub comment: String,
     pub created_at: i64,
 }
@@ -1574,12 +1579,25 @@ impl Response {
 pub async fn page_selections(db: &Db, version_id: i64, page_path: &str) -> Result<Vec<Selection>> {
     Ok(sqlx::query_as::<_, Selection>(
         "SELECT s.id, v.number AS version, s.page_path AS page, u.login AS user, s.user_id, s.quote, s.prefix,
-                s.suffix, s.comment, s.created_at
+                s.suffix, s.anchor, s.comment, s.created_at
          FROM selections s JOIN users u ON u.id = s.user_id JOIN versions v ON v.id = s.version_id
          WHERE s.version_id = ? AND s.page_path = ? ORDER BY s.created_at",
     )
     .bind(version_id)
     .bind(page_path)
+    .fetch_all(db)
+    .await?)
+}
+
+/// The comments on every page of a version, oldest first.
+pub async fn version_selections(db: &Db, version_id: i64) -> Result<Vec<Selection>> {
+    Ok(sqlx::query_as::<_, Selection>(
+        "SELECT s.id, v.number AS version, s.page_path AS page, u.login AS user, s.user_id, s.quote, s.prefix,
+                s.suffix, s.anchor, s.comment, s.created_at
+         FROM selections s JOIN users u ON u.id = s.user_id JOIN versions v ON v.id = s.version_id
+         WHERE s.version_id = ? ORDER BY s.created_at, s.id",
+    )
+    .bind(version_id)
     .fetch_all(db)
     .await?)
 }
@@ -1606,7 +1624,7 @@ pub async fn feedback(
     .await?;
     let selections = sqlx::query_as::<_, Selection>(
         "SELECT s.id, v.number AS version, s.page_path AS page, u.login AS user, s.user_id, s.quote, s.prefix,
-                s.suffix, s.comment, s.created_at
+                s.suffix, s.anchor, s.comment, s.created_at
          FROM selections s JOIN versions v ON v.id = s.version_id JOIN users u ON u.id = s.user_id
          WHERE v.document_id = ? AND (? = -1 OR v.number = ?) AND s.created_at >= ?
          ORDER BY v.number, s.page_path, s.created_at",

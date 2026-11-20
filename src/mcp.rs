@@ -724,6 +724,7 @@ impl Server<'_> {
                 "comment": s.comment,
                 "context_before": s.prefix,
                 "context_after": s.suffix,
+                "element": (!s.anchor.is_empty()).then_some(&s.anchor),
                 "user": s.user,
                 "created_at": s.created_at,
             })).collect::<Vec<_>>(),

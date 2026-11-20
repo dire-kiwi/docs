@@ -22,7 +22,8 @@ use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(typescript_custom_section)]
 const TS_TYPES: &str = r#"
-export type Format = "md" | "mdx";
+/** "html" is a mockup: a self-contained HTML document, which `render` gives no HTML for (the design editor shows its source). */
+export type Format = "md" | "mdx" | "html";
 
 export interface RenderOptions {
   /** Path of the page being rendered (e.g. "plan/phase-1"), used to resolve relative links. */
@@ -234,10 +235,13 @@ fn type_name(v: &JsValue) -> String {
 }
 
 fn format(v: &JsValue) -> JsResult<Format> {
-    let s = v
-        .as_string()
-        .ok_or_else(|| err(format!("format must be \"md\" or \"mdx\", not {}", type_name(v))))?;
-    Format::parse(&s).ok_or_else(|| err(format!("format must be md or mdx, not {s:?}")))
+    let s = v.as_string().ok_or_else(|| {
+        err(format!(
+            "format must be \"md\", \"mdx\" or \"html\", not {}",
+            type_name(v)
+        ))
+    })?;
+    Format::parse(&s).ok_or_else(|| err(format!("format must be md, mdx or html, not {s:?}")))
 }
 
 /// Render a page to sanitized HTML. Without options, the page is `index` with base URL `/`.

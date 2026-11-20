@@ -25,6 +25,12 @@ for their names, props and examples, and use format \"mdx\". \
 fix them and publish again. Don't install or run npm packages, renderers or other tools to check pages. \
 Add form fields when you need a decision or input from the reader, \
 then call `get_feedback` later to read their answers and any text they selected and commented on. \
+To show a design, publish mockups: pages with format \"html\" (or a `.html` path), each a complete, self-contained HTML document \
+with its CSS in a `<style>` element and no scripts (they don't run), one page per screen, state or variant. \
+People open them in the design editor: every mockup of the document is a frame on a canvas they zoom and pan, at desktop, tablet or phone width. \
+There they inspect elements, change text, colours, type and spacing, tune the CSS custom properties the mockup defines \
+(so define the design's colours, fonts and sizes as variables on `:root`), comment on elements, and save their changes as a new version. \
+`get_feedback` gives their comments with each element's selector (`element`), and `read_page` the HTML as they last saved it. \
 People can also edit a document themselves on the site, which publishes a new version: before you publish a new version \
 of a document they may have edited, read its latest pages (`get_document`, `read_page`) so you don't undo their changes. \
 Documents are private to the user you act for, unless they belong to an organization: the user may be a member of organizations (`list_organizations`), \
@@ -79,7 +85,7 @@ pub fn tool_definitions() -> Value {
         {
             "name": "read_page",
             "title": "Read page",
-            "description": "Read the Markdown/MDX source of one page.",
+            "description": "Read the source of one page: its Markdown or MDX, or a mockup's HTML.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "slug": slug, "path": { "type": "string", "description": "Page path, e.g. \"index\" or \"plan/phase-1\"." }, "version": version },
@@ -91,7 +97,9 @@ pub fn tool_definitions() -> Value {
             "name": "publish_document",
             "title": "Publish document",
             "description": "Create a document, or publish a new version of an existing one. Each call creates a new version. \
-    Pages are CommonMark/GFM Markdown (\"md\") or MDX (\"mdx\", which can use the components from list_components). \
+    Pages are CommonMark/GFM Markdown (\"md\"), MDX (\"mdx\", which can use the components from list_components) \
+    or mockups (\"html\": a complete, self-contained HTML document with its CSS in <style> and no scripts, which people open in the design editor \
+    to inspect, adjust and comment on; its title is its <title>). \
     Paths may be nested (\"plan/phase-1\"); \"index\" is the landing page and \"plan/index\" the page for the \"plan\" folder. \
     Pages are listed in the order given, unless their YAML frontmatter has `order: <n>`; the title comes from `title`, the frontmatter, or the first # heading. \
     Relative links between pages (\"phase-2.md\", \"../index.md\") work like links between files. \
@@ -116,9 +124,9 @@ pub fn tool_definitions() -> Value {
                         "items": {
                             "type": "object",
                             "properties": {
-                                "path": { "type": "string", "description": "Page path, e.g. \"index\", \"plan/phase-1\" or \"notes.md\"." },
-                                "content": { "type": "string", "description": "Markdown or MDX source." },
-                                "format": { "type": "string", "enum": ["md", "mdx"], "description": "Defaults to the path's extension, else mdx if the content uses <Components>, else md." },
+                                "path": { "type": "string", "description": "Page path, e.g. \"index\", \"plan/phase-1\", \"notes.md\" or \"screens/home.html\"." },
+                                "content": { "type": "string", "description": "Markdown or MDX source, or a mockup's HTML document." },
+                                "format": { "type": "string", "enum": ["md", "mdx", "html"], "description": "Defaults to the path's extension, else html if the content starts with <!doctype html> or <html>, else mdx if it uses <Components>, else md." },
                                 "title": { "type": "string", "description": "Page title for the menu." },
                             },
                             "required": ["path", "content"],
@@ -191,6 +199,7 @@ pub fn tool_definitions() -> Value {
             "name": "get_feedback",
             "title": "Get feedback",
             "description": "Read what people answered in a document's form fields and the text they selected and commented on. \
+    A comment on a mockup is on an element: `element` is a CSS selector for it in the page's HTML, and `quote` its tag and text. \
     Use `cursor` from the result as `since` to poll for new feedback.",
             "inputSchema": {
                 "type": "object",

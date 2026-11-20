@@ -7,6 +7,7 @@ use markdown::mdast::Node;
 use serde::Deserialize;
 
 use crate::images::{self, ImageFormat};
+use crate::mockup;
 use crate::paths;
 use crate::render::{self, Format, Options};
 
@@ -115,9 +116,11 @@ pub fn validate_publish(input: Vec<PageInput>, image_input: Vec<ImageInput>) -> 
             return Err(format!("page {path:?} is listed twice"));
         }
         let format = match p.format.as_deref() {
-            Some(f) => Format::parse(f).ok_or_else(|| format!("page {path:?}: format must be md or mdx"))?,
+            Some(f) => Format::parse(f).ok_or_else(|| format!("page {path:?}: format must be md, mdx or html"))?,
             None if p.path.trim().ends_with(".mdx") => Format::Mdx,
             None if p.path.trim().ends_with(".md") => Format::Md,
+            None if p.path.trim().ends_with(".html") || p.path.trim().ends_with(".htm") => Format::Html,
+            None if mockup::looks_like_html(&p.content) => Format::Html,
             None if looks_like_mdx(&p.content) => Format::Mdx,
             None => Format::Md,
         };
@@ -140,14 +143,23 @@ pub fn validate_publish(input: Vec<PageInput>, image_input: Vec<ImageInput>) -> 
         }
         let tree = render::parse(&content, format)
             .map_err(|e| format!("page {path:?} is not valid {}: {e}", format.as_str()))?;
-        let meta = render::meta(&tree);
+        let meta = match format {
+            Format::Html => render::Meta {
+                title: mockup::title(&content),
+                order: None,
+            },
+            _ => render::meta(&tree),
+        };
         let opts = Options {
             page_path: &path,
             base_url: "/",
             answers: &empty,
             images: &HashMap::new(),
         };
-        let rendered = render::render_tree(&tree, &opts);
+        let rendered = match format {
+            Format::Html => mockup::rendered(&content),
+            _ => render::render_tree(&tree, &opts),
+        };
         for w in rendered.warnings {
             warnings.push(PageWarning {
                 page: path.clone(),
@@ -248,8 +260,52 @@ mod tests {
         assert!(err(vec![page("../x", "")]).starts_with("invalid page path"));
         assert!(err(vec![page("a.mdx", "<Callout>\n\nunclosed")]).starts_with("page \"a\" is not valid mdx: "));
         let mut bad = page("a", "");
-        bad.format = Some("html".into());
-        assert_eq!(err(vec![bad]), "page \"a\": format must be md or mdx");
+        bad.format = Some("rst".into());
+        assert_eq!(err(vec![bad]), "page \"a\": format must be md, mdx or html");
+    }
+
+    #[test]
+    fn mockups_are_html_pages() {
+        let mockup = "<!doctype html>\n<html><head><title>Sign in</title></head>\n<body><img src=\"images/logo.png\"><Button>not a component</Button></body></html>";
+        let mut named = page("Screens/Home", "<main><h1>Home</h1><script>x()</script></main>");
+        named.format = Some("html".into());
+        let (pages, warnings) = validate_pages(vec![
+            page("index.md", "# Notes"),
+            page("screens/sign-in.html", mockup),
+            page("screens/detected", mockup),
+            named,
+        ])
+        .unwrap();
+        assert_eq!(pages[0].format, Format::Md);
+        // By its extension (which isn't part of its path), by what it starts with, and as asked.
+        assert_eq!(
+            (pages[1].path.as_str(), pages[1].format),
+            ("screens/sign-in", Format::Html)
+        );
+        assert_eq!(pages[2].format, Format::Html);
+        assert_eq!(pages[3].format, Format::Html);
+        assert_eq!(pages[1].title, "Sign in");
+        assert_eq!(pages[3].title, "Home");
+        assert_eq!(pages[1].source, mockup, "kept as written");
+        assert_eq!(pages[1].image_srcs, ["images/logo.png"]);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].page, "screens/home");
+        assert!(warnings[0].warning.contains("scripts"));
+
+        // Its inline images are taken out, as a Markdown page's are.
+        let inline = "<img src=\"data:image/gif;base64,R0lGODlh\"><style>a{background:url(data:image/gif;base64,R0lGODlh)}</style>";
+        let v = validate_publish(vec![page("a.html", inline)], Vec::new()).unwrap();
+        let name = images::inline_name(b"GIF89a");
+        assert_eq!(
+            v.pages[0].source,
+            format!("<img src=\"{name}\"><style>a{{background:url({name})}}</style>")
+        );
+        assert_eq!(v.pages[0].image_srcs, std::slice::from_ref(&name));
+        assert_eq!(v.images.len(), 1);
+        assert_eq!(
+            validate_pages(vec![page("a.html", ""), page("a.md", "")]).unwrap_err(),
+            "page \"a\" is listed twice"
+        );
     }
 
     #[test]
