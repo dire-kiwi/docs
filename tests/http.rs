@@ -3170,3 +3170,243 @@ async fn public_documents_can_be_read_by_anyone_with_the_link() {
     let got = t.tool(&alice, "get_document", json!({ "slug": "launch" })).await;
     assert_eq!(got["sharing"]["public"], false);
 }
+
+fn design_data(html: &str) -> Value {
+    let marker = "<script id=\"design-data\" type=\"application/json\">";
+    let start = html.find(marker).expect("design data") + marker.len();
+    let end = start + html[start..].find("</script>").unwrap();
+    serde_json::from_str(&html[start..end]).unwrap()
+}
+
+#[tokio::test]
+async fn mockups_open_in_the_design_editor() {
+    let t = TestApp::new().await;
+    let (cookie, token) = t.user("alice").await;
+    let (bob_cookie, _) = t.user("bob").await;
+    let home = "<!doctype html>\n<html><head><title>Home</title><style>:root { --accent: #d9480f } .hero { background: url(images/hero.png) }</style></head>\n\
+        <body><img src=\"../images/logo.png\" alt=\"\"><h1>Hello</h1><a class=\"cta\" href=\"/signup\">Start</a><script>alert(1)</script></body></html>";
+    let published = t
+        .tool(
+            &token,
+            "publish_document",
+            json!({
+                "slug": "kea",
+                "title": "Kea </script>",
+                "pages": [
+                    { "path": "index", "content": "# Notes\n\nSee the screens." },
+                    { "path": "screens/home.html", "content": home },
+                    { "path": "screens/sign-in", "format": "html", "content": "<main><h1>Sign in</h1></main>" },
+                ],
+                "images": [
+                    { "name": "images/logo.png", "data": b64(&png(16, 16)) },
+                    { "name": "screens/images/hero.png", "data": b64(&png(24, 16)) },
+                ],
+            }),
+        )
+        .await;
+    assert_eq!(published["version"], 1);
+    // A mockup's scripts don't run, which its publisher is told.
+    let warnings = published["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1, "{published}");
+    assert_eq!(warnings[0]["page"], "screens/home");
+
+    let got = t.tool(&token, "get_document", json!({ "slug": "kea" })).await;
+    let formats: Vec<(&str, &str)> = got["pages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| (p["path"].as_str().unwrap(), p["format"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        formats,
+        [("index", "md"), ("screens/home", "html"), ("screens/sign-in", "html")]
+    );
+    let read = t
+        .tool(
+            &token,
+            "read_page",
+            json!({ "slug": "kea", "path": "screens/home.html" }),
+        )
+        .await;
+    assert_eq!(
+        (read["format"].as_str(), read["title"].as_str()),
+        (Some("html"), Some("Home"))
+    );
+    assert_eq!(read["content"], home, "kept as written");
+
+    // Its page is the design editor, with every mockup of the version and where their images are.
+    let d = t.doc_path(&token, "kea").await;
+    let page = t.get(&format!("{d}/screens/home"), &cookie).await;
+    assert_eq!(page.status, StatusCode::OK, "{}", page.body);
+    assert!(page.body.contains("<main id=\"design\""), "{}", page.body);
+    assert!(!page.body.contains("<article"), "not the reader");
+    assert!(
+        page.body
+            .contains(&format!("data-save-url=\"/api/documents{}/versions\"", &d[2..]))
+    );
+    let data = design_data(&page.body);
+    assert_eq!(data["title"], "Kea </script>");
+    assert_eq!(
+        (data["version"].as_i64(), data["open"].as_str()),
+        (Some(1), Some("screens/home"))
+    );
+    assert_eq!(
+        (data["canEdit"].as_bool(), data["canComment"].as_bool()),
+        (Some(true), Some(true))
+    );
+    let mockups = data["pages"].as_array().unwrap();
+    assert_eq!(mockups.len(), 2, "the Markdown page isn't a mockup");
+    assert_eq!(mockups[0]["content"], home);
+    let images = mockups[0]["images"].as_object().unwrap();
+    assert_eq!(images.len(), 2, "{images:?}");
+    for reference in ["../images/logo.png", "images/hero.png"] {
+        let url = images[reference].as_str().unwrap();
+        assert!(
+            url.starts_with(&format!("{d}/-/images/")) && url.ends_with(".avif"),
+            "{url}"
+        );
+        assert_eq!(t.get(url, &cookie).await.status, StatusCode::OK);
+    }
+    assert_eq!(mockups[1]["title"], "Sign In", "from its path: it has no <title>");
+    assert_eq!(data["others"], json!([{ "title": "Notes", "url": format!("{d}/") }]));
+    assert_eq!(data["links"]["details"], format!("{d}/screens/home?details=1"));
+    assert_eq!(data["links"]["latest"], Value::Null);
+
+    // The document's own page still has it in its menu, and shows it with its details.
+    let index = t.get(&format!("{d}/"), &cookie).await;
+    assert!(index.body.contains("<article"));
+    assert!(index.body.contains(&format!("href=\"{d}/screens/home\"")));
+    let details = t.get(&format!("{d}/screens/home?details=1"), &cookie).await;
+    assert_eq!(details.status, StatusCode::OK);
+    assert!(details.body.contains("is a mockup"), "{}", details.body);
+    assert!(details.body.contains("Open it in the design editor"));
+    assert!(!details.body.contains("alert(1)"), "its source isn't put in the page");
+
+    // A comment on an element keeps its selector, which get_feedback gives the agent.
+    let version_id: i64 = attr_after(&page.body, "<main id=\"design\"", "data-version-id")
+        .parse()
+        .unwrap();
+    let csrf = csrf_of(&page.body);
+    let comment = json!({
+        "version_id": version_id, "page": "screens/home", "quote": "<a class=\"cta\">Start</a>",
+        "anchor": "body > a:nth-child(3)", "comment": "Make it louder",
+    });
+    let made = t.post_json("/api/selections", &cookie, &csrf, comment.clone()).await;
+    assert_eq!(made.status, StatusCode::CREATED, "{}", made.body);
+    let feedback = t.tool(&token, "get_feedback", json!({ "slug": "kea" })).await;
+    let s = &feedback["selections"][0];
+    assert_eq!(s["element"], "body > a:nth-child(3)");
+    assert_eq!(
+        (s["quote"].as_str(), s["comment"].as_str()),
+        (Some("<a class=\"cta\">Start</a>"), Some("Make it louder"))
+    );
+    let again = design_data(&t.get(&format!("{d}/screens/sign-in"), &cookie).await.body);
+    assert_eq!(again["open"], "screens/sign-in");
+    assert_eq!(again["comments"][0]["anchor"], "body > a:nth-child(3)");
+    assert_eq!(
+        (
+            again["comments"][0]["page"].as_str(),
+            again["comments"][0]["mine"].as_bool()
+        ),
+        (Some("screens/home"), Some(true))
+    );
+    let feedback_page = t.get(&format!("{d}/-/feedback"), &cookie).await;
+    assert!(
+        feedback_page.body.contains("body &gt; a:nth-child(3)"),
+        "{}",
+        feedback_page.body
+    );
+
+    // Someone it is shared with can look and comment, not save; a stranger sees nothing.
+    assert_eq!(
+        t.get(&format!("{d}/screens/home"), &bob_cookie).await.status,
+        StatusCode::NOT_FOUND
+    );
+    t.tool(&token, "share_document", json!({ "slug": "kea", "add_users": ["bob"] }))
+        .await;
+    let shared = t.get(&format!("{d}/screens/home"), &bob_cookie).await;
+    assert!(!shared.body.contains("data-save-url"));
+    let theirs = design_data(&shared.body);
+    assert_eq!(
+        (theirs["canEdit"].as_bool(), theirs["canComment"].as_bool()),
+        (Some(false), Some(true))
+    );
+    assert_eq!(theirs["comments"][0]["mine"], false);
+    assert_eq!(theirs["links"]["source"], Value::Null);
+
+    // The design editor saves only the mockups it changed: the other pages stay, and so do
+    // the images the changed mockup still refers to.
+    let changed = home.replace("<h1>Hello</h1>", "<h1 style=\"color: red\">Hello there</h1>");
+    let save = json!({
+        "base_version": 1, "title": "Kea </script>", "message": "Louder", "merge": true,
+        "pages": [{ "path": "screens/home", "title": "Home", "format": "html", "content": changed }],
+    });
+    let denied = t
+        .post_json(
+            &format!("/api/documents{}/versions", &d[2..]),
+            &bob_cookie,
+            &csrf_of(&shared.body),
+            save.clone(),
+        )
+        .await;
+    assert_eq!(denied.status, StatusCode::FORBIDDEN);
+    let saved = t
+        .post_json(
+            &format!("/api/documents{}/versions", &d[2..]),
+            &cookie,
+            &csrf,
+            save.clone(),
+        )
+        .await;
+    assert_eq!(saved.status, StatusCode::OK, "{}", saved.body);
+    assert_eq!(saved.json()["version"], 2);
+    let got = t.tool(&token, "get_document", json!({ "slug": "kea" })).await;
+    assert_eq!(got["pages"].as_array().unwrap().len(), 3, "{got}");
+    assert_eq!(got["images"].as_array().unwrap().len(), 2, "{got}");
+    let read = t
+        .tool(&token, "read_page", json!({ "slug": "kea", "path": "screens/home" }))
+        .await;
+    assert_eq!(read["content"], changed);
+    assert_eq!(read["format"], "html");
+    // Saving from the version it opened again is refused: another was published since.
+    let stale = t
+        .post_json(&format!("/api/documents{}/versions", &d[2..]), &cookie, &csrf, save)
+        .await;
+    assert_eq!(stale.status, StatusCode::CONFLICT, "{}", stale.body);
+
+    // The old version is still there to look at, but not to save over; comments stay with it.
+    let old = design_data(&t.get(&format!("{d}/-/v/1/screens/home"), &cookie).await.body);
+    assert_eq!(
+        (old["canEdit"].as_bool(), old["version"].as_i64()),
+        (Some(false), Some(1))
+    );
+    assert_eq!(old["links"]["latest"], format!("{d}/screens/home"));
+    assert_eq!(old["comments"].as_array().unwrap().len(), 1);
+    let new = design_data(&t.get(&format!("{d}/screens/home"), &cookie).await.body);
+    assert_eq!(new["comments"].as_array().unwrap().len(), 0);
+    assert_eq!(new["pages"][0]["content"], changed);
+
+    // A public document's mockups can be looked at by anyone, who can't comment or save.
+    t.tool(&token, "share_document", json!({ "slug": "kea", "public": true }))
+        .await;
+    let public = t.get(&format!("{d}/-/v/1/screens/home"), "").await;
+    assert_eq!(public.status, StatusCode::OK);
+    assert!(!public.body.contains("data-version-id") && !public.body.contains("data-save-url"));
+    let anyone = design_data(&public.body);
+    assert_eq!(
+        (anyone["canEdit"].as_bool(), anyone["canComment"].as_bool()),
+        (Some(false), Some(false))
+    );
+    assert_eq!(anyone["comments"], json!([]), "comments aren't the public's to read");
+
+    // The document editor has its mockups as pages too, and keeps them as they are.
+    let editor = editor_data(&t.get(&format!("{d}/-/edit/screens/home"), &cookie).await.body);
+    let formats: Vec<&str> = editor["pages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["format"].as_str().unwrap())
+        .collect();
+    assert_eq!(formats, ["md", "html", "html"]);
+    assert_eq!(editor["open"], "screens/home");
+}

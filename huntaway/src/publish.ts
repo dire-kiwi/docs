@@ -68,7 +68,7 @@ const ValidPublish = Schema.Struct({
   pages: Schema.Array(
     Schema.Struct({
       path: Schema.String,
-      format: Schema.Literals(["md", "mdx"]),
+      format: Schema.Literals(["md", "mdx", "html"]),
       title: Schema.String,
       position: Schema.Int,
       source: Schema.String,

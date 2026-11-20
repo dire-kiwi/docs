@@ -682,32 +682,47 @@ pub async fn doc_redirect(Path(slug): Path<String>) -> Redirect {
     Redirect::permanent(&doc_base(&slug, None))
 }
 
-pub async fn doc_root(state: State<AppState>, viewer: Viewer, Path(slug): Path<String>) -> AppResult<Response> {
-    show_page(state, viewer, slug, None, String::new()).await
+#[derive(Deserialize)]
+pub struct PageQuery {
+    /// On a mockup's page: show the document's own page (its menu, labels, feedback and
+    /// sharing) rather than the design editor.
+    details: Option<String>,
+}
+
+pub async fn doc_root(
+    state: State<AppState>,
+    viewer: Viewer,
+    Path(slug): Path<String>,
+    Query(q): Query<PageQuery>,
+) -> AppResult<Response> {
+    show_page(state, viewer, slug, None, String::new(), q.details.is_some()).await
 }
 
 pub async fn doc_page(
     state: State<AppState>,
     viewer: Viewer,
     Path((slug, path)): Path<(String, String)>,
+    Query(q): Query<PageQuery>,
 ) -> AppResult<Response> {
-    show_page(state, viewer, slug, None, path).await
+    show_page(state, viewer, slug, None, path, q.details.is_some()).await
 }
 
 pub async fn version_root(
     state: State<AppState>,
     viewer: Viewer,
     Path((slug, n)): Path<(String, i64)>,
+    Query(q): Query<PageQuery>,
 ) -> AppResult<Response> {
-    show_page(state, viewer, slug, Some(n), String::new()).await
+    show_page(state, viewer, slug, Some(n), String::new(), q.details.is_some()).await
 }
 
 pub async fn version_page(
     state: State<AppState>,
     viewer: Viewer,
     Path((slug, n, path)): Path<(String, i64, String)>,
+    Query(q): Query<PageQuery>,
 ) -> AppResult<Response> {
-    show_page(state, viewer, slug, Some(n), path).await
+    show_page(state, viewer, slug, Some(n), path, q.details.is_some()).await
 }
 
 async fn show_page(
@@ -716,6 +731,7 @@ async fn show_page(
     slug: String,
     number: Option<i64>,
     suffix: String,
+    details: bool,
 ) -> AppResult<Response> {
     let Found { doc, member } = find_doc(&state, &slug, &viewer).await?;
     if let Some(r) = to_uuid(&viewer, &slug, &doc) {
@@ -748,11 +764,14 @@ async fn show_page(
         return Ok(Redirect::to(&format!("{base}{canonical}")).into_response());
     }
 
+    let format = Format::parse(&page.format).unwrap_or(Format::Md);
+    if format == Format::Html && !details {
+        return design_view(&state, &viewer, &doc, member, &version, number, &pages, &page).await;
+    }
     let answers = match member {
         Some(user) => db::user_answers(&state.db, version.id, &page.path, user.id).await?,
         None => HashMap::new(),
     };
-    let format = Format::parse(&page.format).unwrap_or(Format::Md);
     let images: HashMap<String, String> = db::version_images(&state.db, version.id)
         .await?
         .into_iter()
@@ -835,6 +854,12 @@ async fn show_page(
                                 @for w in &r.warnings { div.render-warning { "⚠ " (w) } }
                                 // Readers who aren't members can't answer or comment: without
                                 // `data-version-id` the page script saves nothing.
+                                @if format == Format::Html {
+                                    div.banner {
+                                        (page.title) " is a mockup. "
+                                        a href={ (base) (canonical) } { "Open it in the design editor" }
+                                    }
+                                }
                                 article.doc-content data-version-id=[member.map(|_| version.id)] data-readonly[member.is_none()] data-page=(page.path) {
                                     @if !r.has_h1 { h1 { (page.title) } }
                                     (PreEscaped(&r.html))
@@ -875,6 +900,122 @@ async fn show_page(
             body_class: "doc",
         },
         body,
+    )
+    .into_response())
+}
+
+/// What a mockup's `src`s and `url(...)`s name among the version's images (`images`: name →
+/// URL): each reference, as written in the mockup, to the URL its image is served from.
+pub fn mockup_images(page_path: &str, source: &str, images: &HashMap<String, String>) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    if images.is_empty() {
+        return out;
+    }
+    for src in docs_render::mockup::image_srcs(source) {
+        if let Some(url) = docs_render::images::candidates(page_path, &src)
+            .iter()
+            .find_map(|name| images.get(name))
+        {
+            out.insert(src, url.clone());
+        }
+    }
+    out
+}
+
+/// A mockup's page: the design editor (`frontend/src/design/`), with every mockup of the
+/// version as a frame on its canvas and this one in view. Anyone who can read the document
+/// can look and try changes; the people it is shared with can comment on elements; those
+/// who can edit it can save their changes as a new version (of the latest one).
+#[allow(clippy::too_many_arguments)]
+async fn design_view(
+    state: &AppState,
+    viewer: &Viewer,
+    doc: &DocumentSummary,
+    member: Option<&User>,
+    version: &db::Version,
+    number: Option<i64>,
+    pages: &[db::PageSummary],
+    open: &db::Page,
+) -> AppResult<Response> {
+    let base = doc_base(&doc.uuid, number);
+    let is_latest = number.is_none() || number == Some(doc.latest_version);
+    let can_edit = member.is_some() && doc.can_edit && is_latest;
+    let images: HashMap<String, String> = db::version_images(&state.db, version.id)
+        .await?
+        .into_iter()
+        .map(|i| (i.name, image_path(&doc.uuid, &i.sha256)))
+        .collect();
+    let is_mockup = |format: &str| Format::parse(format) == Some(Format::Html);
+    let mockups: Vec<serde_json::Value> = db::all_pages(&state.db, version.id)
+        .await?
+        .iter()
+        .filter(|p| is_mockup(&p.format))
+        .map(|p| {
+            serde_json::json!({
+                "path": p.path,
+                "title": p.title,
+                "content": p.source,
+                "images": mockup_images(&p.path, &p.source, &images),
+            })
+        })
+        .collect();
+    // Comments are between the owner and the people it is shared with.
+    let comments = match member {
+        Some(user) => db::version_selections(&state.db, version.id)
+            .await?
+            .into_iter()
+            .filter(|s| pages.iter().any(|p| p.path == s.page && is_mockup(&p.format)))
+            .map(|s| {
+                serde_json::json!({
+                    "id": s.id,
+                    "page": s.page,
+                    "quote": s.quote,
+                    "anchor": s.anchor,
+                    "comment": s.comment,
+                    "user": s.user,
+                    "mine": s.user_id == user.id,
+                    "created_at": s.created_at,
+                })
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    let suffix = paths::url_suffix(&open.path);
+    let data = serde_json::json!({
+        "title": doc.title,
+        "version": version.number,
+        "latestVersion": doc.latest_version,
+        "open": open.path,
+        "pages": mockups,
+        "others": pages.iter().filter(|p| !is_mockup(&p.format)).map(|p| serde_json::json!({
+            "title": p.title,
+            "url": format!("{base}{}", paths::url_suffix(&p.path)),
+        })).collect::<Vec<_>>(),
+        "comments": comments,
+        "canEdit": can_edit,
+        "canComment": member.is_some(),
+        "links": {
+            "home": "/",
+            "latest": (!is_latest).then(|| format!("{}{suffix}", doc_base(&doc.uuid, None))),
+            "versions": format!("/d/{}/-/versions", doc.uuid),
+            "source": can_edit.then(|| format!("/d/{}/-/edit/{suffix}", doc.uuid)),
+            "details": format!("{base}{suffix}?details=1"),
+        },
+    });
+    Ok(shell(
+        Shell {
+            title: &format!("{} · {}", open.title, doc.title),
+            user: viewer.user.as_ref(),
+            csrf: &viewer.csrf,
+            body_class: "designing",
+        },
+        html! {
+            main #design data-uuid=(doc.uuid) data-version-id=[member.map(|_| version.id)]
+                data-save-url=[can_edit.then(|| format!("/api/documents/{}/versions", doc.uuid))] {
+                noscript { p.page { "The design editor needs JavaScript." } }
+            }
+            script #design-data type="application/json" { (script_json(&data)) }
+        },
     )
     .into_response())
 }
@@ -1066,12 +1207,13 @@ pub async fn feedback_page(
                     }
                 } }
             }
-            h2 { "Comments on selected text" }
+            h2 { "Comments" }
             @if selections.is_empty() { p.muted { "No comments yet." } } @else {
                 ol.selection-list {
                     @for s in &selections {
                         li.selection {
                             blockquote { (s.quote) }
+                            @if !s.anchor.is_empty() { p.muted.small { "On " code { (s.anchor) } } }
                             @if !s.comment.is_empty() { p { (s.comment) } }
                             footer { a href=(link(s.version, &s.page)) { (s.page) " (v" (s.version) ")" } " · " (s.user) " · " (time(s.created_at)) }
                         }

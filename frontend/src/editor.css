@@ -317,6 +317,17 @@
   padding: 4px 20px 24px;
 }
 
+/* A mockup's preview: the page itself, in a frame. */
+.editor-mockup {
+  display: block;
+  width: 100%;
+  height: calc(100% - 8px);
+  min-height: 50vh;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+}
+
 @media (max-width: 900px) {
   .editor {
     grid-template-columns: minmax(0, 1fr);

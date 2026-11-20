@@ -1,5 +1,6 @@
 @import "./reader.css";
 @import "./editor.css";
+@import "./design/design.css";
 
 html {
   scroll-padding-top: calc(var(--topbar) + 16px);

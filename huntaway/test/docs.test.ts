@@ -723,3 +723,200 @@ describe("the editor", () => {
     ),
   )
 })
+
+describe("mockups", () => {
+  const home =
+    '<!doctype html>\n<html><head><title>Home</title><style>:root { --accent: #d9480f } .hero { background: url(images/hero.png) }</style></head>\n' +
+    '<body><img src="../images/logo.png" alt=""><h1>Hello</h1><a class="cta" href="/signup">Start</a><script>alert(1)</script></body></html>'
+
+  it.effect("are html pages, which open in the design editor with their images, and are commented on by element", () =>
+    withHarness({}, (h) =>
+      Effect.gen(function* () {
+        const logo = yield* png(16, 16)
+        const published = yield* h.ok("publish_document", {
+          slug: "kea",
+          title: "Kea",
+          pages: [
+            { path: "index", content: "# Notes\n\nSee the screens." },
+            { path: "screens/home.html", content: home },
+            { path: "screens/sign-in", format: "html", content: "<main><h1>Sign in</h1></main>" },
+          ],
+          images: [
+            { name: "images/logo.png", data: logo },
+            { name: "screens/images/hero.png", data: logo },
+          ],
+        })
+        assert.deepStrictEqual(
+          published.warnings.map((w: { page: string }) => w.page),
+          ["screens/home"],
+          "its scripts don't run, which its publisher is told",
+        )
+        const got = yield* h.ok("get_document", { slug: "kea" })
+        assert.deepStrictEqual(
+          got.pages.map((p: { path: string; format: string; title: string }) => [p.path, p.format, p.title]),
+          [
+            ["index", "md", "Notes"],
+            ["screens/home", "html", "Home"],
+            ["screens/sign-in", "html", "Sign In"],
+          ],
+        )
+        const read = yield* h.ok("read_page", { slug: "kea", path: "screens/home.html" })
+        assert.strictEqual(read.content, home)
+        assert.strictEqual(read.format, "html")
+
+        // A mockup's page is the design editor: every mockup of the version, each image it names as a data: URL.
+        const page = yield* h.page("p1/d/kea/screens/home")
+        assert.include(page.html, '<div id="design"></div>')
+        assert.strictEqual(page.title, "Home · Kea")
+        const state = stateOf(page.html)
+        assert.strictEqual(state.page, "design")
+        assert.deepStrictEqual([state.profile, state.slug, state.version, state.draft], ["p1", "kea", 1, null])
+        assert.deepStrictEqual(state.task, { id: "t1", key: "DOC-1", title: "Write the plan" })
+        const d = state.design
+        assert.deepStrictEqual([d.title, d.version, d.latestVersion, d.open, d.canEdit, d.canComment], ["Kea", 1, 1, "screens/home", true, true])
+        assert.deepStrictEqual(
+          d.pages.map((p: { path: string; title: string }) => [p.path, p.title]),
+          [
+            ["screens/home", "Home"],
+            ["screens/sign-in", "Sign In"],
+          ],
+        )
+        assert.strictEqual(d.pages[0].content, home)
+        assert.deepStrictEqual(Object.keys(d.pages[0].images).toSorted(), ["../images/logo.png", "images/hero.png"])
+        assert.match(d.pages[0].images["images/hero.png"], /^data:image\/avif;base64,/)
+        assert.deepStrictEqual(d.pages[1].images, {})
+        assert.deepStrictEqual(d.others, [{ title: "Notes", url: "/docs/p1/d/kea/" }])
+        assert.deepStrictEqual(d.links, {
+          home: "/docs/p1",
+          latest: null,
+          versions: null,
+          source: "/docs/p1/d/kea/-/edit/screens/home",
+          details: "/docs/p1/d/kea/screens/home?details=1",
+        })
+        assert.deepStrictEqual(d.comments, [])
+        // The page script has the editor and its frames' agent in it.
+        assert.include(page.html, "docs-design")
+
+        // With ?details it is the document's own page, naming the mockup; the other pages are documents as before.
+        const details = (yield* h.page("p1/d/kea/screens/home", { details: "1" })).html
+        assert.include(details, 'Home is a mockup. <a href="/docs/p1/d/kea/screens/home">Open it in the design editor</a>')
+        assert.include(details, 'id="delete-form"')
+        assert.notInclude(details, "alert(1)")
+        const index = (yield* h.page("p1/d/kea/")).html
+        assert.include(index, "<article")
+        assert.include(index, 'href="/docs/p1/d/kea/screens/home"')
+
+        // A comment on an element keeps its selector: the agent gets it from get_feedback and in the message sent on.
+        const where = { profile: "p1", slug: "kea" }
+        const c = yield* h.call("comment.add", {
+          ...where,
+          version: 1,
+          page: "screens/home",
+          quote: '<a class="cta">Start</a>',
+          prefix: "",
+          suffix: "",
+          anchor: " body > a:nth-child(3) ",
+          comment: "Make it louder",
+        })
+        assert.strictEqual(c.anchor, "body > a:nth-child(3)")
+        const shown = stateOf((yield* h.page("p1/d/kea/screens/sign-in")).html).design.comments
+        assert.deepStrictEqual(
+          shown.map((m: Record<string, unknown>) => [m.id, m.page, m.anchor, m.comment, m.mine, m.sent]),
+          [[c.id, "screens/home", "body > a:nth-child(3)", "Make it louder", true, false]],
+        )
+        const fb = yield* h.ok("get_feedback", { slug: "kea" })
+        assert.deepStrictEqual(
+          fb.selections.map((s: { element: string | null; quote: string; comment: string }) => [s.element, s.quote, s.comment]),
+          [["body > a:nth-child(3)", '<a class="cta">Start</a>', "Make it louder"]],
+        )
+        yield* h.call("feedback.send", where)
+        assert.include(h.sent[0]?.text ?? "", `1. On version 1, page \`screens/home\`, element \`body > a:nth-child(3)\` (${BOARD}/docs/p1/d/kea/-/v/1/screens/home):`)
+        assert.strictEqual(stateOf((yield* h.page("p1/d/kea/screens/home")).html).design.comments[0].sent, true)
+      }),
+    ),
+  )
+
+  it.effect("are saved from the design editor as a new version with the other pages kept, and drafted beside the document editor's", () =>
+    withHarness({}, (h) =>
+      Effect.gen(function* () {
+        const logo = yield* png(16, 16)
+        yield* h.ok("publish_document", {
+          slug: "kea",
+          title: "Kea",
+          pages: [
+            { path: "index", content: "# Notes" },
+            { path: "screens/home.html", content: home },
+            { path: "screens/other.html", content: "<p>Other</p>" },
+          ],
+          images: [
+            { name: "images/logo.png", data: logo },
+            { name: "screens/images/hero.png", data: logo },
+          ],
+        })
+        const where = { profile: "p1", slug: "kea" }
+
+        // The design editor's draft is its own: the document editor's, of the same document, is another.
+        const draft = { version: 1, pages: { "screens/home": "<p>Half done</p>" }, savedAt: "2026-11-20T00:00:00Z" }
+        yield* h.call("draft.keep", { ...where, draft, design: true })
+        yield* h.call("draft.keep", { ...where, draft: { baseVersion: 1, title: "Text draft", pages: [] } })
+        assert.deepStrictEqual(stateOf((yield* h.page("p1/d/kea/screens/home")).html).draft, draft)
+        assert.strictEqual(stateOf((yield* h.page("p1/d/kea/-/edit/")).html).draft.title, "Text draft")
+
+        // Saving gives only the mockup that changed.
+        const changed = home.replace("<h1>Hello</h1>", '<h1 style="color: red">Hello there</h1>')
+        const save = {
+          ...where,
+          base_version: 1,
+          title: "Kea",
+          folder: null,
+          message: "Louder",
+          pages: [{ path: "screens/home", title: "Home", format: "html", content: changed }],
+          images: [],
+          design: true,
+        }
+        const saved = yield* h.call("doc.save", save)
+        assert.deepStrictEqual(saved, { slug: "kea", version: 2, url: "/docs/p1/d/kea/", warnings: [{ page: "screens/home", warning: saved.warnings[0]?.warning }] })
+        const got = yield* h.ok("get_document", { slug: "kea" })
+        assert.deepStrictEqual(
+          got.pages.map((p: { path: string; format: string }) => [p.path, p.format]),
+          [
+            ["index", "md"],
+            ["screens/home", "html"],
+            ["screens/other", "html"],
+          ],
+          "the pages it didn't give are kept",
+        )
+        assert.deepStrictEqual(
+          got.images.map((i: { name: string }) => i.name).toSorted(),
+          ["images/logo.png", "screens/images/hero.png"],
+          "and the images the mockup still names",
+        )
+        assert.strictEqual((yield* h.ok("read_page", { slug: "kea", path: "screens/home" })).content, changed)
+        // Its draft is gone with the save; the document editor's isn't its to drop.
+        const after = stateOf((yield* h.page("p1/d/kea/screens/home")).html)
+        assert.strictEqual(after.draft, null)
+        assert.strictEqual(after.design.version, 2)
+        assert.strictEqual(after.design.pages[0].content, changed)
+        assert.strictEqual(stateOf((yield* h.page("p1/d/kea/-/edit/")).html).draft.title, "Text draft")
+        assert.deepStrictEqual(yield* h.call("doc.save", save), { conflict: 2, message: "Version 2 was published while you were editing." })
+
+        // An older version can be looked at, not saved over.
+        const old = stateOf((yield* h.page("p1/d/kea/-/v/1/screens/home")).html)
+        assert.deepStrictEqual([old.design.version, old.design.canEdit, old.draft], [1, false, null])
+        assert.strictEqual(old.design.links.latest, "/docs/p1/d/kea/screens/home")
+        assert.strictEqual(old.design.pages[0].content, home)
+
+        // The document editor keeps a mockup as the page it is, and deleting the document drops both drafts.
+        const editor = stateOf((yield* h.page("p1/d/kea/-/edit/screens/home")).html).editor
+        assert.deepStrictEqual(
+          editor.pages.map((p: { format: string }) => p.format),
+          ["md", "html", "html"],
+        )
+        yield* h.call("draft.keep", { ...where, draft, design: true })
+        yield* h.call("doc.delete", where)
+        const count = yield* h.sql<{ n: number }>`SELECT COUNT(*) AS n FROM doc_drafts`
+        assert.strictEqual(count[0]?.n, 0)
+      }),
+    ),
+  )
+})

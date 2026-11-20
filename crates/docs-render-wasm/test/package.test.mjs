@@ -178,9 +178,21 @@ test("validatePublish: pages and images, as publish_document checks them", () =>
   assert.equal(docs.imageUnreadableError('image "a.png"', "bad header"), 'image "a.png" couldn\'t be read: bad header');
 });
 
+test("mockups are html pages", () => {
+  const mockup = '<!doctype html><title>Sign in</title><img src="images/logo.png"><script>x()</script>';
+  // No reader HTML: the design editor shows the source.
+  const r = docs.render(mockup, "html", { pagePath: "screens/sign-in", baseUrl: "/" });
+  assert.equal(r.html, "");
+  assert.deepEqual(r.imageSrcs, ["images/logo.png"]);
+  assert.equal(r.warnings.length, 1);
+  const { pages, warnings } = docs.validatePages([{ path: "screens/sign-in.html", content: mockup }, { path: "found", content: mockup }]);
+  assert.deepEqual(pages.map((p) => [p.path, p.format, p.title]), [["screens/sign-in", "html", "Sign in"], ["found", "html", "Sign in"]]);
+  assert.equal(warnings.length, 2);
+});
+
 test("bad arguments throw strings", () => {
-  assert.deepEqual(attempt(() => docs.render("x", "html", { pagePath: "index", baseUrl: "/" })), {
-    error: 'format must be md or mdx, not "html"',
+  assert.deepEqual(attempt(() => docs.render("x", "rst", { pagePath: "index", baseUrl: "/" })), {
+    error: 'format must be md, mdx or html, not "rst"',
   });
   assert.match(attempt(() => docs.render("x", "md", {})).error, /^invalid render options/);
 });
@@ -224,7 +236,7 @@ test("missing arguments use the defaults or throw strings", () => {
   }
   assert.equal(attempt(() => docs.normalizePath(3)).error, "path must be a string, not number");
   assert.equal(attempt(() => docs.normalizeFolder(null)).error, "folder must be a string, not null");
-  assert.equal(attempt(() => docs.render("x")).error, 'format must be "md" or "mdx", not undefined');
+  assert.equal(attempt(() => docs.render("x")).error, 'format must be "md", "mdx" or "html", not undefined');
   // The instance still works after all that.
   assert.equal(docs.normalizePath("./A b.md"), "a-b");
 });

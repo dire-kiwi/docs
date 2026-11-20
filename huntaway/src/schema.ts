@@ -216,4 +216,13 @@ export const migrations: ReadonlyArray<PluginMigration> = [
       yield* sql.unsafe(`CREATE INDEX doc_uploads_profile ON doc_uploads(profile_id, sha256)`)
     }),
   },
+  {
+    // Mockups (pages whose format is 'html', shown in the design editor): a comment on one is on an element, and
+    // `anchor` is a CSS selector for it ('' for a comment on a page's text).
+    name: "0006-comment-anchors",
+    run: Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient
+      yield* sql.unsafe(`ALTER TABLE doc_comments ADD COLUMN anchor TEXT NOT NULL DEFAULT ''`)
+    }),
+  },
 ]

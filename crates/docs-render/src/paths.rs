@@ -10,6 +10,8 @@ pub fn normalize(raw: &str) -> Result<String, String> {
         .strip_suffix(".mdx")
         .or_else(|| raw.strip_suffix(".md"))
         .or_else(|| raw.strip_suffix(".markdown"))
+        .or_else(|| raw.strip_suffix(".html"))
+        .or_else(|| raw.strip_suffix(".htm"))
         .unwrap_or(raw);
     let mut segments = Vec::new();
     for seg in raw.split('/') {

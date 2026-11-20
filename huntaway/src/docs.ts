@@ -3,6 +3,7 @@ import { Clock, DateTime, Effect, Option, Result, Schema } from "effect"
 import { PluginError } from "@huntaway/plugin"
 import type { PluginHostShape } from "@huntaway/plugin"
 import type { Images } from "./images.ts"
+import { designDraft } from "./repo.ts"
 import type { Answer, Doc, DocPage, Format, Repo, VersionRow } from "./repo.ts"
 import { renderMessage, rendered } from "./render.ts"
 import type { RenderLib } from "./render.ts"
@@ -31,6 +32,8 @@ const tokenHash = (token: string): string => createHash("sha256").update(token).
 export const MAX_QUOTE_CHARS = 10_000
 export const MAX_COMMENT_CHARS = 20_000
 export const MAX_CONTEXT_CHARS = 500
+/** The longest selector a comment on a mockup's element is anchored with. */
+export const MAX_ANCHOR_CHARS = 2000
 /** The biggest draft the editor keeps, as JSON (images it uploaded are in it, as base64). */
 export const MAX_DRAFT_BYTES = 50_000_000
 /** The longest answer, as JSON, in bytes (the hosted site's limit). */
@@ -50,7 +53,8 @@ export interface Publisher {
 export interface RenderedPage {
   readonly path: string
   readonly title: string
-  readonly format: "md" | "mdx"
+  /** `html` is a mockup: it has no reader HTML, and the design editor shows it (`Docs.mockups`). */
+  readonly format: Format
   readonly html: string | null
   readonly toc: ReadonlyArray<{ readonly depth: number; readonly id: string; readonly text: string }>
   readonly has_h1: boolean
@@ -64,7 +68,18 @@ export interface NewComment {
   readonly quote: string
   readonly prefix?: string | undefined
   readonly suffix?: string | undefined
+  /** For a comment on a mockup's element: a CSS selector for it. */
+  readonly anchor?: string | undefined
   readonly comment?: string | undefined
+}
+
+/** A mockup as the design editor shows it (frontend/src/design/design.ts's `DesignPage`). */
+export interface Mockup {
+  readonly path: string
+  readonly title: string
+  readonly content: string
+  /** What its `src`s and `url()`s name among the version's images, as written → each image as a `data:` URL. */
+  readonly images: Readonly<Record<string, string>>
 }
 
 export interface NewAnswer {
@@ -93,6 +108,8 @@ export interface EditorSave {
   readonly message: string | null
   readonly pages: ReadonlyArray<unknown>
   readonly images: ReadonlyArray<unknown>
+  /** From the design editor: only the mockups it changed, so the document's other pages are kept. */
+  readonly design?: boolean | undefined
 }
 
 export interface DocsDeps {
@@ -221,6 +238,38 @@ export const makeDocs = (deps: DocsDeps) => {
     return images
   })
 
+  /** Where a document's draft is kept: the document editor's under its slug ('' for a new document), the design editor's beside it. */
+  const draftKey = (slug: string | null, design: boolean) => (design ? designDraft(slug ?? "") : (slug ?? ""))
+
+  /**
+   * What a mockup refers to among version `versionId`'s images, as it writes each reference, as `data:` URLs (the
+   * board's frames reach no network).
+   */
+  const mockupImages = Effect.fnUntraced(function* (d: Doc, versionId: string, p: DocPage, cache: Map<string, string | null>) {
+    const images: Record<string, string> = {}
+    const refs = yield* repo.imageRefs(versionId)
+    if (refs.length === 0) return images
+    const byName = new Map(refs.map((im) => [im.name, im.sha256]))
+    const srcs = Result.getOrElse(
+      Result.try(() => lib.render(p.source, p.format, { pagePath: p.path, baseUrl: "/" }).imageSrcs),
+      () => [],
+    )
+    for (const src of srcs) {
+      const sha = lib
+        .imageCandidates(p.path, src)
+        .map((n) => byName.get(n))
+        .find((s) => s !== undefined)
+      if (sha === undefined) continue
+      if (!cache.has(sha)) {
+        const data = yield* repo.imageData(d.profile_id, sha)
+        cache.set(sha, data === null ? null : `data:image/avif;base64,${toBase64(data)}`)
+      }
+      const url = cache.get(sha)
+      if (url != null) images[src] = url
+    }
+    return images
+  })
+
   /** A page path from the editor, or `index`. */
   const editorPath = (raw: string) => Option.getOrElse(Option.liftThrowable(() => lib.normalizePath(raw))(), () => "index")
 
@@ -325,6 +374,16 @@ export const makeDocs = (deps: DocsDeps) => {
       }
       return { version: v, nav, page, pages: pages.map((x) => ({ path: x.path, title: x.title })) }
     }),
+    /** The mockups of a version (its pages whose format is `html`), for the design editor, and its other pages. */
+    mockups: Effect.fn("Docs.mockups")(function* (d: Doc, v: VersionRow) {
+      const pages = yield* repo.pagesFull(v.id)
+      const cache = new Map<string, string | null>()
+      const mockups: Array<Mockup> = []
+      for (const p of pages) {
+        if (p.format === "html") mockups.push({ path: p.path, title: p.title, content: p.source, images: yield* mockupImages(d, v.id, p, cache) })
+      }
+      return { mockups, others: pages.filter((p) => p.format !== "html").map((p) => ({ path: p.path, title: p.title })) }
+    }),
     /** What the editor opens a document with: its latest version's pages, their sources, and its images' names. */
     editorData: Effect.fn("Docs.editorData")(function* (d: Doc, rawPath: string) {
       const v = yield* repo.version(d.id, null)
@@ -340,8 +399,8 @@ export const makeDocs = (deps: DocsDeps) => {
       }
     }),
     /** The editor's draft of a document (or, `slug` null, of a new one), as it gave it; null if there's none. */
-    draft: Effect.fn("Docs.draft")(function* (profile: string, slug: string | null) {
-      const data = yield* repo.draft(profile, slug ?? "")
+    draft: Effect.fn("Docs.draft")(function* (profile: string, slug: string | null, design = false) {
+      const data = yield* repo.draft(profile, draftKey(slug, design))
       if (data === null) return null
       try {
         return JSON.parse(data) as unknown
@@ -350,20 +409,20 @@ export const makeDocs = (deps: DocsDeps) => {
       }
     }),
     /** Keeps the editor's draft (any JSON, at most `MAX_DRAFT_BYTES`), or with `draft` null, drops it. */
-    keepDraft: Effect.fn("Docs.keepDraft")(function* (profile: string, slug: string | null, draft: unknown) {
+    keepDraft: Effect.fn("Docs.keepDraft")(function* (profile: string, slug: string | null, draft: unknown, design = false) {
       yield* profileOf(profile)
       if (slug !== null) yield* docOf(profile, slug)
-      if (draft === null) return yield* repo.dropDraft(profile, slug ?? "")
+      if (draft === null) return yield* repo.dropDraft(profile, draftKey(slug, design))
       const data = JSON.stringify(draft)
       if (data.length > MAX_DRAFT_BYTES) return yield* PluginError.invalid("the draft is too big to keep")
-      yield* repo.putDraft(profile, slug ?? "", data, yield* nowIso)
+      yield* repo.putDraft(profile, draftKey(slug, design), data, yield* nowIso)
     }),
     /** A page as it would render, for the editor's preview, with the images of the document's latest version. */
     preview: Effect.fn("Docs.preview")(function* (profile: string, slug: string | null, input: EditorPreview) {
       yield* profileOf(profile)
       const d = slug === null ? null : yield* repo.get(profile, slug)
       const v = d === null ? null : yield* repo.version(d.id, null)
-      const format: Format = input.format === "mdx" ? "mdx" : "md"
+      const format: Format = input.format === "mdx" ? "mdx" : input.format === "html" ? "html" : "md"
       const p = { path: editorPath(input.path), format, source: input.content }
       const base = d === null ? `/docs/${encodeURIComponent(profile)}/` : docBase(profile, d.slug, null)
       const images = d === null || v === null ? {} : yield* shownImages(d, v.id, p, base)
@@ -396,7 +455,7 @@ export const makeDocs = (deps: DocsDeps) => {
             return path === null ? [] : Option.toArray(Option.liftThrowable(() => lib.normalizePath(path))())
           }),
         )
-        const gone = v === null ? [] : (yield* repo.pages(v.id)).map((p) => p.path).filter((p) => !kept.has(p))
+        const gone = v === null || input.design === true ? [] : (yield* repo.pages(v.id)).map((p) => p.path).filter((p) => !kept.has(p))
         // A merge with every page, so the images the pages still use carry over.
         input2 = { ...common, slug: d.slug, mode: "merge", folder: null, delete_paths: gone }
       } else {
@@ -405,7 +464,7 @@ export const makeDocs = (deps: DocsDeps) => {
       // The editor goes to the document once it's saved: the board doesn't reload its pages for this change (which would
       // reload the editor first). Its draft is saved now.
       const changed = (profile: string, slug: string) =>
-        Effect.andThen(repo.dropDraft(profile, input.slug === null ? "" : slug), host.emit({ topic: "documents", profile_id: profile, data: { slug, deleted: false } }))
+        Effect.andThen(repo.dropDraft(profile, draftKey(input.slug === null ? null : slug, input.design === true)), host.emit({ topic: "documents", profile_id: profile, data: { slug, deleted: false } }))
       const out = yield* publishFor(
         { repo, images: deps.images, lib, transaction: tx, boardUrl: host.boardUrl, uuid: deps.uuid, changed },
         caller,
@@ -433,6 +492,7 @@ export const makeDocs = (deps: DocsDeps) => {
         quote: yield* text(c.quote, "quote", MAX_QUOTE_CHARS, true),
         prefix: yield* text(c.prefix, "prefix", MAX_CONTEXT_CHARS),
         suffix: yield* text(c.suffix, "suffix", MAX_CONTEXT_CHARS),
+        anchor: (yield* text(c.anchor, "anchor", MAX_ANCHOR_CHARS)).trim(),
         comment: (yield* text(c.comment, "comment", MAX_COMMENT_CHARS)).trim(),
       }
       const made = yield* tx(repo.addComment(d.id, v.id, page.path, said, yield* nowIso))
@@ -485,7 +545,7 @@ export const makeDocs = (deps: DocsDeps) => {
         task.id,
         feedbackMessage(
           d,
-          comments.map((m) => ({ version: m.version, page: m.page, quote: m.quote, comment: m.comment, url: at(d.slug, m.version, m.page) })),
+          comments.map((m) => ({ version: m.version, page: m.page, quote: m.quote, comment: m.comment, element: m.anchor === "" ? undefined : m.anchor, url: at(d.slug, m.version, m.page) })),
           (yield* labelled(d, answers)).map((a) => ({ ...a, value: valueOf(a), url: at(d.slug, a.version, a.page) })),
         ),
       )
@@ -596,6 +656,7 @@ export const makeDocs = (deps: DocsDeps) => {
           comment: m.comment,
           context_before: m.prefix,
           context_after: m.suffix,
+          element: m.anchor === "" ? null : m.anchor,
           user: "user",
           created_at: seconds(m.created_at),
         })),

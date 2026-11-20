@@ -34,6 +34,14 @@ It replaces the documents Huntaway had built in. Its id is `docs`, so:
   **Save** publishes all the pages as a new version (with no task), and **New document** on the home page writes one.
   Unsaved changes are kept in the plugin's database as a draft (the board reloads its pages whenever a document
   changes), and come back when the editor opens again.
+- **Mockups and the design editor**: a page published as HTML (`"format": "html"`) is a mockup, and its page is the
+  hosted site's design editor (`frontend/src/design/`): every mockup of the document as a frame on a canvas, where the
+  user inspects and changes elements, tunes the mockup's CSS custom properties, edits its HTML, comments on elements
+  and saves the changed mockups as a new version. Comments on elements go to the task with the others, and
+  `get_feedback` gives each one's selector (`element`). The board's frame for a plugin's page has no origin, so each
+  mockup is in a frame of its own that runs the editor's agent (bundled into the page script) and nothing the mockup
+  brings: a policy with a one-time nonce allows that script only. Unsaved changes are kept as a draft beside the
+  document editor's. A mockup's page with `?details` is the document's own page (labels, versions, publishing, delete).
 - **Publishing to a hosted docs site**: connect a profile from the home page (the OAuth device sign-in, or a pasted
   personal access token), then **Publish** a version from its page. Publishing again adds a version to the same
   document there. Tokens stay in the plugin's database on the host and are renewed there.
@@ -81,8 +89,10 @@ pnpm preview     # the pages at http://localhost:4100/docs/, in a sandboxed fram
 pnpm build       # dist/: the server code as JavaScript, and the page script (client/page.ts) bundled
 ```
 
-`pnpm preview` runs the plugin on `.preview/plugin.db` with a pretend board (one profile, project and task), publishes
-a sample document the first time, and prints what it would send to the task.
+`pnpm preview` runs the plugin on `.preview/plugin.db` (or in `PREVIEW_DIR`) with a pretend board (one profile, project
+and task), under the board's policy for a plugin's frame. The first time, it publishes a sample document and a
+document of mockups (`/docs/preview/d/mockups/screens/home` is the design editor). It prints what it would send to the
+task.
 
 Layout:
 
@@ -92,8 +102,10 @@ Layout:
   `publish_document`; `src/images.ts`: AVIF conversion; `src/uploads.ts`: the route image files are uploaded to
 - `src/hosted.ts`, `src/siteRepo.ts`: connecting to and publishing on a hosted docs site
 - `src/pages/`: the pages (HTML, rendered on the host) and `src/calls.ts`, what they call
-- `client/page.ts`: the pages' script (forms, answers, comments, the editor), sharing `frontend/src/answer.ts`, `quote.ts`,
-  `bubbles.ts` and `editor.ts` (with `editor.css`, bundled as text) with the site
+- `client/page.ts`: the pages' script (forms, answers, comments, the editor, the design editor), sharing
+  `frontend/src/answer.ts`, `quote.ts`, `bubbles.ts`, `editor.ts` and `design/` (with `editor.css` and `design.css`,
+  bundled as text) with the site; `scripts/build.mjs` bundles `frontend/src/design/agent.ts` into it as source, for
+  the mockups' frames
 - `vendor/huntaway-plugin/`: a copy of Huntaway's plugin API, to type-check and test against until Huntaway publishes it
 
 ## Release

@@ -9,7 +9,8 @@ import { at, html, raw, time } from "./html.ts"
 import type { Raw } from "./html.ts"
 import { attrJson } from "./home.ts"
 
-// A document's page: its menu, the page rendered, the versions, what can be done with it (labels, move, publish to the
+// A document's page: its menu, the page rendered (a mockup's page is the design editor instead, see index.ts: this is
+// what its "Document details" shows, with a link back in place of the page), the versions, what can be done with it (labels, move, publish to the
 // hosted site, delete), and its comments beside the text (the hosted site's reader, DOC-14: select text and comment in
 // the popup, saved when you click away; the comments as bubbles beside their quotes). Comments are on the version shown.
 
@@ -101,11 +102,13 @@ export const docPage = (d: DocData): Raw => {
     ${d.page.warnings.length === 0 ? "" : html`<p class="notice">${d.page.warnings.join(" · ")}</p>`}
     <div class="doc-body">
       <div class="docs-render">${
-        d.page.html === null
+        d.page.format === "html"
+          ? html`<p class="notice">${d.page.title} is a mockup. <a href="${pageUrl(d.number)}">Open it in the design editor</a>.</p>`
+          : d.page.html === null
           ? html`<p class="error">This page can't be shown: ${d.page.error ?? "it doesn't render"}.</p>`
           : html`${d.page.has_h1 ? "" : html`<h1 class="page-title">${d.page.title}</h1>`}<article class="doc-content" data-version="${d.version.number}" data-page="${d.page.path}">${raw(d.page.html)}</article>`
       }</div>
-      <aside class="comment-rail" id="comments">${d.comments.filter((c) => c.version === d.version.number && c.page === d.page.path).map(bubble)}</aside>
+      <aside class="comment-rail" id="comments">${d.page.format === "html" ? "" : d.comments.filter((c) => c.version === d.version.number && c.page === d.page.path).map(bubble)}</aside>
     </div>
   </main>
 </div>`

@@ -12,7 +12,7 @@ All of it is this repository's Huntaway plugin, [`@dire-kiwi/docs-huntaway`](htt
 1. **The `docs` MCP server.** Every agent run gets it. Documents are stored on the Huntaway host, in the plugin's own database, under the profile of the run's task, and shown on the board's **Docs** pages.
 2. **Publishing to a hosted site.** From the **Docs** page, a person connects the profile to a docs site and publishes a document's version there.
 
-[Components](components.mdx) shows every MDX component a page can use.
+[Components](components.mdx) shows every MDX component a page can use. [Mockups and the design editor](mockups.md) covers publishing designs as HTML pages, which people look at, adjust and comment on.
 
 ## For agents: the `docs` MCP server
 
@@ -24,10 +24,10 @@ Each run has an MCP server named `docs`. In Claude Code its tools are `mcp__docs
 | `create_upload_url` | A URL to send image files to with HTTP, so they don't go through a tool call as base64. Each upload answers with an id to give in `publish_document`'s `images`. |
 | `list_documents` | The profile's documents, with each one's folder, labels, latest version and URL; `label` lists only those with that label or one under it. |
 | `get_document` | A document's pages (paths, titles, URLs), images and version history. |
-| `read_page` | The Markdown/MDX source of one page, from the latest version or a given `version`. |
+| `read_page` | The source of one page (Markdown, MDX, or a mockup's HTML), from the latest version or a given `version`. |
 | `move_document` | Move a document to another folder (only when the user asks). |
 | `set_document_labels`, `list_labels` | Replace a document's labels; the profile's labels as a tree, to reuse them. |
-| `get_feedback` | The answers people gave in a document's form fields (`responses`, with each field's label) and the comments they left on its text, on the board. Pass `since: <cursor>` for only new ones. |
+| `get_feedback` | The answers people gave in a document's form fields (`responses`, with each field's label) and the comments they left on its text (and on a mockup's elements, with `element`, a selector), on the board. Pass `since: <cursor>` for only new ones. |
 | `list_components` | Reference for the MDX components (callouts, details, form fields). |
 
 They are the hosted server's tools, with the same schemas, checks, errors and warnings, because the plugin runs the same renderer ([`@dire-kiwi/docs-render`](https://github.com/dire-kiwi/docs/blob/main/crates/docs-render-wasm/README.md)). A page that publishes on the board publishes the same way on the hosted site.
