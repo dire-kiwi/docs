@@ -193,7 +193,8 @@ export function mountDesign(
   let selected: { frame: Frame; path: Path; detail: Detail } | null = null;
   let editing: Frame | null = null;
   let spaceDown = false;
-  let left = window.matchMedia("(min-width: 1000px)").matches;
+  /** Whether the reader has moved the view themselves: until then it follows the canvas's size. */
+  let touched = false;
   /** The mockup as it was before its text began to be edited in place, to undo to if the text changes. */
   let beforeText: Snapshot | null = null;
   const undo: Snapshot[] = [];
@@ -253,8 +254,10 @@ export function mountDesign(
     "header",
     { className: "dz-bar" },
     button("☰", "Show or hide the mockups and layers", () => {
-      left = !left;
-      app.classList.toggle("dz-no-left", !left);
+      // The window's width decides whether they show, until asked otherwise.
+      const shown = getComputedStyle(leftPanel).display !== "none";
+      app.classList.toggle("dz-left-on", !shown);
+      app.classList.toggle("dz-left-off", shown);
     }),
     h(
       "div",
@@ -381,8 +384,9 @@ export function mountDesign(
       " to save changes.",
     );
   }
-  app.classList.toggle("dz-no-left", !left);
   root.replaceChildren(app);
+  // Text being edited in a mockup is done with once anything of the editor itself is pressed.
+  app.addEventListener("pointerdown", () => void editing?.driver?.stopEdit(), true);
 
   const report = (e: unknown) => {
     error.textContent = messageOf(e);
@@ -411,8 +415,14 @@ export function mountDesign(
     applyView();
   }
   const centre = () => ({ x: canvas.clientWidth / 2, y: canvas.clientHeight / 2 });
-  const zoomBy = (k: number, at = centre()) => setView(zoomAt(view, at.x, at.y, view.z * k));
-  const zoomTo = (z: number) => setView(zoomAt(view, centre().x, centre().y, z));
+  const zoomBy = (k: number, at = centre()) => {
+    touched = true;
+    setView(zoomAt(view, at.x, at.y, view.z * k));
+  };
+  const zoomTo = (z: number) => {
+    touched = true;
+    setView(zoomAt(view, centre().x, centre().y, z));
+  };
   const boxOf = (f: Frame) => ({ x: f.x, y: 0, w: f.width, h: f.height });
   function fitAll() {
     const last = frames.at(-1);
@@ -1230,7 +1240,11 @@ export function mountDesign(
           h(
             "div",
             { className: "dz-comment-head" },
-            h("span", { className: "dz-pin" }, String(i + 1)),
+            h(
+              "span",
+              { className: `dz-pin${c.sent === false ? " dz-unsent" : ""}` },
+              String(i + 1),
+            ),
             h("span", { className: "dz-muted" }, f?.page.title ?? c.page),
           ),
           h("code", {}, shortText(c.quote, 120)),
@@ -1372,7 +1386,7 @@ export function mountDesign(
   canvas.addEventListener("pointerdown", (e) => {
     if (e.target instanceof Element && e.target.closest(".dz-popover, .dz-name")) return;
     closePopovers();
-    if (editing) void editing.driver?.stopEdit();
+    touched = true;
     const f = frameAt(e.target);
     if (e.button === 0 && f?.driver && !panning() && (tool === "select" || tool === "comment")) {
       const at = inFrame(f, e.clientX, e.clientY);
@@ -1452,6 +1466,7 @@ export function mountDesign(
     (e) => {
       if (e.target instanceof Element && e.target.closest(".dz-popover")) return;
       e.preventDefault();
+      touched = true;
       const c = canvas.getBoundingClientRect();
       const unit = e.deltaMode === 1 ? 16 : 1;
       if (e.ctrlKey || e.metaKey) {
@@ -1557,6 +1572,11 @@ export function mountDesign(
   renderComments();
   inspector.show(null, "");
   const first = frames.find((f) => f.page.path === data.open) ?? frames[0];
+  // The canvas may have no size yet when the page is first made (in a frame the board has
+  // just created), and the window may change: the view fits the mockup until it is moved.
+  new ResizeObserver(() => {
+    if (!touched && active) focusFrame(active);
+  }).observe(canvas);
   if (first) {
     setActive(first);
     focusFrame(first);

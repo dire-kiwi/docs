@@ -26,7 +26,7 @@ const withoutOrganization = (schema: Readonly<Record<string, unknown>>): Readonl
 
 /** What the server tells agents (Claude Code adds it to its system prompt). */
 export const INSTRUCTIONS =
-  "Docs keeps Markdown documents for the user to read on this Huntaway board: reports, plans, research, write-ups. " +
+  "Docs keeps Markdown documents for the user to read on this Huntaway board: reports, plans, research, write-ups, and HTML mockups of designs. " +
   "Publish with `publish_document` (one or more pages; nested paths like `plan/phase-1` make a nested menu). Every " +
   'publish creates a new version, so you can revise freely; `mode: "merge"` keeps the other pages of the previous ' +
   "version. If you can start sub-agents, have one write and publish the document: give it what the document should " +
@@ -43,6 +43,13 @@ export const INSTRUCTIONS =
   "The user can also edit a document themselves on the board, which publishes a new version (with no task): before you " +
   "publish a new version of a document they may have edited, read its latest pages (`get_document`, `read_page`) so you " +
   "don't undo their changes. " +
+  'To show the user a design, publish mockups: pages with format "html" (or a `.html` path), each a complete, ' +
+  "self-contained HTML document with its CSS in a `<style>` element and no scripts (they don't run), one page per screen, " +
+  "state or variant. The user opens them in the design editor: every mockup of the document is a frame on a canvas they " +
+  "zoom and pan, at desktop, tablet or phone width. There they inspect elements, change text, colours, type and spacing, " +
+  "tune the CSS custom properties the mockup defines (so define the design's colours, fonts and sizes as variables on " +
+  "`:root`), comment on elements, and save their changes as a new version. `get_feedback` gives their comments with each " +
+  "element's selector (`element`), and `read_page` the HTML as they last saved it. " +
   "Documents belong to your profile on this board. A new " +
   "document goes in a folder named after your task's project unless you give `folder`; a `folder` you give is used as " +
   'it is (`"plans"` is a top-level folder, `"<project>/plans"` one inside the project\'s), and later versions stay ' +

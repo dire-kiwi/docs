@@ -26,14 +26,20 @@ pub fn title(source: &str) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
-/// What the mockup's `src`, `srcset` and `poster` attributes and its CSS `url(...)`s
-/// name, each once and as written: what may be one of the document's images (see
-/// [`crate::images::candidates`], which drops the ones with a scheme).
+/// The relative references in the mockup's `src`, `srcset` and `poster` attributes and its
+/// CSS `url(...)`s, each once and as written: what may name one of the document's images
+/// (see [`crate::images::candidates`]). Like a Markdown page's `image_srcs`, it leaves out
+/// URLs with a scheme (`https:`, `data:`) or a host.
 pub fn image_srcs(source: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut add = |raw: &str| {
         let raw = raw.trim();
-        if !raw.is_empty() && !raw.starts_with("data:") && !raw.starts_with('#') && !out.iter().any(|o| o == raw) {
+        // Only what can name one of the document's images: not another site's, nor a part of the page.
+        let elsewhere = raw.starts_with("//")
+            || raw.starts_with('#')
+            || raw.starts_with('?')
+            || raw.split('/').next().is_some_and(|s| s.contains(':'));
+        if !raw.is_empty() && !elsewhere && !out.iter().any(|o| o == raw) {
             out.push(raw.to_string());
         }
     };
@@ -149,7 +155,8 @@ mod tests {
 <style>.hero { background: url("images/hero.png") } .x { background: url(data:image/png;base64,AAAA) }</style></head>
 <body><img class="logo" src="images/logo.png" alt=""><img src='../shots/a.png' data-src="not-this.png">
 <img src=plain.png><img srcset="images/a.png 1x, images/a@2x.png 2x">
-<a href="https://example.com">x</a><img src="https://example.com/remote.png"></body></html>"#;
+<a href="https://example.com">x</a><img src="https://example.com/remote.png"><img src="//cdn.example/x.png">
+<svg><rect fill="url(#grad)"/></svg></body></html>"#;
 
     #[test]
     fn recognises_html_documents() {
@@ -174,7 +181,6 @@ mod tests {
                 "images/logo.png",
                 "../shots/a.png",
                 "plain.png",
-                "https://example.com/remote.png",
                 "images/a.png",
                 "images/a@2x.png",
                 "images/hero.png",

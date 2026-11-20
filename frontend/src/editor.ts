@@ -22,7 +22,8 @@ import {
 } from "./markdown-edit.ts";
 import type { TextState } from "./markdown-edit.ts";
 
-export type PageFormat = "md" | "mdx";
+/** `html` is a mockup: an HTML document, shown in the design editor (design/design.ts) once saved. */
+export type PageFormat = "md" | "mdx" | "html";
 
 export interface EditorPage {
   path: string;
@@ -309,6 +310,7 @@ export function mountEditor(
     { "aria-label": "Format" },
     h("option", { value: "md" }, "Markdown"),
     h("option", { value: "mdx" }, "MDX (components)"),
+    h("option", { value: "html" }, "HTML (mockup)"),
   );
   const up = h(
     "button",
@@ -627,7 +629,8 @@ export function mountEditor(
     changed();
   });
   formatSelect.addEventListener("change", () => {
-    page().format = formatSelect.value === "mdx" ? "mdx" : "md";
+    const format = formatSelect.value;
+    page().format = format === "mdx" || format === "html" ? format : "md";
     changed();
     schedulePreview(0);
   });
@@ -733,6 +736,10 @@ export function mountEditor(
     const c = COMPONENTS[Number(componentMenu.value)];
     componentMenu.value = "";
     if (!c) return;
+    if (page().format === "html") {
+      status.textContent = "Components are for Markdown and MDX pages: this one is a mockup";
+      return;
+    }
     if (page().format !== "mdx") {
       // Components need MDX; a Markdown page would show the tag as text.
       page().format = "mdx";
@@ -815,6 +822,21 @@ export function mountEditor(
     if (mode === "write") return;
     const p = page();
     const mine = ++seq;
+    if (p.format === "html") {
+      // A mockup is shown as the page it is, in a frame that runs none of its scripts. Its
+      // elements are worked on in the design editor, which is the page it has once saved.
+      const frame = h("iframe", { className: "editor-mockup", sandbox: "", title: "The mockup" });
+      frame.srcdoc = p.content;
+      previewNotes.replaceChildren(
+        h(
+          "p",
+          { className: "render-warning" },
+          "This page is a mockup: once saved, open it to inspect and adjust it in the design editor.",
+        ),
+      );
+      preview.replaceChildren(frame);
+      return;
+    }
     let out: PreviewResult;
     try {
       out = await backend.preview({ path: p.path, format: p.format, content: p.content });
