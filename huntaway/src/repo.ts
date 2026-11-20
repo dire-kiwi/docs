@@ -115,6 +115,8 @@ const labelRows = rowsOf(Label)
 const countRows = rowsOf(Count)
 const publishedRows = rowsOf(Published)
 const draftRows = rowsOf(Schema.Struct({ data: Schema.String }))
+const profileRows = rowsOf(Schema.Struct({ profile_id: Schema.String }))
+const shaRows = rowsOf(Schema.Struct({ sha256: Schema.String }))
 
 // Labels have no control characters, so a newline keeps them apart.
 const docOf = (r: typeof DocRow.Type): Doc => ({
@@ -172,6 +174,12 @@ export const makeRepo = (sql: SqlClient.SqlClient) => {
   const selectAnswer = sql.literal(SELECT_ANSWER)
   const versionCols = sql.literal("SELECT id, number, message, task_id, run_id, created_at FROM doc_versions")
   const comment = (doc: string, id: number) => first(commentRows(sql`${selectComment} WHERE v.doc_id = ${doc} AND m.id = ${id}`))
+  /** Deletes the profile's images nothing has any more: no version of its documents, and no upload still waiting. */
+  const dropUnusedImages = (profile: string) =>
+    done(sql`DELETE FROM doc_images WHERE profile_id = ${profile}
+      AND NOT EXISTS (SELECT 1 FROM doc_version_images vi JOIN doc_versions v ON v.id = vi.version_id JOIN docs d ON d.id = v.doc_id
+        WHERE vi.sha256 = doc_images.sha256 AND d.profile_id = ${profile})
+      AND NOT EXISTS (SELECT 1 FROM doc_uploads u WHERE u.sha256 = doc_images.sha256 AND u.profile_id = ${profile})`)
 
   return {
     /** A profile's documents, most recently updated first. */
@@ -252,10 +260,35 @@ export const makeRepo = (sql: SqlClient.SqlClient) => {
         const gone = yield* idRows(sql`DELETE FROM docs WHERE profile_id = ${profile} AND slug = ${slug} RETURNING id`)
         if (gone.length === 0) return false
         yield* sql`DELETE FROM doc_drafts WHERE profile_id = ${profile} AND slug IN (${slug}, ${designDraft(slug)})`.pipe(Effect.orDie)
-        yield* sql`DELETE FROM doc_images WHERE profile_id = ${profile} AND NOT EXISTS (SELECT 1 FROM doc_version_images vi
-          JOIN doc_versions v ON v.id = vi.version_id JOIN docs d ON d.id = v.doc_id
-          WHERE vi.sha256 = doc_images.sha256 AND d.profile_id = ${profile})`.pipe(Effect.orDie)
+        yield* dropUnusedImages(profile)
         return true
+      }),
+    /** Keeps an upload URL, by its token's hash, for a profile's uploads until `expires` (milliseconds). */
+    addUploadUrl: (hash: string, profile: string, expires: number) =>
+      done(sql`INSERT INTO doc_upload_urls (hash, profile_id, expires_at) VALUES (${hash}, ${profile}, ${expires})`),
+    /** Whose uploads an upload URL takes, while it lasts. */
+    uploadUrlProfile: (hash: string, now: number) =>
+      Effect.map(first(profileRows(sql`SELECT profile_id FROM doc_upload_urls WHERE hash = ${hash} AND expires_at > ${now}`)), (r) => r?.profile_id ?? null),
+    /** How many uploads a profile has waiting. */
+    waitingUploads: (profile: string, now: number) =>
+      Effect.map(countRows(sql`SELECT COUNT(*) AS n FROM doc_uploads WHERE profile_id = ${profile} AND expires_at > ${now}`), (r) => r[0]?.n ?? 0),
+    /** Keeps an uploaded AVIF for its profile to publish, under `id`, until `expires` (milliseconds). */
+    addUpload: (id: string, profile: string, im: NewImage, now: string, expires: number) =>
+      Effect.gen(function* () {
+        yield* sql`INSERT OR IGNORE INTO doc_images (profile_id, sha256, data, width, height, created_at)
+          VALUES (${profile}, ${im.sha256}, ${im.data}, ${im.width}, ${im.height}, ${now})`
+        yield* sql`INSERT INTO doc_uploads (id, profile_id, sha256, created_at, expires_at) VALUES (${id}, ${profile}, ${im.sha256}, ${now}, ${expires})`
+      }).pipe(Effect.orDie),
+    /** The AVIF (its sha256) of a profile's upload that still waits. */
+    upload: (profile: string, id: string, now: number) =>
+      Effect.map(first(shaRows(sql`SELECT sha256 FROM doc_uploads WHERE id = ${id} AND profile_id = ${profile} AND expires_at > ${now}`)), (r) => r?.sha256 ?? null),
+    /** Deletes the upload URLs and uploads that have expired, and the images only they had. How many uploads went. */
+    purgeUploads: (now: number) =>
+      Effect.gen(function* () {
+        yield* done(sql`DELETE FROM doc_upload_urls WHERE expires_at <= ${now}`)
+        const gone = yield* profileRows(sql`DELETE FROM doc_uploads WHERE expires_at <= ${now} RETURNING profile_id`)
+        for (const profile of new Set(gone.map((g) => g.profile_id))) yield* dropUnusedImages(profile)
+        return gone.length
       }),
     move: (doc: string, folder: string) => done(sql`UPDATE docs SET folder = ${folder} WHERE id = ${doc}`),
     /** The editor's unsaved changes to a document (slug '' for a new one), as JSON. */

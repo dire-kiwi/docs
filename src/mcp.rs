@@ -168,6 +168,7 @@ impl Server<'_> {
                     "get_document" => self.get_document(arguments).await,
                     "read_page" => self.read_page(arguments).await,
                     "publish_document" => self.publish(arguments).await,
+                    "create_upload_url" => self.create_upload_url().await,
                     "get_feedback" => self.get_feedback(arguments).await,
                     "share_document" => self.share(arguments).await,
                     "move_document" => self.move_document(arguments).await,
@@ -386,7 +387,13 @@ impl Server<'_> {
         let delete: Vec<String> = a.delete_paths.iter().filter_map(|p| paths::normalize(p).ok()).collect();
         let valid = publish::validate_publish(a.pages, a.images).map_err(ToolError)?;
         let mut warnings = valid.warnings;
-        let uploaded: HashSet<String> = valid.images.iter().map(|i| i.name.clone()).collect();
+        // The names this publish gives images: those sent with it, and those uploaded before it.
+        let uploaded: HashSet<String> = valid
+            .images
+            .iter()
+            .map(|i| i.name.clone())
+            .chain(valid.uploaded.iter().map(|u| u.name.clone()))
+            .collect();
 
         // A merge keeps the previous version's images that the new version's pages refer to.
         let (kept_images, based_on) = if merge {
@@ -469,6 +476,7 @@ impl Server<'_> {
                     })
                     .collect(),
                 kept_images,
+                uploaded: valid.uploaded,
                 based_on,
             },
         )
@@ -501,6 +509,18 @@ impl Server<'_> {
             "pages": all.iter().map(|p| json!({ "path": p.path, "title": p.title, "url": self.url(&doc.uuid, None, &p.path) })).collect::<Vec<_>>(),
             "images": version_images,
             "warnings": warnings,
+        }))
+    }
+
+    /// `create_upload_url`: a URL the user's agent sends image files to (`web::api::upload_to_url`).
+    async fn create_upload_url(&self) -> ToolResult {
+        let token = db::create_upload_url(&self.state.db, self.user.id).await?;
+        let url = format!("{}/api/uploads/{token}", self.state.config.base_url);
+        Ok(json!({
+            "upload_url": url,
+            "expires_in": images::UPLOAD_URL_SECONDS,
+            "curl": format!("curl -sS --data-binary @FILE \"{url}\""),
+            "then": "Each upload answers { \"id\": ... }: pass { \"name\": \"images/<name>.png\", \"upload\": \"<id>\" } in publish_document's `images`, within a day.",
         }))
     }
 

@@ -21,7 +21,7 @@ Publish a mockup as a page with `"format": "html"`, or a path ending in `.html`.
     { "path": "screens/option-a.html", "content": "<!doctype html><html>…</html>" },
     { "path": "screens/option-b.html", "content": "<!doctype html><html>…</html>" }
   ],
-  "images": [{ "name": "images/logo.png", "data": "<base64>" }]
+  "images": [{ "name": "images/logo.png", "upload": "<the id an upload answered with>" }]
 }
 ```
 
@@ -31,7 +31,7 @@ Write each mockup as a complete, self-contained HTML document:
 - **CSS in a `<style>` element** (or `style=""` attributes). Stylesheets from other sites may not load.
 - **No scripts.** A mockup's scripts never run, and `publish_document` warns when it has any. Show a menu's open state as its own page.
 - **Define the design's colours, fonts and sizes as CSS custom properties** on `:root`. The editor lists them, so the reader can try another accent colour or corner radius and see everything that uses it follow.
-- **Images** come from the publish's `images`, by name, as on other pages (`<img src="../images/logo.png">` or `url(../images/logo.png)`, resolved against the page's folder, then the document's root). `data:` images are taken out and stored the same way.
+- **Images** come from the publish's `images`, by name, as on other pages (`<img src="../images/logo.png">` or `url(../images/logo.png)`, resolved against the page's folder, then the document's root). Upload the files with `create_upload_url`, as for any page. `data:` images are taken out and stored the same way.
 - **The title** is the page's `title`, else its `<title>`, else its path.
 
 A mockup is laid out at the frame's width, so media queries and viewport units behave as they would in a window that wide.

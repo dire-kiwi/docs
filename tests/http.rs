@@ -2312,6 +2312,251 @@ async fn avif_and_other_formats_are_accepted() {
     );
 }
 
+impl TestApp {
+    /// Send a file's bytes to an upload URL (or to `/api/uploads` with a bearer token).
+    async fn upload(&self, method: &str, url: &str, bearer: Option<&str>, body: Vec<u8>) -> Resp {
+        let mut req = Request::builder()
+            .method(method)
+            .uri(url.strip_prefix("http://docs.test").unwrap_or(url))
+            .header(header::CONTENT_TYPE, "application/octet-stream");
+        if let Some(token) = bearer {
+            req = req.header(header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        self.send(req.body(Body::from(body)).unwrap()).await
+    }
+}
+
+#[tokio::test]
+async fn images_are_uploaded_on_their_own() {
+    let t = TestApp::new().await;
+    let (cookie, token) = t.user("alice").await;
+    let (_, bob) = t.user("bob").await;
+
+    // An agent asks for a URL, and sends the files to it with no other credentials.
+    let made = t.tool(&token, "create_upload_url", json!({})).await;
+    let url = made["upload_url"].as_str().unwrap().to_string();
+    assert!(url.starts_with("http://docs.test/api/uploads/"), "{url}");
+    assert_eq!(made["expires_in"], 3600);
+    assert!(made["curl"].as_str().unwrap().contains(&url));
+    let chart = t.upload("POST", &url, None, png(64, 48)).await;
+    assert_eq!(chart.status, StatusCode::OK, "{}", chart.body);
+    let chart = chart.json();
+    let chart_id = chart["id"].as_str().unwrap().to_string();
+    assert!(is_uuid(&chart_id), "{chart}");
+    assert_eq!(chart["expires_in"], 86400);
+    let stored = stored_images(&t).await;
+    assert_eq!(stored.len(), 1);
+    assert!(is_avif(&stored[0]));
+    assert_eq!(chart["bytes"], stored[0].len());
+    // `curl -T` sends a PUT; the URL takes any number of images.
+    let photo = t
+        .upload("PUT", &url, None, encoded(&noisy(80, 60, 20), image::ImageFormat::Jpeg))
+        .await;
+    assert_eq!(photo.status, StatusCode::OK, "{}", photo.body);
+    let photo_id = photo.json()["id"].as_str().unwrap().to_string();
+    assert_ne!(photo_id, chart_id);
+
+    // A publish names the uploads instead of carrying their bytes.
+    let published = t
+        .tool(
+            &token,
+            "publish_document",
+            json!({
+                "slug": "shots",
+                "pages": [{ "path": "index", "content": "# Shots\n\n![chart](images/chart.png) ![photo](photo.jpg)" }],
+                "images": [
+                    { "name": "images/chart.png", "upload": chart_id.to_uppercase() },
+                    { "name": "photo.jpg", "upload": photo_id },
+                ],
+            }),
+        )
+        .await;
+    assert_eq!(published["warnings"], json!([]));
+    let images = published["images"].as_array().unwrap();
+    assert_eq!(images.len(), 2);
+    let shots = t.doc_path(&token, "shots").await;
+    let chart_url = images[0]["url"].as_str().unwrap().replace("http://docs.test", "");
+    assert!(chart_url.starts_with(&format!("{shots}/-/images/")), "{chart_url}");
+    let served = t.get(&chart_url, &cookie).await;
+    assert_eq!(served.status, StatusCode::OK);
+    assert!(is_avif(&served.bytes));
+    assert!(t.get(&format!("{shots}/"), &cookie).await.body.contains(&chart_url));
+    assert_eq!(stored_images(&t).await.len(), 2, "nothing is stored twice");
+
+    // An upload can be published again, but only by whoever uploaded it.
+    let again = json!({ "slug": "shots", "pages": [{ "path": "index", "content": "![c](c.png)" }], "images": [{ "name": "c.png", "upload": chart_id }] });
+    let v2 = t.tool(&token, "publish_document", again.clone()).await;
+    assert_eq!(v2["version"], 2);
+    assert_eq!(v2["images"].as_array().unwrap().len(), 1);
+    let missing = |id: &str| {
+        format!(
+            "image \"c.png\": there is no uploaded image {id:?}. Uploads are deleted a day after they are made, \
+             and only whoever uploaded an image can publish it: upload it again (create_upload_url)"
+        )
+    };
+    let theirs = json!({ "slug": "bobs", "pages": [{ "path": "index", "content": "x" }], "images": [{ "name": "c.png", "upload": chart_id }] });
+    assert_eq!(t.tool_error(&bob, "publish_document", theirs).await, missing(&chart_id));
+    assert_eq!(t.tool(&bob, "list_documents", json!({})).await["documents"], json!([]));
+    let unknown = json!({ "slug": "shots", "pages": [{ "path": "index", "content": "x" }], "images": [{ "name": "c.png", "upload": "nope" }] });
+    assert_eq!(t.tool_error(&token, "publish_document", unknown).await, missing("nope"));
+    let both = json!({ "slug": "shots", "pages": [{ "path": "index", "content": "x" }], "images": [{ "name": "c.png", "upload": chart_id, "data": b64(&png(8, 8)) }] });
+    assert_eq!(
+        t.tool_error(&token, "publish_document", both).await,
+        "image \"c.png\" needs either `data` (its bytes in base64) or `upload` (the id of an image uploaded with create_upload_url), and not both"
+    );
+
+    // What an upload URL refuses.
+    let error = |res: Resp, status: StatusCode| {
+        assert_eq!(res.status, status, "{}", res.body);
+        res.json()["error"].as_str().unwrap().to_string()
+    };
+    let svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>".to_vec();
+    assert_eq!(
+        error(t.upload("POST", &url, None, svg).await, StatusCode::BAD_REQUEST),
+        "the uploaded image is SVG, which isn't supported: images must be PNG, JPEG, WebP, GIF or AVIF"
+    );
+    assert!(
+        error(t.upload("POST", &url, None, Vec::new()).await, StatusCode::BAD_REQUEST)
+            .starts_with("send the image file itself as the request body")
+    );
+    let form = t
+        .send(
+            Request::post(url.strip_prefix("http://docs.test").unwrap())
+                .header(header::CONTENT_TYPE, "multipart/form-data; boundary=x")
+                .body(Body::from("--x--"))
+                .unwrap(),
+        )
+        .await;
+    assert!(error(form, StatusCode::BAD_REQUEST).contains("not a form"));
+    let too_big = encoded(&noisy(1600, 1600, 60), image::ImageFormat::Png);
+    assert!(
+        error(t.upload("POST", &url, None, too_big).await, StatusCode::BAD_REQUEST)
+            .starts_with("the uploaded image is ")
+    );
+    assert!(
+        error(
+            t.upload("POST", "/api/uploads/not-a-token", None, png(8, 8)).await,
+            StatusCode::NOT_FOUND
+        )
+        .starts_with("this upload URL isn't valid any more")
+    );
+    assert_eq!(
+        error(
+            t.upload("POST", &url, None, vec![0; 32 * 1024 * 1024 + 1]).await,
+            StatusCode::PAYLOAD_TOO_LARGE
+        ),
+        "the uploaded image is over 33554432 bytes (32 MiB), the most an upload can be: downscale it"
+    );
+    assert_eq!(stored_images(&t).await.len(), 2);
+
+    // Clients with a token of their own upload without asking for a URL.
+    let direct = t.upload("POST", "/api/uploads", Some(&token), png(20, 20)).await;
+    assert_eq!(direct.status, StatusCode::OK, "{}", direct.body);
+    let direct_id = direct.json()["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        t.upload("POST", "/api/uploads", None, png(20, 20)).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        t.upload("POST", "/api/uploads", Some("nope"), png(20, 20)).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+
+    // Uploads last a day, and their URL an hour: after that they're gone, with the images no document has.
+    assert_eq!(db::purge_uploads(&t.state.db).await.unwrap(), 0);
+    sqlx::query("UPDATE uploads SET expires_at = 0; UPDATE upload_urls SET expires_at = 0")
+        .execute(&t.state.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        t.upload("POST", &url, None, png(8, 8)).await.status,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        t.tool_error(&token, "publish_document", again).await,
+        missing(&chart_id)
+    );
+    assert_eq!(stored_images(&t).await.len(), 3);
+    assert_eq!(db::purge_uploads(&t.state.db).await.unwrap(), 3);
+    assert_eq!(stored_images(&t).await.len(), 2, "the published ones stay");
+    assert_eq!(t.get(&chart_url, &cookie).await.status, StatusCode::OK);
+    let gone = json!({ "slug": "shots", "pages": [{ "path": "index", "content": "x" }], "images": [{ "name": "c.png", "upload": direct_id }] });
+    assert_eq!(
+        t.tool_error(&token, "publish_document", gone).await,
+        missing(&direct_id)
+    );
+
+    // No more than 200 wait at once.
+    let (alice_id,): (i64,) = sqlx::query_as("SELECT id FROM users WHERE login = 'alice'")
+        .fetch_one(&t.state.db)
+        .await
+        .unwrap();
+    for n in 0..200 {
+        sqlx::query("INSERT INTO uploads (uuid, owner_id, sha256, created_at, expires_at) VALUES (?, ?, 'x', 0, ?)")
+            .bind(format!("waiting-{n}"))
+            .bind(alice_id)
+            .bind(db::now() + 60)
+            .execute(&t.state.db)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        error(
+            t.upload("POST", "/api/uploads", Some(&token), png(8, 8)).await,
+            StatusCode::TOO_MANY_REQUESTS
+        ),
+        "there are 200 uploaded images waiting already, the most there can be: they are deleted a day after they are uploaded"
+    );
+    assert_eq!(stored_images(&t).await.len(), 2);
+}
+
+#[tokio::test]
+async fn an_upload_goes_to_the_documents_owner() {
+    let t = TestApp::new().await;
+    let (alice_cookie, alice) = t.user("alice").await;
+    let (bob_cookie, bob) = t.user("bob").await;
+    let csrf = csrf_of(&t.get("/orgs", &alice_cookie).await.body);
+    t.post_form("/orgs", &alice_cookie, &[("csrf", &csrf), ("name", "Acme")])
+        .await;
+    t.post_form(
+        "/orgs/acme/members",
+        &alice_cookie,
+        &[("csrf", &csrf), ("action", "member"), ("login", "bob")],
+    )
+    .await;
+    t.tool(
+        &alice,
+        "publish_document",
+        json!({ "slug": "shared", "organization": "acme", "pages": [{ "path": "index", "content": "# Shared" }] }),
+    )
+    .await;
+
+    // Bob uploads, and publishes it to alice's document in their organization: the image is stored with her.
+    let uploaded = t.upload("POST", "/api/uploads", Some(&bob), png(40, 30)).await;
+    let id = uploaded.json()["id"].as_str().unwrap().to_string();
+    let v2 = t
+        .tool(
+            &bob,
+            "publish_document",
+            json!({ "slug": "shared", "pages": [{ "path": "index", "content": "![s](s.png)" }], "images": [{ "name": "s.png", "upload": id }] }),
+        )
+        .await;
+    let image = v2["images"][0]["url"].as_str().unwrap().replace("http://docs.test", "");
+    for cookie in [&alice_cookie, &bob_cookie] {
+        let res = t.get(&image, cookie).await;
+        assert_eq!(res.status, StatusCode::OK);
+        assert!(is_avif(&res.bytes));
+    }
+    // Once bob's upload expires, the document's copy stays.
+    sqlx::query("UPDATE uploads SET expires_at = 0")
+        .execute(&t.state.db)
+        .await
+        .unwrap();
+    assert_eq!(db::purge_uploads(&t.state.db).await.unwrap(), 1);
+    assert_eq!(stored_images(&t).await.len(), 1);
+    assert_eq!(t.get(&image, &alice_cookie).await.status, StatusCode::OK);
+}
+
 /// The JSON the editor page gives the editor.
 fn editor_data(html: &str) -> Value {
     let start = html

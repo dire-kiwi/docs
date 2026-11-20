@@ -122,19 +122,21 @@ export interface ValidPage {
   imageSrcs: string[];
 }
 
-/** An image as passed to publish_document's `images`, or taken out of a page. */
+/** An image as passed to publish_document's `images`: its bytes (`data`), or an image uploaded on its own (`upload`). */
 export interface ImageInput {
   /** Relative path pages refer to it by, e.g. "images/chart.png". */
   name: string;
   /** Base64 of the image bytes. */
-  data: string;
+  data?: string | null;
+  /** The id of an image uploaded to a create_upload_url URL, instead of `data`. */
+  upload?: string | null;
 }
 
 export interface ExtractedImages {
   /** The page source with each inline image's `data:` URI replaced by its name. */
   content: string;
   /** Each image once; `data` is base64 of the original bytes (to convert to AVIF). */
-  images: ImageInput[];
+  images: { name: string; data: string }[];
 }
 
 export interface ImageLimits {
@@ -144,6 +146,36 @@ export interface ImageLimits {
   maxImages: number;
   /** Per page, not counting image data: 1000000. */
   maxPageBytes: number;
+  /** Per file uploaded on its own, before conversion: 33554432. */
+  maxUploadBytes: number;
+  /** How long a create_upload_url URL takes images: 3600. */
+  uploadUrlSeconds: number;
+  /** How long an uploaded image waits to be published: 86400. */
+  uploadKeptSeconds: number;
+  /** Uploaded images one uploader may have waiting: 200. */
+  maxWaitingUploads: number;
+}
+
+/** What an upload URL answers when it can't keep an image, by why. */
+export interface UploadErrors {
+  /** Its uploader has as many uploads waiting as there can be (HTTP 429). */
+  tooMany: string;
+  /** The file is over `maxUploadBytes` (HTTP 413). */
+  tooBig: string;
+  /** The URL's token isn't one that still takes uploads (HTTP 404). */
+  url: string;
+  /** The request has no image file as its body: it is empty, or a form (HTTP 400). */
+  body: string;
+}
+
+/** An entry of publish_document's `images` that names an image uploaded on its own: stored already, to look up by its id. */
+export interface UploadedImage {
+  /** Normalised name pages refer to it by. */
+  name: string;
+  /** How errors name it: `image "images/chart.png"`. */
+  label: string;
+  /** The upload's id, trimmed and in lower case. */
+  upload: string;
 }
 
 export interface ValidatedPage extends ValidPage {
@@ -484,10 +516,12 @@ pub fn validate_pages(#[wasm_bindgen(unchecked_param_type = "PageInput[]")] page
 /// Check the pages and images of a publish the way publish_document does: `validatePages`, plus
 /// the `images` (names, base64, formats, duplicates) and the inline `data:` images taken out of
 /// the pages, at most 200 in all. The images are recognised but not converted: convert each to
-/// AVIF and check its size with `imageTooLargeError`. Throws the message publish_document would return.
+/// AVIF and check its size with `imageTooLargeError`. Those given by `upload` come back in
+/// `uploaded`: look each up by its id (`imageUploadMissingError` when there is none).
+/// Throws the message publish_document would return.
 #[wasm_bindgen(
     js_name = validatePublish,
-    unchecked_return_type = "{ pages: ValidPage[]; images: ImageUpload[]; warnings: PageWarning[] }"
+    unchecked_return_type = "{ pages: ValidPage[]; images: ImageUpload[]; uploaded: UploadedImage[]; warnings: PageWarning[] }"
 )]
 pub fn validate_publish(
     #[wasm_bindgen(unchecked_param_type = "PageInput[]")] pages: JsValue,
@@ -505,8 +539,51 @@ pub fn validate_publish(
             "format": im.format.as_str(),
             "data": base64::engine::general_purpose::STANDARD.encode(&im.data),
         })).collect::<Vec<_>>(),
+        "uploaded": v.uploaded.iter().map(|u| json!({ "name": u.name, "label": u.label, "upload": u.upload })).collect::<Vec<_>>(),
         "warnings": v.warnings,
     })))
+}
+
+/// Check an image file uploaded on its own (to a create_upload_url URL), given as base64: its size
+/// and what it is. Convert it to AVIF as any other image, with `label` as its `subject`.
+/// Throws the message the upload answers with.
+#[wasm_bindgen(
+    js_name = validateUpload,
+    unchecked_return_type = "{ label: string; format: ImageUpload[\"format\"] }"
+)]
+pub fn validate_upload(#[wasm_bindgen(unchecked_param_type = "string")] data: JsValue) -> JsResult<JsValue> {
+    let label = images::UPLOAD_LABEL;
+    let data = images::decode_base64(label, &string(&data, "data")?).map_err(err)?;
+    if data.len() > images::MAX_UPLOAD_BYTES {
+        return Err(err(images::upload_too_big_error()));
+    }
+    let format = images::sniff(label, &data).map_err(err)?;
+    Ok(to_js(&json!({ "label": label, "format": format.as_str() })))
+}
+
+/// The error publish_document reports for an `upload` that isn't an upload the publisher can use.
+#[wasm_bindgen(js_name = imageUploadMissingError)]
+pub fn image_upload_missing_error(
+    #[wasm_bindgen(unchecked_param_type = "string")] subject: JsValue,
+    #[wasm_bindgen(unchecked_param_type = "string")] id: JsValue,
+) -> JsResult<String> {
+    Ok(images::upload_missing_error(
+        &string(&subject, "subject")?,
+        &string(&id, "id")?,
+    ))
+}
+
+/// What an upload URL answers when it can't keep an image, by why: `tooMany` (its uploader has as
+/// many waiting as there can be), `tooBig` (the file is over the limit), `url` (the URL's token
+/// isn't one that still takes uploads) and `body` (the request has no image file as its body).
+#[wasm_bindgen(js_name = uploadErrors, unchecked_return_type = "UploadErrors")]
+pub fn upload_errors() -> JsValue {
+    to_js(&json!({
+        "tooMany": images::too_many_uploads_error(),
+        "tooBig": images::upload_too_big_error(),
+        "url": images::upload_url_error(),
+        "body": images::upload_body_error(),
+    }))
 }
 
 /// The error publish_document reports for an image whose bytes can't be decoded.
@@ -593,6 +670,10 @@ pub fn image_limits() -> JsValue {
         "maxImageBytes": images::MAX_IMAGE_BYTES,
         "maxImages": images::MAX_IMAGES,
         "maxPageBytes": publish::MAX_PAGE_BYTES,
+        "maxUploadBytes": images::MAX_UPLOAD_BYTES,
+        "uploadUrlSeconds": images::UPLOAD_URL_SECONDS,
+        "uploadKeptSeconds": images::UPLOAD_KEPT_SECONDS,
+        "maxWaitingUploads": images::MAX_WAITING_UPLOADS,
     }))
 }
 

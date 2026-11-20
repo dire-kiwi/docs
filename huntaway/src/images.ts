@@ -29,9 +29,8 @@ export const makeImages = Effect.gen(function* () {
 
   const sha256 = (bytes: Uint8Array) => Effect.sync(() => createHash("sha256").update(bytes).digest("hex"))
 
-  const toAvif = Effect.fnUntraced(function* (lib: RenderLib, im: ImageUpload) {
+  const toAvif = Effect.fnUntraced(function* (lib: RenderLib, im: Omit<ImageUpload, "data">, bytes: Uint8Array) {
     const convert = yield* load
-    const bytes = yield* Effect.orDie(Effect.fromResult(Base64.decode(im.data)))
     const unreadable = (e: unknown) => new ImageRefused({ message: lib.imageUnreadableError(im.label, message(e)) })
     const out =
       im.format === "avif"
@@ -59,7 +58,10 @@ export const makeImages = Effect.gen(function* () {
 
   return {
     /** Each image converted, one at a time (each takes all of libvips' threads). */
-    convert: (lib: RenderLib, images: ReadonlyArray<ImageUpload>) => Effect.forEach(images, (im) => toAvif(lib, im), { concurrency: 1 }),
+    convert: (lib: RenderLib, images: ReadonlyArray<ImageUpload>) =>
+      Effect.forEach(images, (im) => Effect.flatMap(Effect.orDie(Effect.fromResult(Base64.decode(im.data))), (bytes) => toAvif(lib, im, bytes)), { concurrency: 1 }),
+    /** One image converted from its bytes (a file uploaded on its own). */
+    convertBytes: toAvif,
   }
 })
 

@@ -21,6 +21,7 @@ Each run has an MCP server named `docs`. In Claude Code its tools are `mcp__docs
 | Tool | What it does |
 |------|--------------|
 | `publish_document` | Create a document or publish a new version of one. Pass `pages` (`{ path, content, format?, title? }`) and optionally `slug`, `title`, `message`, `folder`, `labels` and `images`. `mode: "merge"` keeps the previous version's other pages, and `delete_paths` drops some of them. |
+| `create_upload_url` | A URL to send image files to with HTTP, so they don't go through a tool call as base64. Each upload answers with an id to give in `publish_document`'s `images`. |
 | `list_documents` | The profile's documents, with each one's folder, labels, latest version and URL; `label` lists only those with that label or one under it. |
 | `get_document` | A document's pages (paths, titles, URLs), images and version history. |
 | `read_page` | The source of one page (Markdown, MDX, or a mockup's HTML), from the latest version or a given `version`. |
@@ -90,7 +91,26 @@ Publish again with the same `slug` and `mode: "merge"`:
 
 <Details summary="Images">
 
-Pass images in `images` and refer to them by name, or inline them in a page as `data:image/png;base64,...` URIs:
+Pages show images by name (`![Throughput](images/throughput.png)`), and `publish_document`'s `images` says what each name is.
+
+For an image file (a screenshot, a chart), upload it on its own, so its bytes never go through a tool call. Call `create_upload_url`, send each file to the URL it gives, and name the id each upload answers with:
+
+```sh
+curl -sS --data-binary @throughput.png "http://<board>/plugins/docs/uploads/<token>"
+# {"id":"4525d59b-4892-40a4-9384-effcad3ace96","bytes":2085,"expires_in":86400}
+```
+
+```json
+{
+  "slug": "benchmarks",
+  "pages": [{ "path": "index", "content": "# Results\n\n![Throughput](images/throughput.png)" }],
+  "images": [{ "name": "images/throughput.png", "upload": "4525d59b-4892-40a4-9384-effcad3ace96" }]
+}
+```
+
+The URL has a random token in it and takes any number of images for an hour: whoever has it can upload to the profile, so it doesn't belong in a document. An upload's id is a random UUID that only the profile's agents can publish with, in as many publishes as they like, and an upload is deleted a day after it was made (an image a document has stays with the document). A file can be up to 32 MiB. Send it as the request body, not as a form (`curl -T` works too).
+
+A small image can also come with the publish as base64 in `data`, or inline in a page as a `data:image/png;base64,...` URI:
 
 ```json
 {

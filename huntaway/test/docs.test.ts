@@ -182,6 +182,98 @@ describe("images", () => {
       }),
     ),
   )
+
+  it.effect("are uploaded on their own to an upload URL, and named in a publish by the id it answers", () =>
+    withHarness({}, (h) =>
+      Effect.gen(function* () {
+        const file = Buffer.from(yield* png(40, 30), "base64")
+        const count = (table: string) => Effect.map(h.sql<{ readonly n: number }>`SELECT COUNT(*) AS n FROM ${h.sql(table)}`.pipe(Effect.orDie), (r) => r[0]?.n ?? 0)
+
+        // An agent asks for a URL and sends the file to it: no token of the board's, and no base64 in a tool call.
+        const made = yield* h.ok("create_upload_url", {})
+        const url = made.upload_url as string
+        assert.match(url, /^http:\/\/board\.test\/plugins\/docs\/uploads\/[A-Za-z0-9_-]{43}$/)
+        assert.strictEqual(made.expires_in, 3600)
+        assert.include(made.curl, url)
+        assert.deepStrictEqual(
+          h.parts.routes?.map((r) => [r.method, r.path, r.auth]),
+          [
+            ["POST", "/uploads/:token", "public"],
+            ["PUT", "/uploads/:token", "public"],
+          ],
+        )
+        const chart = yield* h.route("POST", url, file)
+        assert.strictEqual(chart.status, 200)
+        assert.match(chart.json.id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+        assert.strictEqual(chart.json.expires_in, 86400)
+        assert.isAbove(chart.json.bytes, 0)
+        // The URL takes any number of images (`curl -T` sends a PUT); the same bytes are kept once.
+        const again = yield* h.route("PUT", url, file)
+        assert.strictEqual(again.status, 200)
+        assert.notStrictEqual(again.json.id, chart.json.id)
+        assert.strictEqual(yield* count("doc_images"), 1)
+        // The token itself isn't kept.
+        assert.notInclude(JSON.stringify(yield* h.sql`SELECT * FROM doc_upload_urls`), url.split("/").at(-1) ?? "")
+
+        const out = yield* h.ok("publish_document", {
+          slug: "shots",
+          pages: [{ path: "index", content: "# Shots\n\n![Chart](images/chart.png)" }],
+          images: [{ name: "images/chart.png", upload: chart.json.id.toUpperCase() }],
+        })
+        assert.deepStrictEqual(out.warnings, [])
+        assert.deepStrictEqual(
+          out.images.map((im: { name: string; width: number; height: number; bytes: number }) => [im.name, im.width, im.height, im.bytes]),
+          [["images/chart.png", 40, 30, chart.json.bytes]],
+        )
+        assert.match((yield* h.page("p1/d/shots/")).html, /<img src="data:image\/avif;base64,/)
+        // An upload can be published again while it lasts.
+        const v2 = yield* h.ok("publish_document", { slug: "shots", pages: [{ path: "index", content: "![c](c.png)" }], images: [{ name: "c.png", upload: again.json.id }] })
+        assert.deepStrictEqual([v2.version, v2.images.length], [2, 1])
+
+        // What a publish and an upload URL refuse, in the hosted site's words.
+        const page = [{ path: "index", content: "# x" }]
+        const missing = (id: string) =>
+          `image "c.png": there is no uploaded image "${id}". Uploads are deleted a day after they are made, and only whoever uploaded an image can publish it: upload it again (create_upload_url)`
+        assert.strictEqual(yield* h.refused("publish_document", { slug: "nope", pages: page, images: [{ name: "c.png", upload: "nope" }] }), missing("nope"))
+        assert.strictEqual((yield* h.tool("get_document", { slug: "nope" })).isError, true, "a refused publish makes no document")
+        assert.strictEqual(
+          yield* h.refused("publish_document", { pages: page, images: [{ name: "c.png" }] }),
+          'image "c.png" needs either `data` (its bytes in base64) or `upload` (the id of an image uploaded with create_upload_url), and not both',
+        )
+        assert.deepStrictEqual(yield* h.route("POST", url, "<svg></svg>"), {
+          status: 400,
+          json: { error: "the uploaded image is SVG, which isn't supported: images must be PNG, JPEG, WebP, GIF or AVIF" },
+        })
+        assert.match((yield* h.route("POST", url, "")).json.error, /^send the image file itself as the request body/)
+        const form = yield* h.route("POST", url, "--x--", { "content-type": "multipart/form-data; boundary=x" })
+        assert.deepStrictEqual([form.status, /not a form/.test(form.json.error)], [400, true])
+        const wrong = yield* h.route("POST", url.replace(/[^/]+$/, "not-a-token"), file)
+        assert.deepStrictEqual([wrong.status, /^this upload URL isn't valid any more/.test(wrong.json.error)], [404, true])
+
+        // No more than 200 wait at once.
+        const later = Date.now() + 60_000
+        for (let n = 0; n < 198; n++) yield* h.sql`INSERT INTO doc_uploads (id, profile_id, sha256, created_at, expires_at) VALUES (${`w${n}`}, 'p1', 'x', '', ${later})`.pipe(Effect.orDie)
+        const full = yield* h.route("POST", url, file)
+        assert.deepStrictEqual(full, {
+          status: 429,
+          json: { error: "there are 200 uploaded images waiting already, the most there can be: they are deleted a day after they are uploaded" },
+        })
+
+        // Uploads last a day and their URL an hour: after that they go, with the images no document has.
+        const other = Buffer.from(yield* png(20, 20), "base64")
+        yield* h.sql`DELETE FROM doc_uploads WHERE sha256 = 'x'`.pipe(Effect.orDie)
+        const unused = yield* h.route("POST", url, other)
+        assert.strictEqual(yield* count("doc_images"), 2)
+        yield* h.sql`UPDATE doc_uploads SET expires_at = 0`.pipe(Effect.orDie)
+        yield* h.sql`UPDATE doc_upload_urls SET expires_at = 0`.pipe(Effect.orDie)
+        assert.strictEqual((yield* h.route("POST", url, file)).status, 404)
+        assert.strictEqual(yield* h.refused("publish_document", { slug: "shots", pages: page, images: [{ name: "c.png", upload: unused.json.id }] }), missing(unused.json.id))
+        yield* h.ok("create_upload_url", {})
+        assert.deepStrictEqual([yield* count("doc_uploads"), yield* count("doc_upload_urls"), yield* count("doc_images")], [0, 1, 1])
+        assert.match((yield* h.page("p1/d/shots/")).html, /<img src="data:image\/avif;base64,/)
+      }),
+    ),
+  )
 })
 
 describe("labels and lists", () => {
@@ -230,6 +322,7 @@ describe("labels and lists", () => {
           "get_document",
           "read_page",
           "publish_document",
+          "create_upload_url",
           "move_document",
           "set_document_labels",
           "list_labels",

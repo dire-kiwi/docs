@@ -55,9 +55,12 @@ export const INSTRUCTIONS =
   'it is (`"plans"` is a top-level folder, `"<project>/plans"` one inside the project\'s), and later versions stay ' +
   "wherever the document is. Use `move_document` only when the user asks to move one. Documents can also have labels, " +
   "nested with '/' (\"research/ai\"): pass `labels` to `publish_document` or call `set_document_labels`, and call " +
-  "`list_labels` to reuse the labels that already exist rather than inventing near-duplicates. Images: pass them to " +
-  "`publish_document` as `images` ({name, data}: base64 PNG, JPEG, WebP, GIF or AVIF, name a relative path like " +
-  '"images/chart.png") and refer to them by name (`![Chart](images/chart.png)`), or inline them as data: URIs. Every image ' +
+  "`list_labels` to reuse the labels that already exist rather than inventing near-duplicates. Images: for an image " +
+  "file (a screenshot, a chart), call `create_upload_url` and send the file to the URL it gives with HTTP " +
+  '(`curl -sS --data-binary @shot.png "<upload_url>"`), so its bytes never go through a tool call; it answers an id, ' +
+  "and you pass `{name, upload: <id>}` in `publish_document`'s `images` (name a relative path like " +
+  '"images/chart.png") and refer to the image by name (`![Chart](images/chart.png)`). Small images can also go in ' +
+  "`images` as `{name, data}` (base64 PNG, JPEG, WebP, GIF or AVIF), or inline in a page as data: URIs. Every image " +
   "is converted to AVIF and must be at most 500 KB after that (downscale or crop one that isn't); only the AVIF is kept, " +
   "not the original, and SVG and remote images aren't shown. Always give the reader the URL returned by `publish_document`."
 
@@ -194,6 +197,7 @@ export const docsTools = (lib: RenderLib, docs: Docs): ReadonlyArray<PluginTool>
         return yield* docs.feedback(c, yield* read(a.str("slug")), yield* read(a.optInt("version")), yield* read(a.optInt("since")))
       }),
     list_components: () => docs.components,
+    create_upload_url: (c) => docs.uploadUrl(c),
   }
 
   return definitions(lib).flatMap((d): ReadonlyArray<PluginTool> => {

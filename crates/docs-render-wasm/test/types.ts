@@ -21,4 +21,4 @@ const limit: number = imageLimits().maxImageBytes;
 const withImages = render("x", "md", { pagePath: "a", baseUrl: "/", images: { "a.png": "/a.avif" } }).imageSrcs;
 export { extracted, limit, withImages };
 export { html, fields, title, pages, warnings, nav, suffix, schema, folder, labels, counts };
-export const publishable: string = validatePublish([{ path: "index", content: "x" }], [{ name: "a.png", data: "" }]).images.map((i) => i.name + i.label + i.format + i.data).join();
+export const publishable: string = validatePublish([{ path: "index", content: "x" }], [{ name: "a.png", data: "" }, { name: "b.png", upload: "id" }]).images.map((i) => i.name + i.label + i.format + i.data).join();
