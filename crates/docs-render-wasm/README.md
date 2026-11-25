@@ -7,7 +7,7 @@ The renderer of [docs](https://github.com/dire-kiwi/docs) as WebAssembly, for No
 Each release attaches the package to a GitHub release, so it installs from a URL, without a registry or a token:
 
 ```sh
-pnpm add https://github.com/dire-kiwi/docs/releases/download/render-v0.6.0/dire-kiwi-docs-render-0.6.0.tgz
+pnpm add https://github.com/dire-kiwi/docs/releases/download/render-v0.7.0/dire-kiwi-docs-render-0.7.0.tgz
 ```
 
 ## Use it from Node

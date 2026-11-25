@@ -287,14 +287,16 @@ main.page {
   padding: 36px var(--gutter) 72px;
 }
 
-main.page > h1 {
+main.page > h1,
+.home-head h1 {
   font-size: clamp(2em, 1.4em + 3vw, 2.7em);
   line-height: 1.05;
   letter-spacing: -0.025em;
   margin: 0 0 0.6em;
 }
 
-main.page > h1::after {
+main.page > h1::after,
+.home-head h1::after {
   content: "";
   display: block;
   width: 2.2em;
@@ -1043,6 +1045,10 @@ main.page form.row input[type="text"] {
   max-width: 420px;
 }
 
+main.page form.row select {
+  width: auto;
+}
+
 /* ---------- home: the folder tree ---------- */
 
 /* The documents, as a ledger on a sheet. */
@@ -1412,7 +1418,7 @@ form.stack label {
 
 .home-head {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
 }
@@ -1428,4 +1434,108 @@ form.stack label {
   font-size: 0.9em;
   padding: 4px 12px;
   color: inherit;
+}
+
+/* ---------- the editors, in the site's look ---------- */
+
+/*
+ * editor.css and design/design.css are shared with the Huntaway plugin, which gives them the
+ * board's look. What makes them the site's is here: ink lines, hard shadows and mono labels.
+ */
+
+.editor input[type="text"],
+.editor select,
+.editor textarea {
+  border: 1.5px solid var(--line);
+  border-radius: 3px;
+}
+
+.editor-bar {
+  background: var(--bg);
+  border-bottom: 1.5px solid var(--line);
+}
+
+.editor-pages h2,
+.dz h3 {
+  font-family: var(--mono);
+  letter-spacing: 0.12em;
+}
+
+/* The pages are a list, not a row of buttons: only the open one is lifted, like the page menu of a document. */
+.editor-page-list button,
+.editor-page-list button:hover,
+.editor-page-list button:active {
+  border-width: 1.5px;
+  border-radius: 3px;
+  box-shadow: none;
+  transform: none;
+}
+
+.editor-page-list button.on {
+  background: var(--bg);
+  border-color: var(--line);
+  box-shadow: var(--lift);
+}
+
+.editor-modes button:first-child {
+  border-radius: 3px 0 0 3px;
+}
+
+.editor-modes button:last-child {
+  border-radius: 0 3px 3px 0;
+}
+
+/* The preview is the page: a sheet on the desk. */
+.editor-preview-wrap {
+  border: 1.5px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  box-shadow: var(--lift);
+}
+
+.editor-mockup {
+  border: 1.5px solid var(--line);
+  border-radius: 3px;
+}
+
+/*
+ * The design editor's controls are small and many, and some are text or marks placed with a
+ * transform of their own: the site's lifted buttons don't reach into it. (:where keeps these as
+ * weak as the rules they undo, so design.css still wins.)
+ */
+:where(.dz) button,
+:where(.dz) button:hover,
+:where(.dz) button:active {
+  box-shadow: none;
+  transform: none;
+}
+
+.dz-bar {
+  border-bottom: 1.5px solid var(--line);
+}
+
+/* The bar's own controls are the site's: an ink line and a hard shadow. */
+.dz-bar > button,
+.dz-bar > select,
+.dz-group {
+  border-radius: 3px;
+  box-shadow: 2px 2px 0 var(--shadow);
+}
+
+.dz-bar > button,
+.dz-bar > select,
+.dz-group button {
+  border-color: var(--line);
+}
+
+.dz-group button:first-child {
+  border-radius: 3px 0 0 3px;
+}
+
+.dz-group button:last-child {
+  border-radius: 0 3px 3px 0;
+}
+
+.dz-group button[aria-pressed="true"] {
+  border-color: var(--line);
 }
