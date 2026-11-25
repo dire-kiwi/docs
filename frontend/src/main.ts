@@ -1,3 +1,8 @@
+import "@fontsource-variable/fraunces/opsz.css";
+import "@fontsource-variable/fraunces/opsz-italic.css";
+import "@fontsource-variable/atkinson-hyperlegible-next/wght.css";
+import "@fontsource-variable/atkinson-hyperlegible-next/wght-italic.css";
+import "@fontsource-variable/atkinson-hyperlegible-mono/wght.css";
 import "./styles.css";
 import { initDesign } from "./design/design-site.ts";
 import { initEditor } from "./editor-site.ts";
@@ -5,8 +10,10 @@ import { initFields } from "./fields.ts";
 import { initFolders } from "./folders.ts";
 import { initNav } from "./nav.ts";
 import { initSelections } from "./selection.ts";
+import { initTheme } from "./theme.ts";
 import { initTimes } from "./time.ts";
 
+initTheme();
 initNav();
 initTimes(document);
 initFields();

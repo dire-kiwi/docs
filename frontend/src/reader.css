@@ -1,43 +1,44 @@
 /*
- * Styles for rendered pages: colours, code, tables, rendered Markdown/MDX and
- * form fields. The site imports this from styles.css; the npm package
+ * Styles for rendered pages: colours, type, code, tables, rendered Markdown/MDX
+ * and form fields. The site imports this from styles.css; the npm package
  * (@dire-kiwi/docs-render) ships it as styles.css, scoped under `.docs-render`
  * (see crates/docs-render-wasm/build.sh). Keep site chrome out of this file.
+ *
+ * The look is print: ink on paper, hard offset shadows, a serif for headings and
+ * mono for labels. Every colour is a light-dark() pair, so `color-scheme` picks
+ * the theme: the reader's system by default, or `light`/`dark` set on an ancestor.
  */
 
 :root {
   color-scheme: light dark;
-  --bg: #ffffff;
-  --bg-soft: #f6f7f9;
-  --bg-mark: #fff3bf;
-  --fg: #1d2129;
-  --fg-muted: #5c6370;
-  --border: #e2e5ea;
-  --accent: #2f6fde;
-  --accent-fg: #ffffff;
-  --danger: #c4373a;
-  --success: #24864a;
-  --warning: #a86200;
-  --radius: 8px;
-  --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
-  --topbar: 52px;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #15171c;
-    --bg-soft: #1e2128;
-    --bg-mark: #5a4a0f;
-    --fg: #e4e6eb;
-    --fg-muted: #9aa1ad;
-    --border: #2e323b;
-    --accent: #6ea0ff;
-    --accent-fg: #0d1117;
-    --danger: #ff7b7e;
-    --success: #5fd08a;
-    --warning: #f0b55a;
-  }
+  /* Paper and ink. */
+  --bg: light-dark(#fdfaf3, #1d1b17);
+  --bg-soft: light-dark(#f1ebdd, #282520);
+  /* Highlighter, and the ink that stays readable on it in both themes. */
+  --bg-mark: light-dark(#ffe45c, #f0cf45);
+  --mark-fg: #1d1b16;
+  --fg: light-dark(#1d1b16, #ece5d5);
+  --fg-muted: light-dark(#696253, #a59d8b);
+  /* Hairlines, then the ink line around things you can use, and its offset shadow. */
+  --border: light-dark(#dbd2bf, #3b372f);
+  --line: light-dark(#1d1b16, #8a8270);
+  --shadow: light-dark(#1d1b16, #4a4539);
+  --accent: light-dark(#2440d8, #96a8ff);
+  --accent-fg: light-dark(#ffffff, #10132e);
+  --danger: light-dark(#c2331f, #ff8a75);
+  --success: light-dark(#1c7a43, #74d69a);
+  --warning: light-dark(#a05a00, #f3b655);
+  --code-bg: light-dark(#211f1a, #121110);
+  --code-fg: light-dark(#f3ecdb, #e9e2d2);
+  --radius: 4px;
+  --font:
+    "Atkinson Hyperlegible Next Variable", "Atkinson Hyperlegible Next", system-ui, -apple-system,
+    "Segoe UI", Roboto, sans-serif;
+  --font-display:
+    "Fraunces Variable", Fraunces, "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  --mono:
+    "Atkinson Hyperlegible Mono Variable", "Atkinson Hyperlegible Mono", ui-monospace, "SF Mono",
+    "JetBrains Mono", Menlo, Consolas, monospace;
 }
 
 * {
@@ -46,30 +47,33 @@
 
 a {
   color: var(--accent);
-  text-decoration-thickness: 1px;
-  text-underline-offset: 2px;
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 3px;
 }
 
 code,
 pre {
   font-family: var(--mono);
-  font-size: 0.9em;
+  font-size: 0.88em;
 }
 
 :not(pre) > code {
   background: var(--bg-soft);
   border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 0.05em 0.3em;
+  border-radius: 3px;
+  padding: 0.08em 0.35em;
 }
 
+/* Code is a slab of ink, in either theme. */
 pre {
-  background: var(--bg-soft);
-  border: 1px solid var(--border);
+  background: var(--code-bg);
+  color: var(--code-fg);
+  border: 1.5px solid var(--line);
   border-radius: var(--radius);
-  padding: 12px 16px;
+  padding: 14px 18px;
   overflow-x: auto;
-  line-height: 1.45;
+  line-height: 1.5;
+  tab-size: 2;
 }
 
 button,
@@ -85,40 +89,151 @@ input[type="text"],
 select,
 textarea {
   width: 100%;
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  border: 1.5px solid var(--line);
+  border-radius: 3px;
   background: var(--bg);
-  padding: 7px 10px;
+  padding: 8px 12px;
+  transition: box-shadow 0.12s ease;
 }
 
-input:focus-visible,
+::placeholder {
+  color: var(--fg-muted);
+  opacity: 0.75;
+}
+
+select {
+  appearance: none;
+  padding-right: 36px;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--fg) 50%),
+    linear-gradient(135deg, var(--fg) 50%, transparent 50%);
+  background-position:
+    calc(100% - 19px) 50%,
+    calc(100% - 13px) 50%;
+  background-size: 6px 6px;
+  background-repeat: no-repeat;
+  cursor: pointer;
+}
+
+input[type="text"]:focus-visible,
 select:focus-visible,
-textarea:focus-visible,
-button:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+textarea:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 3px 3px 0 var(--accent);
 }
 
+button:focus-visible,
+a:focus-visible,
+summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Checkboxes and radios, drawn: an ink box, filled when ticked. */
+input[type="checkbox"],
+input[type="radio"] {
+  appearance: none;
+  flex: none;
+  display: inline-grid;
+  place-content: center;
+  width: 1.15em;
+  height: 1.15em;
+  margin: 0;
+  /* The middle of the box on the middle of the lowercase letters, whatever the box's own baseline is. */
+  vertical-align: middle;
+  border: 1.5px solid var(--line);
+  border-radius: 3px;
+  background: var(--bg);
+  cursor: pointer;
+}
+
+input[type="radio"] {
+  border-radius: 50%;
+}
+
+input[type="checkbox"]::before,
+input[type="radio"]::before {
+  content: "";
+  width: 0.62em;
+  height: 0.62em;
+  background: var(--accent-fg);
+  transform: scale(0);
+  transition: transform 0.1s ease;
+}
+
+input[type="checkbox"]::before {
+  clip-path: polygon(12% 52%, 0 66%, 38% 100%, 100% 20%, 86% 8%, 37% 70%);
+}
+
+input[type="radio"]::before {
+  width: 0.5em;
+  height: 0.5em;
+  border-radius: 50%;
+}
+
+input[type="checkbox"]:checked,
+input[type="radio"]:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+input[type="checkbox"]:checked::before,
+input[type="radio"]:checked::before {
+  transform: scale(1);
+}
+
+input[type="checkbox"]:focus-visible,
+input[type="radio"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+input[type="checkbox"]:disabled,
+input[type="radio"]:disabled {
+  cursor: default;
+}
+
+/* Tables are ledgers: ruled top and bottom, labels in mono. */
 table {
   border-collapse: collapse;
   width: 100%;
+  border-top: 1.5px solid var(--line);
+  border-bottom: 1.5px solid var(--line);
+  font-variant-numeric: tabular-nums;
 }
 
 th,
 td {
   text-align: left;
-  padding: 8px 10px;
+  padding: 9px 12px;
   border-bottom: 1px solid var(--border);
   vertical-align: top;
 }
 
-th {
+thead th {
+  font-family: var(--mono);
+  font-size: 0.72em;
   font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+  background: var(--bg-soft);
+  border-bottom: 1.5px solid var(--line);
+  white-space: nowrap;
+}
+
+tbody th {
+  font-weight: 650;
+}
+
+tbody tr:last-child > * {
+  border-bottom: 0;
 }
 
 .table-wrap {
   overflow-x: auto;
-  margin: 1em 0;
+  margin: 1.4em 0;
 }
 
 .align-center {
@@ -133,37 +248,79 @@ th {
 
 .doc-content {
   line-height: 1.7;
+  counter-reset: question;
+  overflow-wrap: break-word;
 }
 
 .doc-content h1,
 .doc-content h2,
-.doc-content h3,
-.doc-content h4 {
-  line-height: 1.25;
-  margin: 1.6em 0 0.6em;
+.doc-content h3 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  line-height: 1.15;
+  letter-spacing: -0.015em;
+  margin: 1.7em 0 0.55em;
+  text-wrap: balance;
 }
 
 .doc-content h1 {
-  font-size: 2em;
+  font-size: clamp(1.9em, 1.3em + 3vw, 2.5em);
+  line-height: 1.05;
+  letter-spacing: -0.025em;
+  margin-top: 0.2em;
+  margin-bottom: 0.7em;
+}
+
+/* The title is underlined once, in the accent. */
+.doc-content h1::after {
+  content: "";
+  display: block;
+  width: 2.2em;
+  height: 5px;
   margin-top: 0.4em;
+  background: var(--accent);
 }
 
 .doc-content h2 {
-  font-size: 1.45em;
-  padding-bottom: 0.25em;
-  border-bottom: 1px solid var(--border);
+  font-size: 1.6em;
+  margin-top: 2em;
+  padding-top: 0.75em;
+  border-top: 1.5px solid var(--line);
+}
+
+.doc-content h3 {
+  font-size: 1.25em;
+}
+
+.doc-content h4,
+.doc-content h5,
+.doc-content h6 {
+  font-family: var(--mono);
+  font-size: 0.78em;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+  margin: 2em 0 0.6em;
 }
 
 .doc-content .anchor {
   margin-left: 0.3em;
-  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 0.7em;
+  color: var(--accent);
   text-decoration: none;
   opacity: 0;
   font-weight: 400;
 }
 
-.doc-content :is(h1, h2, h3, h4, h5, h6):hover .anchor {
+.doc-content :is(h1, h2, h3, h4, h5, h6):hover .anchor,
+.doc-content .anchor:focus-visible {
   opacity: 1;
+}
+
+.doc-content a:hover {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
 }
 
 .doc-content img {
@@ -171,77 +328,227 @@ th {
   height: auto;
 }
 
-.doc-content blockquote {
-  margin: 1em 0;
-  padding: 0 1em;
-  border-left: 3px solid var(--border);
-  color: var(--fg-muted);
+/* A picture on its own line is a plate: framed, with the offset shadow. */
+.doc-content p > img:only-child {
+  display: block;
+  border: 1.5px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: 5px 5px 0 var(--shadow);
+  background: var(--bg);
 }
 
+.doc-content blockquote {
+  position: relative;
+  margin: 1.6em 0;
+  padding: 0 0 0 2.6em;
+  font-family: var(--font-display);
+  font-size: 1.12em;
+  font-style: italic;
+  line-height: 1.5;
+}
+
+.doc-content blockquote::before {
+  content: "“";
+  position: absolute;
+  left: 0;
+  top: -0.08em;
+  font-size: 3.6em;
+  font-style: normal;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--accent);
+}
+
+.doc-content blockquote > :first-child {
+  margin-top: 0;
+}
+
+.doc-content blockquote > :last-child {
+  margin-bottom: 0;
+}
+
+/* Three dots, as between sections of a book. */
 .doc-content hr {
   border: 0;
-  border-top: 1px solid var(--border);
-  margin: 2em 0;
+  width: 66px;
+  height: 6px;
+  margin: 2.6em auto;
+  background: radial-gradient(circle, var(--fg) 2.4px, transparent 3px) 0 0 / 22px 6px repeat-x;
+}
+
+.doc-content ul > li::marker {
+  color: var(--accent);
+}
+
+.doc-content ol > li::marker {
+  font-family: var(--mono);
+  font-size: 0.85em;
+  color: var(--fg-muted);
 }
 
 .doc-content .task-list {
   list-style: none;
-  padding-left: 1.2em;
+  padding-left: 1.6em;
 }
 
 .doc-content .task-list input {
-  margin: 0 0.4em 0 -1.3em;
+  margin: 0 0.25em 0 -1.65em;
+}
+
+/* An item with no box in a list of boxes keeps its bullet. */
+.doc-content ul.task-list > li:not(:has(> input, > p > input)) {
+  list-style: disc;
 }
 
 .doc-content .footnotes {
   margin-top: 3em;
   padding-top: 1em;
-  border-top: 1px solid var(--border);
+  border-top: 1.5px solid var(--line);
   font-size: 0.9em;
+  color: var(--fg-muted);
 }
 
 .doc-content .fnref a {
+  font-family: var(--mono);
   text-decoration: none;
+  padding: 0 0.15em;
 }
 
+/* A callout is an index card: its kind on the tab, in the kind's colour. */
 .callout {
   --c: var(--accent);
-  border: 1px solid color-mix(in srgb, var(--c) 40%, var(--border));
-  border-left: 4px solid var(--c);
-  background: color-mix(in srgb, var(--c) 7%, var(--bg));
-  border-radius: var(--radius);
-  padding: 2px 16px;
-  margin: 1.2em 0;
+  position: relative;
+  margin: 2.9em 0 1.6em;
+  padding: 6px 18px;
+  border: 1.5px solid var(--c);
+  border-radius: 0 var(--radius) var(--radius) var(--radius);
+  background: color-mix(in srgb, var(--c) 8%, var(--bg));
+  box-shadow: 4px 4px 0 color-mix(in srgb, var(--c) 28%, transparent);
+}
+
+.callout::before {
+  content: "Note";
+  position: absolute;
+  left: -1.5px;
+  bottom: 100%;
+  padding: 3px 10px 2px;
+  border-radius: var(--radius) var(--radius) 0 0;
+  background: var(--c);
+  color: var(--bg);
+  font-family: var(--mono);
+  font-size: 0.68em;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  line-height: 1.5;
+  text-transform: uppercase;
 }
 
 .callout-title {
+  font-family: var(--font-display);
+  font-size: 1.15em;
   font-weight: 650;
+  line-height: 1.3;
   margin-bottom: 0;
 }
 
-.callout-success,
+.callout-title + * {
+  margin-top: 0.35em;
+}
+
+.callout-info::before {
+  content: "Info";
+}
+
 .callout-tip {
   --c: var(--success);
+}
+
+.callout-tip::before {
+  content: "Tip";
+}
+
+.callout-success {
+  --c: var(--success);
+}
+
+.callout-success::before {
+  content: "Success";
 }
 
 .callout-warning {
   --c: var(--warning);
 }
 
+.callout-warning::before {
+  content: "Warning";
+}
+
 .callout-danger {
   --c: var(--danger);
 }
 
+.callout-danger::before {
+  content: "Danger";
+}
+
+/* A collapsible section: the mark in the box says whether it's open. */
 .doc-content details {
-  border: 1px solid var(--border);
+  border: 1.5px solid var(--line);
   border-radius: var(--radius);
-  padding: 6px 14px;
-  margin: 1em 0;
+  margin: 1.4em 0;
+  background: var(--bg);
+}
+
+.doc-content details > :not(summary) {
+  margin-left: 16px;
+  margin-right: 16px;
 }
 
 .doc-content summary {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 14px;
   cursor: pointer;
-  font-weight: 600;
+  font-weight: 650;
+  list-style: none;
+  border-radius: calc(var(--radius) - 1.5px);
+}
+
+.doc-content summary::-webkit-details-marker {
+  display: none;
+}
+
+.doc-content summary::before {
+  content: "+";
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 1.5em;
+  height: 1.5em;
+  border: 1.5px solid var(--line);
+  border-radius: 3px;
+  background: var(--bg-soft);
+  font-family: var(--mono);
+  font-weight: 700;
+  line-height: 1;
+}
+
+.doc-content summary:hover::before {
+  background: var(--bg-mark);
+  color: var(--mark-fg);
+}
+
+.doc-content details[open] > summary {
+  border-bottom: 1.5px solid var(--line);
+  border-radius: calc(var(--radius) - 1.5px) calc(var(--radius) - 1.5px) 0 0;
+  background: var(--bg-soft);
+}
+
+.doc-content details[open] > summary::before {
+  content: "−";
+  background: var(--fg);
+  color: var(--bg);
 }
 
 .unknown-component {
@@ -249,112 +556,188 @@ th {
   font-family: var(--mono);
   font-size: 0.8em;
   color: var(--danger);
-  border: 1px dashed var(--danger);
-  border-radius: 4px;
-  padding: 0 6px;
+  border: 1.5px dashed var(--danger);
+  border-radius: 3px;
+  padding: 1px 8px;
 }
 
 /* ---------- form fields ---------- */
 
+/* A question is a card with its number on the tab (Q01, Q02… down the page). */
 .field {
-  margin: 1.4em 0;
-  padding: 14px 16px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--bg-soft);
+  position: relative;
+  margin: 3em 0 1.8em;
+  padding: 18px 20px 8px;
+  border: 1.5px solid var(--line);
+  border-radius: 0 var(--radius) var(--radius) var(--radius);
+  background: var(--bg);
+  box-shadow: 5px 5px 0 var(--shadow);
+  counter-increment: question;
+}
+
+.field::before {
+  content: "Q" counter(question, decimal-leading-zero);
+  position: absolute;
+  left: -1.5px;
+  bottom: 100%;
+  padding: 3px 10px 2px;
+  border-radius: var(--radius) var(--radius) 0 0;
+  background: var(--fg);
+  color: var(--bg);
+  font-family: var(--mono);
+  font-size: 0.68em;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  line-height: 1.5;
 }
 
 .field-label {
   display: block;
-  font-weight: 600;
-  margin-bottom: 6px;
+  font-family: var(--font-display);
+  font-size: 1.18em;
+  font-weight: 650;
+  line-height: 1.3;
+  margin-bottom: 8px;
 }
 
 .field-required {
   color: var(--danger);
-  margin-left: 2px;
+  margin-left: 3px;
 }
 
 .field-help {
   color: var(--fg-muted);
   font-size: 0.92em;
-  margin-bottom: 8px;
+  margin-bottom: 10px;
 }
 
+.field-help > :first-child {
+  margin-top: 0;
+}
+
+.field-help > :last-child {
+  margin-bottom: 0;
+}
+
+/* Choices are slips, one under the other: the chosen one is inked in. */
 .field .options {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
 }
 
 .field .option {
   display: flex;
-  gap: 8px;
+  gap: 10px;
   align-items: baseline;
+  padding: 7px 12px;
+  border: 1.5px solid var(--border);
+  border-radius: 3px;
   cursor: pointer;
+}
+
+.field .option:hover {
+  border-color: var(--line);
+}
+
+.field .option:has(input:checked) {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 9%, var(--bg));
 }
 
 /* "Other": its choice with a text box beside it, or under a select once it's chosen. */
 .field .option-other {
   display: flex;
   gap: 8px;
-  align-items: center;
+  align-items: stretch;
 }
 
 .field .option-other .other-text {
   flex: 1;
   width: auto;
-  padding: 4px 8px;
+  min-width: 0;
+  padding: 6px 10px;
 }
 
 .field select + .other-text {
-  margin-top: 6px;
+  margin-top: 8px;
 }
 
 .field select:not(:has(option[data-other]:checked)) + .other-text {
   display: none;
 }
 
-.field.field-checkbox .option {
-  font-weight: 600;
+.field.field-checkbox > .option {
+  font-weight: 650;
 }
 
+/* An approval is three rubber stamps: the one chosen is stamped on the page. */
 .approval {
   flex-direction: row !important;
   flex-wrap: wrap;
-  gap: 8px !important;
-  margin-bottom: 10px;
+  gap: 12px !important;
+  margin: 4px 0 14px;
 }
 
 .approval .option {
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 4px 12px;
-  background: var(--bg);
+  --c: var(--accent);
+  position: relative;
+  align-items: center;
+  padding: 9px 16px 8px;
+  border: 2px dashed color-mix(in srgb, var(--c) 55%, var(--bg));
+  border-radius: 5px;
+  color: var(--c);
+  font-family: var(--mono);
+  font-size: 0.8em;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  transition:
+    transform 0.12s ease,
+    background 0.12s ease;
+}
+
+.approval .option input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.approval .option:hover {
+  border-color: var(--c);
+  background: color-mix(in srgb, var(--c) 7%, var(--bg));
 }
 
 .approval .option:has(input:checked) {
-  border-color: var(--c, var(--accent));
-  background: color-mix(in srgb, var(--c, var(--accent)) 12%, var(--bg));
+  border: 2.5px solid var(--c);
+  background: color-mix(in srgb, var(--c) 13%, var(--bg));
+  outline: 1.5px solid var(--c);
+  outline-offset: -6px;
+  padding: 11px 20px 10px;
 }
 
-.option-approve {
+.approval .option:has(input:focus-visible) {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--c) 35%, transparent);
+}
+
+.approval .option-approve {
   --c: var(--success);
 }
 
-.option-changes {
+.approval .option-changes {
   --c: var(--warning);
 }
 
-.option-reject {
+.approval .option-reject {
   --c: var(--danger);
 }
 
+/* A scale is a ruler: the points up to the answer are shaded, the answer inked. */
 .scale {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px;
+  row-gap: 8px;
 }
 
 .scale-point input {
@@ -365,38 +748,80 @@ th {
 .scale-point span {
   display: inline-grid;
   place-items: center;
-  min-width: 2.2em;
-  height: 2.2em;
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  min-width: 2.7em;
+  height: 2.7em;
+  margin-left: -1.5px;
+  border: 1.5px solid var(--line);
   background: var(--bg);
+  font-family: var(--mono);
+  font-weight: 600;
   cursor: pointer;
 }
 
+.scale-point:first-of-type span {
+  margin-left: 0;
+  border-radius: 3px 0 0 3px;
+}
+
+.scale-point:last-of-type span {
+  border-radius: 0 3px 3px 0;
+}
+
+.scale-point span:hover {
+  background: var(--bg-mark);
+  color: var(--mark-fg);
+}
+
+.scale-point:has(~ .scale-point input:checked) span {
+  background: color-mix(in srgb, var(--accent) 16%, var(--bg));
+}
+
 .scale-point input:checked + span {
+  position: relative;
   background: var(--accent);
   border-color: var(--accent);
   color: var(--accent-fg);
+  box-shadow: 3px 3px 0 var(--shadow);
 }
 
 .scale-point input:focus-visible + span {
+  position: relative;
   outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .scale-end {
-  font-size: 0.85em;
+  font-family: var(--mono);
+  font-size: 0.72em;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
   color: var(--fg-muted);
 }
 
+.scale-end:first-child {
+  margin-right: 12px;
+}
+
+.scale-end:last-child {
+  margin-left: 12px;
+}
+
 .field-status {
-  min-height: 1.2em;
+  min-height: 1.5em;
   margin-top: 6px;
-  font-size: 0.8em;
+  font-family: var(--mono);
+  font-size: 0.7em;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
   color: var(--fg-muted);
 }
 
 .field-status[data-state="saved"] {
   color: var(--success);
+}
+
+.field-status[data-state="saved"]::before {
+  content: "✓ ";
 }
 
 .field-status[data-state="error"] {

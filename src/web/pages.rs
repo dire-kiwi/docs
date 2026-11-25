@@ -805,6 +805,9 @@ async fn show_page(
         Vec::new()
     };
 
+    // The headings of the page being read go under it in the menu.
+    let toc = rendered.as_ref().map(|r| r.toc.as_slice()).unwrap_or(&[]);
+
     let body = html! {
         div.doc-layout {
             nav.doc-nav #doc-nav aria-label="Pages" {
@@ -816,7 +819,7 @@ async fn show_page(
                 @if editor.is_some() {
                     (labels_editor(&doc, &known_labels, &viewer.csrf, &format!("{base}{canonical}")))
                 }
-                (nav_list(&nav, &base, &page.path))
+                (nav_list(&nav, &base, &page.path, toc))
                 div.doc-links {
                     @if member.is_some() {
                         a href={ "/d/" (doc.uuid) "/-/feedback" } { "All feedback" }
@@ -832,6 +835,8 @@ async fn show_page(
                         span.muted { "Public document by " (doc.organization.as_deref().unwrap_or(&doc.owner)) }
                     }
                 }
+                p.doc-published.muted.small { "Published by " (version.author) " " (time(version.created_at))
+                    @if let Some(m) = &version.message { br; "“" (m) "”" } }
             }
             main.doc-main {
                 @if editor.is_some() && is_latest {
@@ -873,22 +878,6 @@ async fn show_page(
                     }
                     @if let Some(user) = member { (comment_rail(&selections, user.id)) }
                 }
-            }
-            aside.doc-aside {
-                @if let Ok(r) = &rendered {
-                    @if !r.toc.is_empty() {
-                        nav.toc aria-label="On this page" {
-                            h2 { "On this page" }
-                            ul {
-                                @for t in &r.toc {
-                                    li class={ "toc-" (t.depth) } { a href={ "#" (t.id) } { (t.text) } }
-                                }
-                            }
-                        }
-                    }
-                }
-                p.muted.small { "Published by " (version.author) " " (time(version.created_at))
-                    @if let Some(m) = &version.message { br; "“" (m) "”" } }
             }
         }
     };
@@ -1116,17 +1105,25 @@ pub async fn update_labels(
     }))
 }
 
-fn nav_list(nodes: &[NavNode], base: &str, current: &str) -> Markup {
+/// The pages as a tree. The page being read (`current`) has its headings (`toc`) under it.
+fn nav_list(nodes: &[NavNode], base: &str, current: &str, toc: &[render::TocEntry]) -> Markup {
     html! {
         ul {
             @for n in nodes {
                 li {
                     @if let Some(p) = &n.page {
                         a href={ (base) (paths::url_suffix(p)) } aria-current=[(p == current).then_some("page")] { (n.title) }
+                        @if p == current && !toc.is_empty() {
+                            ul.toc aria-label="On this page" {
+                                @for t in toc {
+                                    li class={ "toc-" (t.depth) } { a href={ "#" (t.id) } { (t.text) } }
+                                }
+                            }
+                        }
                     } @else {
                         span.folder { (n.title) }
                     }
-                    @if !n.children.is_empty() { (nav_list(&n.children, base, current)) }
+                    @if !n.children.is_empty() { (nav_list(&n.children, base, current, toc)) }
                 }
             }
         }

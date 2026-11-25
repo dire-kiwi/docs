@@ -1,9 +1,25 @@
 //! Shared page chrome.
 
-use axum::http::StatusCode;
+use axum::http::{StatusCode, header};
+use axum::response::IntoResponse;
 use maud::{DOCTYPE, Markup, html};
 
 use crate::db::User;
+
+/// Where [`theme_script`] is served.
+pub const THEME_SCRIPT: &str = "/theme.js";
+
+/// `/theme.js`: applies the reader's choice of light or dark before the page is drawn.
+/// It's a file of its own because the Content-Security-Policy allows no inline scripts.
+pub async fn theme_script() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        include_str!("theme.js"),
+    )
+}
 
 pub struct Shell<'a> {
     pub title: &'a str,
@@ -22,6 +38,8 @@ pub fn shell(s: Shell, main: Markup) -> Markup {
                 meta name="viewport" content="width=device-width, initial-scale=1";
                 meta name="csrf-token" content=(s.csrf);
                 title { (s.title) " · Docs" }
+                // Before the styles: the reader's light or dark choice, so the page is never drawn in the other.
+                script src=(THEME_SCRIPT) {}
                 (crate::assets().head())
             }
             body class=(s.body_class) {
@@ -29,7 +47,10 @@ pub fn shell(s: Shell, main: Markup) -> Markup {
                     @if s.body_class.contains("doc") {
                         button.nav-toggle type="button" aria-controls="doc-nav" aria-expanded="false" aria-label="Toggle page menu" { "☰" }
                     }
-                    a.brand href="/" { "Docs" }
+                    a.brand href="/" {
+                        span.brand-mark aria-hidden="true" { "¶" }
+                        span.brand-name { "Docs" }
+                    }
                     nav.topnav {
                         @if s.user.is_some() {
                             a href="/" { "Documents" }
@@ -38,6 +59,8 @@ pub fn shell(s: Shell, main: Markup) -> Markup {
                         a href="/components" { "Components" }
                     }
                     div.user-menu {
+                        // Shown by the frontend, which makes it work.
+                        button.theme-toggle type="button" hidden aria-label="Switch theme" { span {} }
                         @if let Some(u) = s.user {
                             @if let Some(avatar) = &u.avatar_url {
                                 img.avatar src=(avatar) alt="" width="24" height="24";

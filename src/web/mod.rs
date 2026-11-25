@@ -51,6 +51,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(pages::home))
         .route("/components", get(pages::components_page))
+        .route(layout::THEME_SCRIPT, get(layout::theme_script))
         .route("/login", get(auth::login_page))
         .route("/logout", post(auth::logout))
         .route("/auth/dev", post(auth::dev_login))
