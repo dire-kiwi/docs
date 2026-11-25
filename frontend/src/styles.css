@@ -13,6 +13,8 @@
   --note-fg: light-dark(#1d1b16, #f6edc9);
   --note-line: light-dark(#d6bb3a, #8a7a2c);
   --topbar: 56px;
+  /* The space at the edges of every page; it grows with the window. */
+  --gutter: clamp(14px, 2.5vw, 44px);
   --lift: 3px 3px 0 var(--shadow);
   --sheet: 6px 6px 0 var(--shadow);
 }
@@ -148,7 +150,7 @@ button.link.danger {
   display: flex;
   align-items: center;
   gap: 22px;
-  padding: 0 22px;
+  padding: 0 var(--gutter);
   background: var(--bg);
   border-bottom: 1.5px solid var(--line);
 }
@@ -278,10 +280,9 @@ button.link.danger {
 
 /* ---------- simple pages ---------- */
 
+/* Every page fills the window: no column in the middle of an empty desk. */
 main.page {
-  max-width: 1000px;
-  margin: 0 auto;
-  padding: 36px 22px 72px;
+  padding: 36px var(--gutter) 72px;
 }
 
 main.page > h1 {
@@ -532,11 +533,9 @@ details.connect summary {
 
 .doc-layout {
   display: grid;
-  grid-template-columns: 250px minmax(0, 1fr) 210px;
-  gap: 36px;
-  max-width: 1440px;
-  margin: 0 auto;
-  padding: 0 24px;
+  grid-template-columns: clamp(220px, 17vw, 320px) minmax(0, 1fr) clamp(190px, 14vw, 270px);
+  gap: clamp(24px, 2.5vw, 44px);
+  padding: 0 var(--gutter);
 }
 
 .doc-nav,
@@ -735,7 +734,7 @@ details.connect summary {
 
 @media (max-width: 1100px) {
   .doc-layout {
-    grid-template-columns: 230px minmax(0, 1fr);
+    grid-template-columns: 220px minmax(0, 1fr);
   }
   .doc-aside {
     display: none;
@@ -748,7 +747,6 @@ details.connect summary {
   }
   .doc-layout {
     grid-template-columns: minmax(0, 1fr);
-    padding: 0 14px;
   }
   .doc-main {
     padding-top: 18px;
@@ -775,7 +773,6 @@ details.connect summary {
 @media (max-width: 560px) {
   .topbar {
     gap: 10px;
-    padding: 0 12px;
   }
   .topnav,
   .user-menu .login,
@@ -930,7 +927,7 @@ details.connect summary {
 /* Comments beside the page: notes stuck next to their quotes (selection.ts). */
 .doc-body.has-comments {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 240px;
+  grid-template-columns: minmax(0, 1fr) clamp(230px, 17vw, 320px);
   gap: 30px;
 }
 
@@ -988,11 +985,7 @@ details.connect summary {
   text-decoration: line-through dotted;
 }
 
-/* Room for the notes: a wider page, and no contents column when it's tight. */
-.doc-layout:has(.doc-body.has-comments) {
-  max-width: 1700px;
-}
-
+/* Room for the notes: no contents column when it's tight. */
 @media (min-width: 1101px) and (max-width: 1500px) {
   .doc-layout:has(.doc-body.has-comments) {
     grid-template-columns: 250px minmax(0, 1fr);
