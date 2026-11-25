@@ -1,4 +1,4 @@
-//! The docs renderer: Markdown/MDX → sanitized HTML, page paths and the
+//! The docs renderer: Markdown/MDX → sanitized HTML, HTML mockups, page paths and the
 //! navigation tree, the MDX component catalogue, and the MCP tool definitions.
 //!
 //! It has no server dependencies, so it also builds to WebAssembly
@@ -7,6 +7,7 @@
 pub mod components;
 pub mod images;
 pub mod labels;
+pub mod mockup;
 pub mod paths;
 pub mod publish;
 pub mod render;

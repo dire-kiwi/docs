@@ -79,6 +79,15 @@ impl TestApp {
         .await
     }
 
+    /// Where a document is: `/d/<uuid>`, without the trailing slash.
+    async fn doc_path(&self, token: &str, slug: &str) -> String {
+        let got = self.tool(token, "get_document", json!({ "slug": slug })).await;
+        let url = got["url"].as_str().unwrap();
+        let path = url.strip_prefix("http://docs.test").unwrap().trim_end_matches('/');
+        assert!(is_uuid(path.strip_prefix("/d/").unwrap()), "{url}");
+        path.to_string()
+    }
+
     async fn rpc(&self, token: &str, method: &str, params: Value) -> Value {
         let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
         let res = self
@@ -131,6 +140,15 @@ impl TestApp {
         )
         .await
     }
+}
+
+fn is_uuid(s: &str) -> bool {
+    s.len() == 36
+        && s.char_indices().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => c == '-',
+            14 => c == '4',
+            _ => c.is_ascii_hexdigit() && !c.is_ascii_uppercase(),
+        })
 }
 
 fn csrf_of(html: &str) -> String {
@@ -228,15 +246,16 @@ async fn publish_view_and_collect_feedback() {
         .await;
     assert_eq!(published["slug"], "rollout");
     assert_eq!(published["version"], 1);
-    assert_eq!(published["url"], "http://docs.test/d/rollout/");
+    let d = t.doc_path(&token, "rollout").await;
+    assert_eq!(published["url"], format!("http://docs.test{d}/"));
     assert_eq!(published["warnings"], json!([]));
 
     // Server-rendered page with nested menu, components and no script.
-    let page = t.get("/d/rollout/", &cookie).await;
+    let page = t.get(&format!("{d}/"), &cookie).await;
     assert_eq!(page.status, StatusCode::OK, "{}", page.body);
     assert!(page.body.contains("<title>Rollout plan · Rollout plan · Docs</title>"));
     assert!(
-        page.body.contains("href=\"/d/rollout/plan/phase-1\""),
+        page.body.contains(&format!("href=\"{d}/plan/phase-1\"")),
         "relative link rewritten"
     );
     assert!(page.body.contains("callout-warning"));
@@ -247,11 +266,22 @@ async fn publish_view_and_collect_feedback() {
     let version_id: i64 = attr_after(&page.body, "<article", "data-version-id").parse().unwrap();
 
     // Sub page, and unauthenticated access redirects to login.
-    let sub = t.get("/d/rollout/plan/phase-1", &cookie).await;
-    assert!(sub.body.contains("href=\"/d/rollout/\""));
-    let anon = t.get("/d/rollout/", "").await;
+    let sub = t.get(&format!("{d}/plan/phase-1"), &cookie).await;
+    assert!(sub.body.contains(&format!("href=\"{d}/\"")));
+    let anon = t.get(&format!("{d}/"), "").await;
     assert_eq!(anon.status, StatusCode::SEE_OTHER);
-    assert_eq!(anon.location(), "/login?next=%2Fd%2Frollout%2F");
+    assert_eq!(
+        anon.location(),
+        format!("/login?next={}", d.replace('/', "%2F") + "%2F")
+    );
+    // Links by slug, from before documents had UUIDs, go to the same page at its UUID.
+    let old = t.get("/d/rollout/plan/phase-1", &cookie).await;
+    assert_eq!(old.status, StatusCode::SEE_OTHER);
+    assert_eq!(old.location(), format!("{d}/plan/phase-1"));
+    assert_eq!(
+        t.get("/d/rollout/", "").await.location(),
+        "/login?next=%2Fd%2Frollout%2F"
+    );
 
     // Answers and selections.
     let saved = t
@@ -302,7 +332,7 @@ async fn publish_view_and_collect_feedback() {
     assert_eq!(sel.status, StatusCode::CREATED, "{}", sel.body);
 
     // The answer is pre-filled and the comment listed when the page is reloaded.
-    let page = t.get("/d/rollout/", &cookie).await;
+    let page = t.get(&format!("{d}/"), &cookie).await;
     assert!(page.body.contains("value=\"Sunday\" checked"), "answer prefilled");
     assert!(page.body.contains("Why not one?"));
 
@@ -364,13 +394,34 @@ async fn versions_merge_and_validation() {
     assert_eq!(new["content"], "# A v2");
 
     // No index page: the document root opens the first page.
-    let root = t.get("/d/research-notes/", &cookie).await;
+    let d = t.doc_path(&token, "research-notes").await;
+    let root = t.get(&format!("{d}/"), &cookie).await;
     assert_eq!(root.status, StatusCode::SEE_OTHER);
-    assert_eq!(root.location(), "/d/research-notes/a");
-    let v1 = t.get("/d/research-notes/-/v/1/a", &cookie).await;
+    assert_eq!(root.location(), format!("{d}/a"));
+    let v1 = t.get(&format!("{d}/-/v/1/a"), &cookie).await;
     assert!(v1.body.contains("You are viewing version 1"));
-    let versions = t.get("/d/research-notes/-/versions", &cookie).await;
+    let versions = t.get(&format!("{d}/-/versions"), &cookie).await;
     assert!(versions.body.contains("update a"));
+    assert_eq!(
+        t.get("/d/research-notes/-/v/1/a", &cookie).await.location(),
+        format!("{d}/-/v/1/a")
+    );
+
+    // A document can be named by its UUID too, to publish a new version.
+    let uuid = d.strip_prefix("/d/").unwrap();
+    let v3 = t
+        .tool(
+            &token,
+            "publish_document",
+            json!({ "slug": uuid, "mode": "merge", "pages": [{ "path": "b", "content": "# B v3" }] }),
+        )
+        .await;
+    assert_eq!(
+        (v3["slug"].as_str(), v3["version"].as_i64()),
+        (Some("research-notes"), Some(3))
+    );
+    let got = t.tool(&token, "read_page", json!({ "slug": uuid, "path": "b" })).await;
+    assert_eq!(got["content"], "# B v3");
 
     let err = t
         .tool_error(
@@ -389,7 +440,7 @@ async fn versions_merge_and_validation() {
             json!({ "slug": "research-notes", "pages": [{ "path": "a", "content": "pwned" }] }),
         )
         .await;
-    assert!(err.contains("is taken by another user"), "{err}");
+    assert!(err.contains("taken by a document you can't publish to"), "{err}");
 
     let warn = t
         .tool(
@@ -681,16 +732,18 @@ async fn documents_are_private_until_shared() {
     )
     .await;
 
+    let d = t.doc_path(&alice, "secret").await;
+
     // Bob can't see it anywhere.
-    assert_eq!(t.get("/d/secret/", &bob_cookie).await.status, StatusCode::NOT_FOUND);
+    assert_eq!(t.get(&format!("{d}/"), &bob_cookie).await.status, StatusCode::NOT_FOUND);
     assert_eq!(
-        t.get("/d/secret/-/feedback", &bob_cookie).await.status,
+        t.get(&format!("{d}/-/feedback"), &bob_cookie).await.status,
         StatusCode::NOT_FOUND
     );
     assert_eq!(t.tool(&bob, "list_documents", json!({})).await["documents"], json!([]));
     let err = t.tool_error(&bob, "get_feedback", json!({ "slug": "secret" })).await;
     assert!(err.contains("no document"), "{err}");
-    let page = t.get("/d/secret/", &alice_cookie).await;
+    let page = t.get(&format!("{d}/"), &alice_cookie).await;
     let version_id: i64 = attr_after(&page.body, "<article", "data-version-id").parse().unwrap();
     let bob_home = t.get("/", &bob_cookie).await;
     let saved = t
@@ -725,7 +778,7 @@ async fn documents_are_private_until_shared() {
         .await;
     assert_eq!(shared["shared_with"], json!(["bob"]));
     assert_eq!(shared["share_link"], Value::Null);
-    let page = t.get("/d/secret/", &bob_cookie).await;
+    let page = t.get(&format!("{d}/"), &bob_cookie).await;
     assert_eq!(page.status, StatusCode::OK);
     assert!(page.body.contains("Shared by alice"));
     let saved = t
@@ -748,7 +801,7 @@ async fn documents_are_private_until_shared() {
         .await;
     assert!(err.contains("only the owner"), "{err}");
     assert_eq!(
-        t.get("/d/secret/-/share", &bob_cookie).await.status,
+        t.get(&format!("{d}/-/share"), &bob_cookie).await.status,
         StatusCode::FORBIDDEN
     );
     let err = t
@@ -758,7 +811,7 @@ async fn documents_are_private_until_shared() {
             json!({ "slug": "secret", "pages": [{ "path": "index", "content": "x" }] }),
         )
         .await;
-    assert!(err.contains("taken by another user"), "{err}");
+    assert!(err.contains("taken by a document you can't publish to"), "{err}");
 
     // Share link: carol joins by opening it; turning it off stops new joins.
     let shared = t
@@ -772,8 +825,8 @@ async fn documents_are_private_until_shared() {
         "must sign in first"
     );
     let joined = t.get(path, &carol_cookie).await;
-    assert_eq!(joined.location(), "/d/secret/");
-    assert_eq!(t.get("/d/secret/", &carol_cookie).await.status, StatusCode::OK);
+    assert_eq!(joined.location(), format!("{d}/"));
+    assert_eq!(t.get(&format!("{d}/"), &carol_cookie).await.status, StatusCode::OK);
     let (dave_cookie, _) = t.user("dave").await;
     t.tool(&alice, "share_document", json!({ "slug": "secret", "link": "disable" }))
         .await;
@@ -788,14 +841,17 @@ async fn documents_are_private_until_shared() {
         )
         .await;
     assert_eq!(shared["shared_with"], json!(["bob"]));
-    assert_eq!(t.get("/d/secret/", &carol_cookie).await.status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        t.get(&format!("{d}/"), &carol_cookie).await.status,
+        StatusCode::NOT_FOUND
+    );
     assert_eq!(
         t.tool(&carol, "list_documents", json!({})).await["documents"],
         json!([])
     );
 
     // The owner's share page lists people and manages the link.
-    let share_page = t.get("/d/secret/-/share", &alice_cookie).await;
+    let share_page = t.get(&format!("{d}/-/share"), &alice_cookie).await;
     assert_eq!(share_page.status, StatusCode::OK);
     assert!(share_page.body.contains("bob") && share_page.body.contains("Link sharing is off"));
     let form = serde_urlencoded::to_string([
@@ -806,7 +862,7 @@ async fn documents_are_private_until_shared() {
     .unwrap();
     let res = t
         .send(
-            Request::post("/d/secret/-/share")
+            Request::post(format!("{d}/-/share"))
                 .header(header::COOKIE, &alice_cookie)
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .body(Body::from(form))
@@ -814,7 +870,12 @@ async fn documents_are_private_until_shared() {
         )
         .await;
     assert_eq!(res.status, StatusCode::SEE_OTHER);
-    assert!(t.get("/d/secret/-/share", &alice_cookie).await.body.contains("erin"));
+    assert!(
+        t.get(&format!("{d}/-/share"), &alice_cookie)
+            .await
+            .body
+            .contains("erin")
+    );
 }
 
 const DEVICE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
@@ -994,7 +1055,8 @@ async fn oauth_device_flow_publishes_as_the_user() {
         )
         .await;
     assert_eq!(published["version"], 1);
-    let page = t.get("/d/from-huntaway/", &cookie).await;
+    let fh = t.doc_path(access, "from-huntaway").await;
+    let page = t.get(&format!("{fh}/"), &cookie).await;
     assert_eq!(page.status, StatusCode::OK, "published as frank");
 
     assert_eq!(
@@ -1277,12 +1339,16 @@ async fn folders_organise_documents() {
     let err = t.tool_error(&alice, "get_document", json!({ "slug": "bad" })).await;
     assert!(err.contains("no document"), "{err}");
 
+    let plan = t.doc_path(&alice, "plan").await;
+    let notes = t.doc_path(&alice, "notes").await;
+    let loose = t.doc_path(&alice, "loose").await;
+    let bobs = t.doc_path(&bob, "bobs").await;
     // move_document moves it; the URL stays the same; a later publish keeps the move.
     let moved = t
         .tool(&alice, "move_document", json!({ "slug": "plan", "folder": "archive" }))
         .await;
     assert_eq!(moved["folder"], "archive");
-    assert_eq!(moved["url"], "http://docs.test/d/plan/");
+    assert_eq!(moved["url"], format!("http://docs.test{plan}/"));
     let republished = t
         .tool(
             &alice,
@@ -1315,9 +1381,9 @@ async fn folders_organise_documents() {
     assert!(home.body.contains(r#"data-folder-key="mine:docs""#), "{}", home.body);
     assert!(home.body.contains(r#"data-folder-key="mine:archive""#));
     assert!(home.body.contains("2 pages"));
-    assert_eq!(home.body.matches(r#"href="/d/notes/""#).count(), 1);
+    assert_eq!(home.body.matches(&format!(r#"href="{notes}/""#)).count(), 1);
     assert!(
-        home.body.find("mine:archive").unwrap() < home.body.find(r#"href="/d/loose/""#).unwrap(),
+        home.body.find("mine:archive").unwrap() < home.body.find(&format!(r#"href="{loose}/""#)).unwrap(),
         "folders come before documents"
     );
     assert!(
@@ -1329,7 +1395,7 @@ async fn folders_organise_documents() {
     // Moving from the home page, including into a new folder.
     let res = t
         .post_form(
-            "/d/loose/-/move",
+            &format!("{loose}/-/move"),
             &alice_cookie,
             &[("csrf", &csrf), ("folder", "docs/new one")],
         )
@@ -1338,12 +1404,20 @@ async fn folders_organise_documents() {
     let listed = t.tool(&alice, "list_documents", json!({})).await;
     assert_eq!(folder_of(&listed, "loose"), "docs/new one");
     let res = t
-        .post_form("/d/loose/-/move", &alice_cookie, &[("csrf", &csrf), ("folder", "../x")])
+        .post_form(
+            &format!("{loose}/-/move"),
+            &alice_cookie,
+            &[("csrf", &csrf), ("folder", "../x")],
+        )
         .await;
     assert_eq!(res.status, StatusCode::OK);
     assert!(res.body.contains("invalid folder"), "the error is shown on the page");
     let res = t
-        .post_form("/d/loose/-/move", &alice_cookie, &[("csrf", "wrong"), ("folder", "x")])
+        .post_form(
+            &format!("{loose}/-/move"),
+            &alice_cookie,
+            &[("csrf", "wrong"), ("folder", "x")],
+        )
         .await;
     assert_ne!(res.status, StatusCode::SEE_OTHER, "needs the CSRF token");
 
@@ -1403,7 +1477,7 @@ async fn folders_organise_documents() {
     assert!(home.body.contains("Shared with you"));
     assert!(home.body.contains(r#"data-folder-key="shared:bob:docs""#));
     assert!(
-        !home.body.contains(r#"action="/d/bobs/-/move""#),
+        !home.body.contains(&format!(r#"action="{bobs}/-/move""#)),
         "no move form for shared documents"
     );
     let err = t
@@ -1411,7 +1485,11 @@ async fn folders_organise_documents() {
         .await;
     assert!(err.contains("only the owner"), "{err}");
     let res = t
-        .post_form("/d/bobs/-/move", &alice_cookie, &[("csrf", &csrf), ("folder", "mine")])
+        .post_form(
+            &format!("{bobs}/-/move"),
+            &alice_cookie,
+            &[("csrf", &csrf), ("folder", "mine")],
+        )
         .await;
     assert_eq!(res.status, StatusCode::FORBIDDEN);
     t.post_form(
@@ -1423,7 +1501,7 @@ async fn folders_organise_documents() {
     let listed = t.tool(&bob, "list_documents", json!({})).await;
     assert_eq!(folder_of(&listed, "bobs"), "docs");
     let bob_home = t.get("/", &bob_cookie).await;
-    assert!(bob_home.body.contains(r#"action="/d/bobs/-/move""#));
+    assert!(bob_home.body.contains(&format!(r#"action="{bobs}/-/move""#)));
 
     // The tools are advertised.
     let tools = t.rpc(&alice, "tools/list", json!({})).await;
@@ -1638,7 +1716,7 @@ async fn labels_organise_documents() {
             json!({ "slug": "bobs", "labels": ["mine"], "pages": page("x") }),
         )
         .await;
-    assert!(err.contains("taken by another user"), "{err}");
+    assert!(err.contains("taken by a document you can't publish to"), "{err}");
     let bobs = t.tool(&bob, "list_documents", json!({ "label": "research" })).await;
     assert_eq!(
         slugs(&bobs),
@@ -1749,6 +1827,10 @@ async fn labels_organise_documents() {
     let res = t.get("/?view=labels", &alice_cookie).await;
     let cookie = res.headers[header::SET_COOKIE].to_str().unwrap().to_string();
     assert!(cookie.starts_with("docs_view=labels"), "{cookie}");
+    let llm = t.doc_path(&alice, "llm").await;
+    let survey = t.doc_path(&alice, "survey").await;
+    let people = t.doc_path(&alice, "people").await;
+    let bobs = t.doc_path(&bob, "bobs").await;
     let labels_cookie = format!("{alice_cookie}; docs_view=labels");
     let home = t.get("/", &labels_cookie).await;
     assert!(
@@ -1760,7 +1842,7 @@ async fn labels_organise_documents() {
     assert!(home.body.contains(r#"data-folder-key="unlabelled""#));
     assert!(home.body.contains(r#"data-tree-store="docs.closedLabels""#));
     // A document with several labels is under each of them.
-    assert_eq!(home.body.matches(r#"href="/d/llm/""#).count(), 2);
+    assert_eq!(home.body.matches(&format!(r#"href="{llm}/""#)).count(), 2);
     assert!(!home.body.contains("secret"));
     let home = t.get("/?view=folders", &labels_cookie).await;
     assert!(!home.body.contains(r#"data-folder-key="labels:"#));
@@ -1768,12 +1850,15 @@ async fn labels_organise_documents() {
     // Clicking a label shows only documents with it (and labels under it).
     let filtered = t.get("/?label=research/ai", &labels_cookie).await;
     assert!(filtered.body.contains("Documents labelled"));
-    assert!(filtered.body.contains(r#"href="/d/survey/""#));
-    assert!(filtered.body.contains(r#"href="/d/llm/""#));
-    assert!(!filtered.body.contains(r#"href="/d/people/""#));
-    assert!(!filtered.body.contains(r#"href="/d/bobs/""#), "no shared documents");
+    assert!(filtered.body.contains(&format!(r#"href="{survey}/""#)));
+    assert!(filtered.body.contains(&format!(r#"href="{llm}/""#)));
+    assert!(!filtered.body.contains(&format!(r#"href="{people}/""#)));
+    assert!(
+        !filtered.body.contains(&format!(r#"href="{bobs}/""#)),
+        "no shared documents"
+    );
     assert_eq!(
-        filtered.body.matches(r#"href="/d/llm/""#).count(),
+        filtered.body.matches(&format!(r#"href="{llm}/""#)).count(),
         1,
         "only under the labels the filter matches"
     );
@@ -1782,8 +1867,8 @@ async fn labels_organise_documents() {
     assert!(filtered.body.contains("None of your documents have this label."));
 
     // The document page shows the labels, and its owner can add and remove them.
-    let doc = t.get("/d/survey/", &alice_cookie).await;
-    assert!(doc.body.contains(r#"action="/d/survey/-/labels""#));
+    let doc = t.get(&format!("{survey}/"), &alice_cookie).await;
+    assert!(doc.body.contains(&format!(r#"action="{survey}/-/labels""#)));
     assert!(
         doc.body.contains(r#"<option value="Research">"#),
         "parents are suggested"
@@ -1791,21 +1876,21 @@ async fn labels_organise_documents() {
     assert!(doc.body.contains(r#"<option value="Research/AI/LLMs">"#));
     let res = t
         .post_form(
-            "/d/survey/-/labels",
+            &format!("{survey}/-/labels"),
             &alice_cookie,
             &[
                 ("csrf", &csrf),
                 ("action", "add"),
                 ("label", "OPS"),
-                ("next", "/d/survey/"),
+                ("next", &format!("{survey}/")),
             ],
         )
         .await;
     assert_eq!(res.status, StatusCode::SEE_OTHER, "{}", res.body);
-    assert_eq!(res.location(), "/d/survey/");
+    assert_eq!(res.location(), format!("{survey}/"));
     let res = t
         .post_form(
-            "/d/survey/-/labels",
+            &format!("{survey}/-/labels"),
             &alice_cookie,
             &[("csrf", &csrf), ("action", "remove"), ("label", "research/ai")],
         )
@@ -1816,7 +1901,7 @@ async fn labels_organise_documents() {
     assert_eq!(got["latest_version"], 1);
     let res = t
         .post_form(
-            "/d/survey/-/labels",
+            &format!("{survey}/-/labels"),
             &alice_cookie,
             &[("csrf", &csrf), ("action", "add"), ("label", "//")],
         )
@@ -1824,7 +1909,7 @@ async fn labels_organise_documents() {
     assert_eq!(res.status, StatusCode::BAD_REQUEST);
     let res = t
         .post_form(
-            "/d/survey/-/labels",
+            &format!("{survey}/-/labels"),
             &alice_cookie,
             &[("csrf", "wrong"), ("action", "add"), ("label", "x")],
         )
@@ -1832,7 +1917,7 @@ async fn labels_organise_documents() {
     assert_eq!(res.status, StatusCode::FORBIDDEN);
     let res = t
         .post_form(
-            "/d/survey/-/labels",
+            &format!("{survey}/-/labels"),
             &alice_cookie,
             &[
                 ("csrf", &csrf),
@@ -1844,13 +1929,13 @@ async fn labels_organise_documents() {
         .await;
     assert_eq!(res.location(), "/", "only redirects on this site");
     // Readers of a shared document don't see its owner's labels or the form.
-    let shared = t.get("/d/bobs/", &alice_cookie).await;
+    let shared = t.get(&format!("{bobs}/"), &alice_cookie).await;
     assert!(!shared.body.contains("secret"));
     assert!(!shared.body.contains("/-/labels"));
     let bob_csrf = csrf_of(&t.get("/", &bob_cookie).await.body);
     let res = t
         .post_form(
-            "/d/survey/-/labels",
+            &format!("{survey}/-/labels"),
             &bob_cookie,
             &[("csrf", &bob_csrf), ("action", "add"), ("label", "x")],
         )
@@ -1970,6 +2055,7 @@ async fn images_are_converted_to_avif_and_served() {
     assert!(content.contains(&format!("![big]({inline_name})")));
     assert!(content.contains(&format!("`data:image/png;base64,{}`", b64(&chart))));
 
+    let pictures = t.doc_path(&token, "pictures").await;
     // Rendered pages point at the served AVIFs.
     let url_of = |name: &str| {
         images.iter().find(|i| i["name"] == name).unwrap()["url"]
@@ -1980,14 +2066,14 @@ async fn images_are_converted_to_avif_and_served() {
             .to_string()
     };
     let chart_url = url_of("images/chart.png");
-    assert!(chart_url.starts_with("/d/pictures/-/images/") && chart_url.ends_with(".avif"));
-    let index = t.get("/d/pictures/", &cookie).await;
+    assert!(chart_url.starts_with(&format!("{pictures}/-/images/")) && chart_url.ends_with(".avif"));
+    let index = t.get(&format!("{pictures}/"), &cookie).await;
     assert!(index.body.contains(&format!("src=\"{chart_url}\"")), "{}", index.body);
     assert!(index.body.contains(&format!("src=\"{}\"", url_of("photo.jpg"))));
     assert!(index.body.contains("src=\"https://example.com/x.png\""));
-    let sub = t.get("/d/pictures/plan/sub", &cookie).await;
+    let sub = t.get(&format!("{pictures}/plan/sub"), &cookie).await;
     assert!(sub.body.contains(&format!("src=\"{chart_url}\"")));
-    let inline = t.get("/d/pictures/plan/inline", &cookie).await;
+    let inline = t.get(&format!("{pictures}/plan/inline"), &cookie).await;
     assert!(inline.body.contains(&format!("src=\"{}\"", url_of(&inline_name))));
     assert!(!inline.body.contains("src=\"data:"));
 
@@ -2007,10 +2093,12 @@ async fn images_are_converted_to_avif_and_served() {
         json!({ "slug": "other", "pages": [{ "path": "index", "content": "x" }] }),
     )
     .await;
-    let elsewhere = chart_url.replace("/d/pictures/", "/d/other/");
+    let elsewhere = chart_url.replace(&format!("{pictures}/"), "/d/other/");
     assert_eq!(t.get(&elsewhere, &cookie).await.status, StatusCode::NOT_FOUND);
     assert_eq!(
-        t.get("/d/pictures/-/images/nothing.avif", &cookie).await.status,
+        t.get(&format!("{pictures}/-/images/nothing.avif"), &cookie)
+            .await
+            .status,
         StatusCode::NOT_FOUND
     );
 
@@ -2159,7 +2247,8 @@ async fn merge_keeps_the_images_its_pages_use() {
         .await;
     assert_eq!(names(&v2), ["a.png", "b.png"]);
     assert_eq!(v2["warnings"], json!([]));
-    let other = t.get("/d/m/other", &cookie).await;
+    let m = t.doc_path(&token, "m").await;
+    let other = t.get(&format!("{m}/other"), &cookie).await;
     assert!(other.body.contains("/-/images/"), "{}", other.body);
 
     // Deleting the page that used b.png drops it; a new upload replaces a kept name.
@@ -2175,7 +2264,7 @@ async fn merge_keeps_the_images_its_pages_use() {
     let v2_a = v2["images"][0]["url"].as_str().unwrap().to_string();
     assert_ne!(url(&v3), v2_a);
     // Old versions keep their images.
-    let old = t.get("/d/m/-/v/2/", &cookie).await;
+    let old = t.get(&format!("{m}/-/v/2/"), &cookie).await;
     assert!(old.body.contains(v2_a.strip_prefix("http://docs.test").unwrap()));
 
     // Replace keeps only the images given in that publish.
@@ -2240,4 +2329,1103 @@ async fn avif_and_other_formats_are_accepted() {
         err.starts_with("image \"b.avif\" couldn't be read: not a valid AVIF file"),
         "{err}"
     );
+}
+
+impl TestApp {
+    /// Send a file's bytes to an upload URL (or to `/api/uploads` with a bearer token).
+    async fn upload(&self, method: &str, url: &str, bearer: Option<&str>, body: Vec<u8>) -> Resp {
+        let mut req = Request::builder()
+            .method(method)
+            .uri(url.strip_prefix("http://docs.test").unwrap_or(url))
+            .header(header::CONTENT_TYPE, "application/octet-stream");
+        if let Some(token) = bearer {
+            req = req.header(header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        self.send(req.body(Body::from(body)).unwrap()).await
+    }
+}
+
+#[tokio::test]
+async fn images_are_uploaded_on_their_own() {
+    let t = TestApp::new().await;
+    let (cookie, token) = t.user("alice").await;
+    let (_, bob) = t.user("bob").await;
+
+    // An agent asks for a URL, and sends the files to it with no other credentials.
+    let made = t.tool(&token, "create_upload_url", json!({})).await;
+    let url = made["upload_url"].as_str().unwrap().to_string();
+    assert!(url.starts_with("http://docs.test/api/uploads/"), "{url}");
+    assert_eq!(made["expires_in"], 3600);
+    assert!(made["curl"].as_str().unwrap().contains(&url));
+    let chart = t.upload("POST", &url, None, png(64, 48)).await;
+    assert_eq!(chart.status, StatusCode::OK, "{}", chart.body);
+    let chart = chart.json();
+    let chart_id = chart["id"].as_str().unwrap().to_string();
+    assert!(is_uuid(&chart_id), "{chart}");
+    assert_eq!(chart["expires_in"], 86400);
+    let stored = stored_images(&t).await;
+    assert_eq!(stored.len(), 1);
+    assert!(is_avif(&stored[0]));
+    assert_eq!(chart["bytes"], stored[0].len());
+    // `curl -T` sends a PUT; the URL takes any number of images.
+    let photo = t
+        .upload("PUT", &url, None, encoded(&noisy(80, 60, 20), image::ImageFormat::Jpeg))
+        .await;
+    assert_eq!(photo.status, StatusCode::OK, "{}", photo.body);
+    let photo_id = photo.json()["id"].as_str().unwrap().to_string();
+    assert_ne!(photo_id, chart_id);
+
+    // A publish names the uploads instead of carrying their bytes.
+    let published = t
+        .tool(
+            &token,
+            "publish_document",
+            json!({
+                "slug": "shots",
+                "pages": [{ "path": "index", "content": "# Shots\n\n![chart](images/chart.png) ![photo](photo.jpg)" }],
+                "images": [
+                    { "name": "images/chart.png", "upload": chart_id.to_uppercase() },
+                    { "name": "photo.jpg", "upload": photo_id },
+                ],
+            }),
+        )
+        .await;
+    assert_eq!(published["warnings"], json!([]));
+    let images = published["images"].as_array().unwrap();
+    assert_eq!(images.len(), 2);
+    let shots = t.doc_path(&token, "shots").await;
+    let chart_url = images[0]["url"].as_str().unwrap().replace("http://docs.test", "");
+    assert!(chart_url.starts_with(&format!("{shots}/-/images/")), "{chart_url}");
+    let served = t.get(&chart_url, &cookie).await;
+    assert_eq!(served.status, StatusCode::OK);
+    assert!(is_avif(&served.bytes));
+    assert!(t.get(&format!("{shots}/"), &cookie).await.body.contains(&chart_url));
+    assert_eq!(stored_images(&t).await.len(), 2, "nothing is stored twice");
+
+    // An upload can be published again, but only by whoever uploaded it.
+    let again = json!({ "slug": "shots", "pages": [{ "path": "index", "content": "![c](c.png)" }], "images": [{ "name": "c.png", "upload": chart_id }] });
+    let v2 = t.tool(&token, "publish_document", again.clone()).await;
+    assert_eq!(v2["version"], 2);
+    assert_eq!(v2["images"].as_array().unwrap().len(), 1);
+    let missing = |id: &str| {
+        format!(
+            "image \"c.png\": there is no uploaded image {id:?}. Uploads are deleted a day after they are made, \
+             and only whoever uploaded an image can publish it: upload it again (create_upload_url)"
+        )
+    };
+    let theirs = json!({ "slug": "bobs", "pages": [{ "path": "index", "content": "x" }], "images": [{ "name": "c.png", "upload": chart_id }] });
+    assert_eq!(t.tool_error(&bob, "publish_document", theirs).await, missing(&chart_id));
+    assert_eq!(t.tool(&bob, "list_documents", json!({})).await["documents"], json!([]));
+    let unknown = json!({ "slug": "shots", "pages": [{ "path": "index", "content": "x" }], "images": [{ "name": "c.png", "upload": "nope" }] });
+    assert_eq!(t.tool_error(&token, "publish_document", unknown).await, missing("nope"));
+    let both = json!({ "slug": "shots", "pages": [{ "path": "index", "content": "x" }], "images": [{ "name": "c.png", "upload": chart_id, "data": b64(&png(8, 8)) }] });
+    assert_eq!(
+        t.tool_error(&token, "publish_document", both).await,
+        "image \"c.png\" needs either `data` (its bytes in base64) or `upload` (the id of an image uploaded with create_upload_url), and not both"
+    );
+
+    // What an upload URL refuses.
+    let error = |res: Resp, status: StatusCode| {
+        assert_eq!(res.status, status, "{}", res.body);
+        res.json()["error"].as_str().unwrap().to_string()
+    };
+    let svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>".to_vec();
+    assert_eq!(
+        error(t.upload("POST", &url, None, svg).await, StatusCode::BAD_REQUEST),
+        "the uploaded image is SVG, which isn't supported: images must be PNG, JPEG, WebP, GIF or AVIF"
+    );
+    assert!(
+        error(t.upload("POST", &url, None, Vec::new()).await, StatusCode::BAD_REQUEST)
+            .starts_with("send the image file itself as the request body")
+    );
+    let form = t
+        .send(
+            Request::post(url.strip_prefix("http://docs.test").unwrap())
+                .header(header::CONTENT_TYPE, "multipart/form-data; boundary=x")
+                .body(Body::from("--x--"))
+                .unwrap(),
+        )
+        .await;
+    assert!(error(form, StatusCode::BAD_REQUEST).contains("not a form"));
+    let too_big = encoded(&noisy(1600, 1600, 60), image::ImageFormat::Png);
+    assert!(
+        error(t.upload("POST", &url, None, too_big).await, StatusCode::BAD_REQUEST)
+            .starts_with("the uploaded image is ")
+    );
+    assert!(
+        error(
+            t.upload("POST", "/api/uploads/not-a-token", None, png(8, 8)).await,
+            StatusCode::NOT_FOUND
+        )
+        .starts_with("this upload URL isn't valid any more")
+    );
+    assert_eq!(
+        error(
+            t.upload("POST", &url, None, vec![0; 32 * 1024 * 1024 + 1]).await,
+            StatusCode::PAYLOAD_TOO_LARGE
+        ),
+        "the uploaded image is over 33554432 bytes (32 MiB), the most an upload can be: downscale it"
+    );
+    assert_eq!(stored_images(&t).await.len(), 2);
+
+    // Clients with a token of their own upload without asking for a URL.
+    let direct = t.upload("POST", "/api/uploads", Some(&token), png(20, 20)).await;
+    assert_eq!(direct.status, StatusCode::OK, "{}", direct.body);
+    let direct_id = direct.json()["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        t.upload("POST", "/api/uploads", None, png(20, 20)).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        t.upload("POST", "/api/uploads", Some("nope"), png(20, 20)).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+
+    // Uploads last a day, and their URL an hour: after that they're gone, with the images no document has.
+    assert_eq!(db::purge_uploads(&t.state.db).await.unwrap(), 0);
+    sqlx::query("UPDATE uploads SET expires_at = 0; UPDATE upload_urls SET expires_at = 0")
+        .execute(&t.state.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        t.upload("POST", &url, None, png(8, 8)).await.status,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        t.tool_error(&token, "publish_document", again).await,
+        missing(&chart_id)
+    );
+    assert_eq!(stored_images(&t).await.len(), 3);
+    assert_eq!(db::purge_uploads(&t.state.db).await.unwrap(), 3);
+    assert_eq!(stored_images(&t).await.len(), 2, "the published ones stay");
+    assert_eq!(t.get(&chart_url, &cookie).await.status, StatusCode::OK);
+    let gone = json!({ "slug": "shots", "pages": [{ "path": "index", "content": "x" }], "images": [{ "name": "c.png", "upload": direct_id }] });
+    assert_eq!(
+        t.tool_error(&token, "publish_document", gone).await,
+        missing(&direct_id)
+    );
+
+    // No more than 200 wait at once.
+    let (alice_id,): (i64,) = sqlx::query_as("SELECT id FROM users WHERE login = 'alice'")
+        .fetch_one(&t.state.db)
+        .await
+        .unwrap();
+    for n in 0..200 {
+        sqlx::query("INSERT INTO uploads (uuid, owner_id, sha256, created_at, expires_at) VALUES (?, ?, 'x', 0, ?)")
+            .bind(format!("waiting-{n}"))
+            .bind(alice_id)
+            .bind(db::now() + 60)
+            .execute(&t.state.db)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        error(
+            t.upload("POST", "/api/uploads", Some(&token), png(8, 8)).await,
+            StatusCode::TOO_MANY_REQUESTS
+        ),
+        "there are 200 uploaded images waiting already, the most there can be: they are deleted a day after they are uploaded"
+    );
+    assert_eq!(stored_images(&t).await.len(), 2);
+}
+
+#[tokio::test]
+async fn an_upload_goes_to_the_documents_owner() {
+    let t = TestApp::new().await;
+    let (alice_cookie, alice) = t.user("alice").await;
+    let (bob_cookie, bob) = t.user("bob").await;
+    let csrf = csrf_of(&t.get("/orgs", &alice_cookie).await.body);
+    t.post_form("/orgs", &alice_cookie, &[("csrf", &csrf), ("name", "Acme")])
+        .await;
+    t.post_form(
+        "/orgs/acme/members",
+        &alice_cookie,
+        &[("csrf", &csrf), ("action", "member"), ("login", "bob")],
+    )
+    .await;
+    t.tool(
+        &alice,
+        "publish_document",
+        json!({ "slug": "shared", "organization": "acme", "pages": [{ "path": "index", "content": "# Shared" }] }),
+    )
+    .await;
+
+    // Bob uploads, and publishes it to alice's document in their organization: the image is stored with her.
+    let uploaded = t.upload("POST", "/api/uploads", Some(&bob), png(40, 30)).await;
+    let id = uploaded.json()["id"].as_str().unwrap().to_string();
+    let v2 = t
+        .tool(
+            &bob,
+            "publish_document",
+            json!({ "slug": "shared", "pages": [{ "path": "index", "content": "![s](s.png)" }], "images": [{ "name": "s.png", "upload": id }] }),
+        )
+        .await;
+    let image = v2["images"][0]["url"].as_str().unwrap().replace("http://docs.test", "");
+    for cookie in [&alice_cookie, &bob_cookie] {
+        let res = t.get(&image, cookie).await;
+        assert_eq!(res.status, StatusCode::OK);
+        assert!(is_avif(&res.bytes));
+    }
+    // Once bob's upload expires, the document's copy stays.
+    sqlx::query("UPDATE uploads SET expires_at = 0")
+        .execute(&t.state.db)
+        .await
+        .unwrap();
+    assert_eq!(db::purge_uploads(&t.state.db).await.unwrap(), 1);
+    assert_eq!(stored_images(&t).await.len(), 1);
+    assert_eq!(t.get(&image, &alice_cookie).await.status, StatusCode::OK);
+}
+
+/// The JSON the editor page gives the editor.
+fn editor_data(html: &str) -> Value {
+    let start = html
+        .find("<script id=\"editor-data\" type=\"application/json\">")
+        .expect("editor data")
+        + 49;
+    let end = start + html[start..].find("</script>").unwrap();
+    serde_json::from_str(&html[start..end]).unwrap()
+}
+
+#[tokio::test]
+async fn owners_edit_documents_in_the_editor() {
+    let t = TestApp::new().await;
+    let (cookie, token) = t.user("alice").await;
+    let (bob_cookie, _) = t.user("bob").await;
+    let chart = png(32, 24);
+    t.tool(
+        &token,
+        "publish_document",
+        json!({
+            "slug": "guide",
+            "title": "Guide",
+            "pages": [
+                { "path": "index", "content": "# Guide\n\n![chart](images/chart.png) </script>" },
+                { "path": "setup", "content": "# Setup\n\nOld text." },
+                { "path": "old", "content": "# Old" },
+            ],
+            "images": [{ "name": "images/chart.png", "data": b64(&chart) }],
+        }),
+    )
+    .await;
+    t.tool(
+        &token,
+        "share_document",
+        json!({ "slug": "guide", "add_users": ["bob"] }),
+    )
+    .await;
+    let uuid_of = |slug: &'static str| {
+        let db = t.state.db.clone();
+        async move {
+            sqlx::query_scalar::<_, String>("SELECT uuid FROM documents WHERE slug = ?")
+                .bind(slug)
+                .fetch_one(&db)
+                .await
+                .unwrap()
+        }
+    };
+    let g = format!("/d/{}", uuid_of("guide").await);
+
+    // The owner sees Edit on the document; the editor opens at the page, with every page's source.
+    let page = t.get(&format!("{g}/setup"), &cookie).await;
+    assert!(
+        page.body.contains(&format!("href=\"{g}/-/edit/setup\"")),
+        "{}",
+        page.body
+    );
+    let shared = t.get(&format!("{g}/setup"), &bob_cookie).await;
+    assert_eq!(shared.status, StatusCode::OK);
+    assert!(!shared.body.contains("/-/edit/"));
+    let editor = t.get(&format!("{g}/-/edit/setup"), &cookie).await;
+    assert_eq!(editor.status, StatusCode::OK);
+    assert!(
+        !editor.body.contains("</script> "),
+        "the page's text can't close the script"
+    );
+    let data = editor_data(&editor.body);
+    assert_eq!(data["open"], "setup");
+    assert_eq!(data["baseVersion"], 1);
+    assert_eq!(data["title"], "Guide");
+    assert_eq!(data["images"], json!(["images/chart.png"]));
+    assert_eq!(data["pages"][1]["content"], "# Setup\n\nOld text.");
+    assert_eq!(data["cancelUrl"], format!("{g}/setup"));
+    assert_eq!(
+        t.get(&format!("{g}/-/edit"), &bob_cookie).await.status,
+        StatusCode::FORBIDDEN
+    );
+    let index = t.get(&format!("{g}/"), &cookie).await;
+    assert!(index.body.contains(&format!("href=\"{g}/-/edit/\"")));
+    assert_eq!(
+        editor_data(&t.get(&format!("{g}/-/edit/"), &cookie).await.body)["open"],
+        "index"
+    );
+    let csrf = csrf_of(&editor.body);
+
+    // The preview renders with the document's images and doesn't store anything.
+    let preview = t
+        .post_json(
+            "/api/preview",
+            &cookie,
+            &csrf,
+            json!({ "slug": "guide", "version": 1, "path": "index", "format": "mdx", "content": "# Hi\n\n![c](images/chart.png)\n\n<Callout>Note</Callout>" }),
+        )
+        .await;
+    assert_eq!(preview.status, StatusCode::OK, "{}", preview.body);
+    let p = preview.json();
+    assert_eq!(p["has_h1"], true);
+    assert!(p["html"].as_str().unwrap().contains(&format!("{g}/-/images/")), "{p}");
+    assert!(p["html"].as_str().unwrap().contains("callout"), "{p}");
+    let broken = t
+        .post_json(
+            "/api/preview",
+            &cookie,
+            &csrf,
+            json!({ "path": "index", "format": "mdx", "content": "<Callout>\n\nunclosed" }),
+        )
+        .await
+        .json();
+    assert_eq!(broken["html"], Value::Null);
+    assert!(
+        broken["error"].as_str().unwrap().contains("isn't valid mdx"),
+        "{broken}"
+    );
+
+    // Saving publishes all the pages as the next version: renamed, reordered, one removed,
+    // one added with an uploaded image; the image the index still uses is kept.
+    let photo = png(20, 20);
+    let save = json!({
+        "base_version": 1,
+        "title": "The guide",
+        "message": "Edited by hand",
+        "pages": [
+            { "path": "setup", "title": "Setting up", "format": "md", "content": "# Setup\n\nNew text." },
+            { "path": "index", "title": null, "format": "md", "content": "# Guide\n\n![chart](images/chart.png)" },
+            { "path": "photos", "title": null, "format": "md", "content": "# Photos\n\n![p](images/photo.png)" },
+        ],
+        "images": [{ "name": "images/photo.png", "data": b64(&photo) }],
+    });
+    let other = t
+        .post_json(
+            "/api/documents/guide/versions",
+            &bob_cookie,
+            &csrf_of(&shared.body),
+            save.clone(),
+        )
+        .await;
+    assert_eq!(other.status, StatusCode::FORBIDDEN, "{}", other.body);
+    let no_csrf = t
+        .post_json("/api/documents/guide/versions", &cookie, "", save.clone())
+        .await;
+    assert_eq!(no_csrf.status, StatusCode::FORBIDDEN);
+    let saved = t
+        .post_json("/api/documents/guide/versions", &cookie, &csrf, save.clone())
+        .await;
+    assert_eq!(saved.status, StatusCode::OK, "{}", saved.body);
+    let saved = saved.json();
+    assert_eq!(saved["version"], 2);
+    assert_eq!(saved["url"], format!("{g}/"));
+
+    let got = t.tool(&token, "get_document", json!({ "slug": "guide" })).await;
+    assert_eq!(got["title"], "The guide");
+    let paths: Vec<&str> = got["pages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        paths,
+        ["setup", "index", "photos"],
+        "in the editor's order, without the removed page"
+    );
+    assert_eq!(got["pages"][0]["title"], "Setting up");
+    let images = t
+        .tool(&token, "read_page", json!({ "slug": "guide", "path": "photos" }))
+        .await;
+    assert_eq!(images["content"], "# Photos\n\n![p](images/photo.png)");
+    let index = t.get(&format!("{g}/"), &cookie).await;
+    assert!(index.body.contains(&format!("{g}/-/images/")), "the chart is kept");
+    let versions = t.get(&format!("{g}/-/versions"), &cookie).await;
+    assert!(versions.body.contains("Edited by hand"));
+
+    // Saving from a version that isn't the latest any more says so, with the latest's number.
+    let stale = t
+        .post_json("/api/documents/guide/versions", &cookie, &csrf, save.clone())
+        .await;
+    assert_eq!(stale.status, StatusCode::CONFLICT);
+    assert_eq!(stale.json()["latest_version"], 2);
+    let mut over = save.clone();
+    over["base_version"] = json!(2);
+    over["pages"] = json!([{ "path": "index", "format": "mdx", "content": "<Callout>\n\nunclosed", "title": null}]);
+    let invalid = t.post_json("/api/documents/guide/versions", &cookie, &csrf, over).await;
+    assert_eq!(invalid.status, StatusCode::BAD_REQUEST);
+
+    // A new document from the editor, in a folder.
+    let new_page = t.get("/new?folder=notes", &cookie).await;
+    assert_eq!(editor_data(&new_page.body)["folder"], "notes");
+    assert!(t.get("/", &cookie).await.body.contains("href=\"/new\""));
+    let created = t
+        .post_json(
+            "/api/documents",
+            &cookie,
+            &csrf,
+            json!({ "base_version": null, "title": "My notes", "folder": "notes", "message": null,
+                    "pages": [{ "path": "index", "title": null, "format": "md", "content": "Hello" }], "images": [] }),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::OK, "{}", created.body);
+    let created = created.json();
+    assert_eq!(created["url"], format!("/d/{}/", uuid_of("my-notes").await));
+    let got = t.tool(&token, "get_document", json!({ "slug": "my-notes" })).await;
+    assert_eq!(got["title"], "My notes");
+    assert_eq!(got["folder"], "notes");
+    let untitled = t
+        .post_json(
+            "/api/documents",
+            &cookie,
+            &csrf,
+            json!({ "title": " ", "pages": [{ "path": "index", "format": "md", "content": "x" }] }),
+        )
+        .await;
+    assert_eq!(untitled.status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn organizations_share_documents() {
+    let t = TestApp::new().await;
+    let (alice_cookie, alice) = t.user("alice").await;
+    let (bob_cookie, bob) = t.user("bob").await;
+    let (carol_cookie, carol) = t.user("carol").await;
+    let csrf = csrf_of(&t.get("/orgs", &alice_cookie).await.body);
+    let bob_csrf = csrf_of(&t.get("/orgs", &bob_cookie).await.body);
+
+    // Alice creates an organization (the slug comes from the name) and adds bob.
+    let created = t
+        .post_form("/orgs", &alice_cookie, &[("csrf", &csrf), ("name", "Acme Corp")])
+        .await;
+    assert_eq!(created.status, StatusCode::SEE_OTHER, "{}", created.body);
+    assert_eq!(created.location(), "/orgs/acme-corp");
+    let taken = t
+        .post_form(
+            "/orgs",
+            &bob_cookie,
+            &[("csrf", &bob_csrf), ("name", "Other"), ("slug", "Acme-Corp")],
+        )
+        .await;
+    assert!(taken.body.contains("already an organization"), "{}", taken.body);
+    let added = t
+        .post_form(
+            "/orgs/acme-corp/members",
+            &alice_cookie,
+            &[("csrf", &csrf), ("action", "member"), ("login", "@Bob")],
+        )
+        .await;
+    assert_eq!(added.status, StatusCode::SEE_OTHER, "{}", added.body);
+    let orgs = t.tool(&bob, "list_organizations", json!({})).await;
+    assert_eq!(orgs["organizations"][0]["slug"], "acme-corp");
+    assert_eq!(orgs["organizations"][0]["your_role"], "member");
+    assert_eq!(
+        orgs["organizations"][0]["members"],
+        json!([{ "login": "alice", "role": "owner" }, { "login": "bob", "role": "member" }])
+    );
+    assert_eq!(
+        t.tool(&carol, "list_organizations", json!({})).await["organizations"],
+        json!([])
+    );
+    assert_eq!(
+        t.get("/orgs/acme-corp", &carol_cookie).await.status,
+        StatusCode::NOT_FOUND
+    );
+
+    // Bob's agent publishes for the organization; members see it, others don't.
+    let err = t
+        .tool_error(
+            &carol,
+            "publish_document",
+            json!({ "organization": "acme-corp", "pages": [{ "path": "index", "content": "# Nope" }] }),
+        )
+        .await;
+    assert!(err.contains("aren't a member"), "{err}");
+    let published = t
+        .tool(
+            &bob,
+            "publish_document",
+            json!({ "slug": "roadmap", "organization": "acme-corp", "folder": "plans", "labels": ["q1"],
+                    "pages": [{ "path": "index", "content": "# Roadmap" }] }),
+        )
+        .await;
+    assert_eq!(published["organization"], "acme-corp");
+    assert_eq!(published["folder"], "plans");
+    // Its pages are at /d/<uuid>/.
+    let d = published["url"].as_str().unwrap().replace("http://docs.test", "");
+    let d = d.trim_end_matches('/');
+    let listed = t
+        .tool(&alice, "list_documents", json!({ "organization": "acme-corp" }))
+        .await;
+    assert_eq!(slugs(&listed), ["roadmap"]);
+    assert_eq!(listed["documents"][0]["shared_with_you"], false);
+    assert_eq!(labels_of(&listed, "roadmap"), json!(["q1"]));
+    assert_eq!(
+        slugs(&t.tool(&alice, "list_documents", json!({ "organization": "" })).await),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        t.tool(&carol, "list_documents", json!({})).await["documents"],
+        json!([])
+    );
+    let err = t.tool_error(&carol, "get_document", json!({ "slug": "roadmap" })).await;
+    assert!(err.contains("no document"), "{err}");
+    let err = t
+        .tool_error(
+            &carol,
+            "publish_document",
+            json!({ "slug": "roadmap", "pages": [{ "path": "index", "content": "x" }] }),
+        )
+        .await;
+    assert!(err.contains("can't publish to"), "{err}");
+
+    // Any member publishes versions (with images, stored once for the document), labels it and shares it.
+    let v2 = t
+        .tool(
+            &alice,
+            "publish_document",
+            json!({ "slug": "roadmap", "mode": "merge",
+                    "pages": [{ "path": "chart", "content": "![chart](images/chart.png)" }],
+                    "images": [{ "name": "images/chart.png", "data": b64(&png(32, 24)) }] }),
+        )
+        .await;
+    assert_eq!(v2["version"], 2);
+    let image_url = v2["images"][0]["url"].as_str().unwrap().replace("http://docs.test", "");
+    assert_eq!(t.get(&image_url, &bob_cookie).await.status, StatusCode::OK);
+    assert_eq!(t.get(&image_url, &carol_cookie).await.status, StatusCode::NOT_FOUND);
+    t.tool(
+        &alice,
+        "set_document_labels",
+        json!({ "document": "roadmap", "labels": ["Q1/Planning"] }),
+    )
+    .await;
+    let labels = t
+        .tool(&bob, "list_labels", json!({ "organization": "acme-corp" }))
+        .await;
+    assert_eq!(labels["labels"][0]["name"], "q1", "spelled as first used: {labels}");
+    assert_eq!(labels["documents"], 1);
+    assert_eq!(t.tool(&bob, "list_labels", json!({})).await["documents"], 0);
+    t.tool(
+        &alice,
+        "share_document",
+        json!({ "slug": "roadmap", "add_users": ["carol"] }),
+    )
+    .await;
+    let shared = t.tool(&carol, "list_documents", json!({})).await;
+    assert_eq!(shared["documents"][0]["shared_with_you"], true);
+    assert_eq!(shared["documents"][0]["labels"], json!([]));
+    let err = t
+        .tool_error(
+            &carol,
+            "set_document_labels",
+            json!({ "document": "roadmap", "labels": [] }),
+        )
+        .await;
+    assert!(err.contains("members of the organization"), "{err}");
+
+    // The home page has a section for the organization; the document page links to it.
+    let home = t.get("/", &alice_cookie).await;
+    assert!(home.body.contains(r#"id="org-acme-corp""#), "{}", home.body);
+    assert!(home.body.contains(r#"data-folder-key="org:acme-corp:plans""#));
+    assert!(home.body.contains(&format!(r#"href="{d}/""#)));
+    let page = t.get(&format!("{d}/"), &alice_cookie).await;
+    assert!(page.body.contains(r#"href="/orgs/acme-corp""#));
+    assert!(page.body.contains(&format!("{d}/-/labels")), "members can label it");
+    assert!(page.body.contains(&format!("{d}/-/edit/")), "and edit it");
+
+    // Folders are the organization's: rename one from the home page.
+    let renamed = t
+        .post_form(
+            "/folders/rename",
+            &alice_cookie,
+            &[
+                ("csrf", &csrf),
+                ("organization", "acme-corp"),
+                ("from", "plans"),
+                ("to", "roadmaps"),
+            ],
+        )
+        .await;
+    assert_eq!(renamed.status, StatusCode::SEE_OTHER, "{}", renamed.body);
+    assert_eq!(
+        t.tool(&bob, "get_document", json!({ "slug": "roadmap" })).await["folder"],
+        "roadmaps"
+    );
+
+    // Only its creator can take it out of the organization.
+    let err = t
+        .tool_error(
+            &alice,
+            "move_document",
+            json!({ "slug": "roadmap", "folder": "", "organization": "" }),
+        )
+        .await;
+    assert!(err.contains("only bob"), "{err}");
+    // Nor into another organization, where acme-corp's members would lose it: not with
+    // move_document, nor with the Move form (which doesn't offer it).
+    t.post_form("/orgs", &alice_cookie, &[("csrf", &csrf), ("name", "Alice only")])
+        .await;
+    let err = t
+        .tool_error(
+            &alice,
+            "move_document",
+            json!({ "slug": "roadmap", "folder": "", "organization": "alice-only" }),
+        )
+        .await;
+    assert!(err.contains("only bob"), "{err}");
+    let refused = t
+        .post_form(
+            "/d/roadmap/-/move",
+            &alice_cookie,
+            &[("csrf", &csrf), ("folder", "plans"), ("organization", "alice-only")],
+        )
+        .await;
+    assert!(refused.body.contains("only bob"), "{}", refused.body);
+    assert_eq!(
+        t.tool(&bob, "get_document", json!({ "slug": "roadmap" })).await["organization"],
+        "acme-corp"
+    );
+    let home = t.get("/", &alice_cookie).await;
+    let form = &home.body[home.body.find(&format!(r#"action="{d}/-/move""#)).unwrap()..];
+    let form = &form[..form.find("</form>").unwrap()];
+    assert!(!form.contains("<select"), "{form}");
+    let res = t
+        .post_form("/orgs/alice-only/delete", &alice_cookie, &[("csrf", &csrf)])
+        .await;
+    assert_eq!(res.status, StatusCode::SEE_OTHER);
+    let moved = t
+        .tool(
+            &bob,
+            "move_document",
+            json!({ "slug": "roadmap", "folder": "mine", "organization": "" }),
+        )
+        .await;
+    assert_eq!(moved["organization"], Value::Null);
+    let err = t.tool_error(&alice, "get_document", json!({ "slug": "roadmap" })).await;
+    assert!(err.contains("no document"), "{err}");
+    let moved = t
+        .post_form(
+            "/d/roadmap/-/move",
+            &bob_cookie,
+            &[("csrf", &bob_csrf), ("folder", "plans"), ("organization", "acme-corp")],
+        )
+        .await;
+    assert_eq!(moved.status, StatusCode::SEE_OTHER, "{}", moved.body);
+    assert_eq!(
+        t.tool(&alice, "get_document", json!({ "slug": "roadmap" })).await["organization"],
+        "acme-corp"
+    );
+
+    // Only owners manage members, and an organization keeps an owner.
+    let refused = t
+        .post_form(
+            "/orgs/acme-corp/members",
+            &bob_cookie,
+            &[("csrf", &bob_csrf), ("action", "member"), ("login", "carol")],
+        )
+        .await;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN);
+    let last_owner = t
+        .post_form(
+            "/orgs/acme-corp/members",
+            &alice_cookie,
+            &[("csrf", &csrf), ("action", "remove"), ("login", "alice")],
+        )
+        .await;
+    assert!(last_owner.body.contains("at least one owner"), "{}", last_owner.body);
+    let in_use = t
+        .post_form("/orgs/acme-corp/delete", &alice_cookie, &[("csrf", &csrf)])
+        .await;
+    assert!(in_use.body.contains("documents first"), "{}", in_use.body);
+
+    // A removed member loses access, even to the documents they created there.
+    t.post_form(
+        "/orgs/acme-corp/members",
+        &alice_cookie,
+        &[("csrf", &csrf), ("action", "remove"), ("login", "bob")],
+    )
+    .await;
+    assert_eq!(t.get(&format!("{d}/"), &bob_cookie).await.status, StatusCode::NOT_FOUND);
+    let err = t
+        .tool_error(
+            &bob,
+            "publish_document",
+            json!({ "slug": "roadmap", "pages": [{ "path": "index", "content": "x" }] }),
+        )
+        .await;
+    assert!(err.contains("can't publish to"), "{err}");
+
+    // Members can make it public too: then anyone with its link reads it, read-only.
+    let shared = t
+        .tool(&alice, "share_document", json!({ "slug": "roadmap", "public": true }))
+        .await;
+    assert_eq!(shared["public"], true, "{shared}");
+    let page = t.get(&format!("{d}/"), &bob_cookie).await;
+    assert_eq!(page.status, StatusCode::OK);
+    assert!(page.body.contains("Public document by acme-corp"), "{}", page.body);
+
+    // An empty organization can be deleted.
+    t.post_form(
+        "/orgs",
+        &alice_cookie,
+        &[("csrf", &csrf), ("name", "Spare"), ("slug", "spare")],
+    )
+    .await;
+    let deleted = t
+        .post_form("/orgs/spare/delete", &alice_cookie, &[("csrf", &csrf)])
+        .await;
+    assert_eq!(deleted.status, StatusCode::SEE_OTHER, "{}", deleted.body);
+    assert_eq!(t.get("/orgs/spare", &alice_cookie).await.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn public_documents_can_be_read_by_anyone_with_the_link() {
+    let t = TestApp::new().await;
+    let (alice_cookie, alice) = t.user("alice").await;
+    let (bob_cookie, bob) = t.user("bob").await;
+    t.tool(
+        &alice,
+        "publish_document",
+        json!({ "slug": "launch", "pages": [
+            { "path": "index", "content": "# Launch\n\nWe launch on Monday.\n\n<TextInput name=\"q\" label=\"Q\" />" },
+            { "path": "more", "content": "# More" },
+        ] }),
+    )
+    .await;
+    let d = t.doc_path(&alice, "launch").await;
+
+    // Private by default, even at its UUID.
+    assert_eq!(t.get(&format!("{d}/"), "").await.status, StatusCode::SEE_OTHER);
+    assert_eq!(t.get(&format!("{d}/"), &bob_cookie).await.status, StatusCode::NOT_FOUND);
+
+    // Alice comments, then makes it public.
+    let page = t.get(&format!("{d}/"), &alice_cookie).await;
+    assert!(!page.body.contains("Make private"));
+    let version_id: i64 = attr_after(&page.body, "<article", "data-version-id").parse().unwrap();
+    let sel = t
+        .post_json(
+            "/api/selections",
+            &alice_cookie,
+            &csrf_of(&page.body),
+            json!({ "version_id": version_id, "page": "index", "quote": "Monday", "comment": "internal note" }),
+        )
+        .await;
+    assert_eq!(sel.status, StatusCode::CREATED, "{}", sel.body);
+    let shared = t
+        .tool(&alice, "share_document", json!({ "slug": "launch", "public": true }))
+        .await;
+    assert_eq!(shared["public"], true);
+    assert_eq!(shared["url"], format!("http://docs.test{d}/"));
+    let listed = t.tool(&alice, "list_documents", json!({})).await;
+    assert_eq!(listed["documents"][0]["public"], true);
+    assert!(
+        t.get("/", &alice_cookie)
+            .await
+            .body
+            .contains(r#"<span class="badge">public</span>"#)
+    );
+
+    // Anyone can read it at its UUID, without signing in, but can't answer or comment.
+    for cookie in ["", bob_cookie.as_str()] {
+        let page = t.get(&format!("{d}/"), cookie).await;
+        assert_eq!(page.status, StatusCode::OK, "{}", page.body);
+        assert!(page.body.contains("We launch on Monday."));
+        assert!(page.body.contains("data-readonly"));
+        assert!(!page.body.contains("data-version-id"));
+        assert!(!page.body.contains("internal note"), "comments stay private");
+        assert!(page.body.contains("Public document by alice"));
+        assert!(!page.body.contains("/-/feedback") && !page.body.contains("/-/share"));
+        assert_eq!(t.get(&format!("{d}/more"), cookie).await.status, StatusCode::OK);
+        assert_eq!(t.get(&format!("{d}/-/v/1/"), cookie).await.status, StatusCode::OK);
+        assert_eq!(t.get(&format!("{d}/-/versions"), cookie).await.status, StatusCode::OK);
+        // Not by its slug: that could be guessed.
+        assert_ne!(t.get("/d/launch/", cookie).await.status, StatusCode::OK);
+    }
+    assert_eq!(
+        t.get(&format!("{d}/-/feedback"), "").await.status,
+        StatusCode::SEE_OTHER
+    );
+    assert_eq!(
+        t.get(&format!("{d}/-/feedback"), &bob_cookie).await.status,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        t.get(&format!("{d}/-/share"), &bob_cookie).await.status,
+        StatusCode::NOT_FOUND
+    );
+    let bob_page = t.get(&format!("{d}/"), &bob_cookie).await;
+    let saved = t
+        .post_json(
+            "/api/responses",
+            &bob_cookie,
+            &csrf_of(&bob_page.body),
+            json!({ "version_id": version_id, "page": "index", "field": "q", "value": "x" }),
+        )
+        .await;
+    assert_eq!(saved.status, StatusCode::BAD_REQUEST, "can't answer a public document");
+    // Bob's agent doesn't get it either: public is for reading on the site.
+    assert_eq!(t.tool(&bob, "list_documents", json!({})).await["documents"], json!([]));
+    let uuid = d.strip_prefix("/d/").unwrap();
+    let err = t.tool_error(&bob, "get_document", json!({ "slug": uuid })).await;
+    assert!(err.contains("no document"), "{err}");
+
+    // The owner makes it private again from the share page.
+    let share = t.get(&format!("{d}/-/share"), &alice_cookie).await;
+    assert!(share.body.contains("Make private"));
+    let res = t
+        .post_form(
+            &format!("{d}/-/share"),
+            &alice_cookie,
+            &[("csrf", &csrf_of(&share.body)), ("action", "public_off")],
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::SEE_OTHER);
+    assert_eq!(t.get(&format!("{d}/"), "").await.status, StatusCode::SEE_OTHER);
+    assert_eq!(t.get(&format!("{d}/"), &bob_cookie).await.status, StatusCode::NOT_FOUND);
+    let got = t.tool(&alice, "get_document", json!({ "slug": "launch" })).await;
+    assert_eq!(got["sharing"]["public"], false);
+}
+
+fn design_data(html: &str) -> Value {
+    let marker = "<script id=\"design-data\" type=\"application/json\">";
+    let start = html.find(marker).expect("design data") + marker.len();
+    let end = start + html[start..].find("</script>").unwrap();
+    serde_json::from_str(&html[start..end]).unwrap()
+}
+
+#[tokio::test]
+async fn mockups_open_in_the_design_editor() {
+    let t = TestApp::new().await;
+    let (cookie, token) = t.user("alice").await;
+    let (bob_cookie, _) = t.user("bob").await;
+    let home = "<!doctype html>\n<html><head><title>Home</title><style>:root { --accent: #d9480f } .hero { background: url(images/hero.png) }</style></head>\n\
+        <body><img src=\"../images/logo.png\" alt=\"\"><h1>Hello</h1><a class=\"cta\" href=\"/signup\">Start</a><script>alert(1)</script></body></html>";
+    let published = t
+        .tool(
+            &token,
+            "publish_document",
+            json!({
+                "slug": "kea",
+                "title": "Kea </script>",
+                "pages": [
+                    { "path": "index", "content": "# Notes\n\nSee the screens." },
+                    { "path": "screens/home.html", "content": home },
+                    { "path": "screens/sign-in", "format": "html", "content": "<main><h1>Sign in</h1></main>" },
+                ],
+                "images": [
+                    { "name": "images/logo.png", "data": b64(&png(16, 16)) },
+                    { "name": "screens/images/hero.png", "data": b64(&png(24, 16)) },
+                ],
+            }),
+        )
+        .await;
+    assert_eq!(published["version"], 1);
+    // A mockup's scripts don't run, which its publisher is told.
+    let warnings = published["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1, "{published}");
+    assert_eq!(warnings[0]["page"], "screens/home");
+
+    let got = t.tool(&token, "get_document", json!({ "slug": "kea" })).await;
+    let formats: Vec<(&str, &str)> = got["pages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| (p["path"].as_str().unwrap(), p["format"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        formats,
+        [("index", "md"), ("screens/home", "html"), ("screens/sign-in", "html")]
+    );
+    let read = t
+        .tool(
+            &token,
+            "read_page",
+            json!({ "slug": "kea", "path": "screens/home.html" }),
+        )
+        .await;
+    assert_eq!(
+        (read["format"].as_str(), read["title"].as_str()),
+        (Some("html"), Some("Home"))
+    );
+    assert_eq!(read["content"], home, "kept as written");
+
+    // Its page is the design editor, with every mockup of the version and where their images are.
+    let d = t.doc_path(&token, "kea").await;
+    let page = t.get(&format!("{d}/screens/home"), &cookie).await;
+    assert_eq!(page.status, StatusCode::OK, "{}", page.body);
+    assert!(page.body.contains("<main id=\"design\""), "{}", page.body);
+    assert!(!page.body.contains("<article"), "not the reader");
+    assert!(
+        page.body
+            .contains(&format!("data-save-url=\"/api/documents{}/versions\"", &d[2..]))
+    );
+    let data = design_data(&page.body);
+    assert_eq!(data["title"], "Kea </script>");
+    assert_eq!(
+        (data["version"].as_i64(), data["open"].as_str()),
+        (Some(1), Some("screens/home"))
+    );
+    assert_eq!(
+        (data["canEdit"].as_bool(), data["canComment"].as_bool()),
+        (Some(true), Some(true))
+    );
+    let mockups = data["pages"].as_array().unwrap();
+    assert_eq!(mockups.len(), 2, "the Markdown page isn't a mockup");
+    assert_eq!(mockups[0]["content"], home);
+    let images = mockups[0]["images"].as_object().unwrap();
+    assert_eq!(images.len(), 2, "{images:?}");
+    for reference in ["../images/logo.png", "images/hero.png"] {
+        let url = images[reference].as_str().unwrap();
+        assert!(
+            url.starts_with(&format!("{d}/-/images/")) && url.ends_with(".avif"),
+            "{url}"
+        );
+        assert_eq!(t.get(url, &cookie).await.status, StatusCode::OK);
+    }
+    assert_eq!(mockups[1]["title"], "Sign In", "from its path: it has no <title>");
+    assert_eq!(data["others"], json!([{ "title": "Notes", "url": format!("{d}/") }]));
+    assert_eq!(data["links"]["details"], format!("{d}/screens/home?details=1"));
+    assert_eq!(data["links"]["latest"], Value::Null);
+
+    // The document's own page still has it in its menu, and shows it with its details.
+    let index = t.get(&format!("{d}/"), &cookie).await;
+    assert!(index.body.contains("<article"));
+    assert!(index.body.contains(&format!("href=\"{d}/screens/home\"")));
+    let details = t.get(&format!("{d}/screens/home?details=1"), &cookie).await;
+    assert_eq!(details.status, StatusCode::OK);
+    assert!(details.body.contains("is a mockup"), "{}", details.body);
+    assert!(details.body.contains("Open it in the design editor"));
+    assert!(!details.body.contains("alert(1)"), "its source isn't put in the page");
+
+    // A comment on an element keeps its selector, which get_feedback gives the agent.
+    let version_id: i64 = attr_after(&page.body, "<main id=\"design\"", "data-version-id")
+        .parse()
+        .unwrap();
+    let csrf = csrf_of(&page.body);
+    let comment = json!({
+        "version_id": version_id, "page": "screens/home", "quote": "<a class=\"cta\">Start</a>",
+        "anchor": "body > a:nth-child(3)", "comment": "Make it louder",
+    });
+    let made = t.post_json("/api/selections", &cookie, &csrf, comment.clone()).await;
+    assert_eq!(made.status, StatusCode::CREATED, "{}", made.body);
+    let feedback = t.tool(&token, "get_feedback", json!({ "slug": "kea" })).await;
+    let s = &feedback["selections"][0];
+    assert_eq!(s["element"], "body > a:nth-child(3)");
+    assert_eq!(
+        (s["quote"].as_str(), s["comment"].as_str()),
+        (Some("<a class=\"cta\">Start</a>"), Some("Make it louder"))
+    );
+    let again = design_data(&t.get(&format!("{d}/screens/sign-in"), &cookie).await.body);
+    assert_eq!(again["open"], "screens/sign-in");
+    assert_eq!(again["comments"][0]["anchor"], "body > a:nth-child(3)");
+    assert_eq!(
+        (
+            again["comments"][0]["page"].as_str(),
+            again["comments"][0]["mine"].as_bool()
+        ),
+        (Some("screens/home"), Some(true))
+    );
+    let feedback_page = t.get(&format!("{d}/-/feedback"), &cookie).await;
+    assert!(
+        feedback_page.body.contains("body &gt; a:nth-child(3)"),
+        "{}",
+        feedback_page.body
+    );
+
+    // Someone it is shared with can look and comment, not save; a stranger sees nothing.
+    assert_eq!(
+        t.get(&format!("{d}/screens/home"), &bob_cookie).await.status,
+        StatusCode::NOT_FOUND
+    );
+    t.tool(&token, "share_document", json!({ "slug": "kea", "add_users": ["bob"] }))
+        .await;
+    let shared = t.get(&format!("{d}/screens/home"), &bob_cookie).await;
+    assert!(!shared.body.contains("data-save-url"));
+    let theirs = design_data(&shared.body);
+    assert_eq!(
+        (theirs["canEdit"].as_bool(), theirs["canComment"].as_bool()),
+        (Some(false), Some(true))
+    );
+    assert_eq!(theirs["comments"][0]["mine"], false);
+    assert_eq!(theirs["links"]["source"], Value::Null);
+
+    // The design editor saves only the mockups it changed: the other pages stay, and so do
+    // the images the changed mockup still refers to.
+    let changed = home.replace("<h1>Hello</h1>", "<h1 style=\"color: red\">Hello there</h1>");
+    let save = json!({
+        "base_version": 1, "title": "Kea </script>", "message": "Louder", "merge": true,
+        "pages": [{ "path": "screens/home", "title": "Home", "format": "html", "content": changed }],
+    });
+    let denied = t
+        .post_json(
+            &format!("/api/documents{}/versions", &d[2..]),
+            &bob_cookie,
+            &csrf_of(&shared.body),
+            save.clone(),
+        )
+        .await;
+    assert_eq!(denied.status, StatusCode::FORBIDDEN);
+    let saved = t
+        .post_json(
+            &format!("/api/documents{}/versions", &d[2..]),
+            &cookie,
+            &csrf,
+            save.clone(),
+        )
+        .await;
+    assert_eq!(saved.status, StatusCode::OK, "{}", saved.body);
+    assert_eq!(saved.json()["version"], 2);
+    let got = t.tool(&token, "get_document", json!({ "slug": "kea" })).await;
+    assert_eq!(got["pages"].as_array().unwrap().len(), 3, "{got}");
+    assert_eq!(got["images"].as_array().unwrap().len(), 2, "{got}");
+    let read = t
+        .tool(&token, "read_page", json!({ "slug": "kea", "path": "screens/home" }))
+        .await;
+    assert_eq!(read["content"], changed);
+    assert_eq!(read["format"], "html");
+    // Saving from the version it opened again is refused: another was published since.
+    let stale = t
+        .post_json(&format!("/api/documents{}/versions", &d[2..]), &cookie, &csrf, save)
+        .await;
+    assert_eq!(stale.status, StatusCode::CONFLICT, "{}", stale.body);
+
+    // The old version is still there to look at, but not to save over; comments stay with it.
+    let old = design_data(&t.get(&format!("{d}/-/v/1/screens/home"), &cookie).await.body);
+    assert_eq!(
+        (old["canEdit"].as_bool(), old["version"].as_i64()),
+        (Some(false), Some(1))
+    );
+    assert_eq!(old["links"]["latest"], format!("{d}/screens/home"));
+    assert_eq!(old["comments"].as_array().unwrap().len(), 1);
+    let new = design_data(&t.get(&format!("{d}/screens/home"), &cookie).await.body);
+    assert_eq!(new["comments"].as_array().unwrap().len(), 0);
+    assert_eq!(new["pages"][0]["content"], changed);
+
+    // A public document's mockups can be looked at by anyone, who can't comment or save.
+    t.tool(&token, "share_document", json!({ "slug": "kea", "public": true }))
+        .await;
+    let public = t.get(&format!("{d}/-/v/1/screens/home"), "").await;
+    assert_eq!(public.status, StatusCode::OK);
+    assert!(!public.body.contains("data-version-id") && !public.body.contains("data-save-url"));
+    let anyone = design_data(&public.body);
+    assert_eq!(
+        (anyone["canEdit"].as_bool(), anyone["canComment"].as_bool()),
+        (Some(false), Some(false))
+    );
+    assert_eq!(anyone["comments"], json!([]), "comments aren't the public's to read");
+
+    // The document editor has its mockups as pages too, and keeps them as they are.
+    let editor = editor_data(&t.get(&format!("{d}/-/edit/screens/home"), &cookie).await.body);
+    let formats: Vec<&str> = editor["pages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["format"].as_str().unwrap())
+        .collect();
+    assert_eq!(formats, ["md", "html", "html"]);
+    assert_eq!(editor["open"], "screens/home");
 }

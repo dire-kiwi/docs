@@ -8,16 +8,25 @@ import { quoted } from "./rules.ts"
 
 // The `docs` MCP server agents on the board get (`mcp__docs__<tool>`): they publish documents to their profile on this
 // host exactly as they would to the hosted site. The tools, their schemas, checks, errors and warnings are the hosted
-// server's, from the renderer (`toolDefinitions`), but `share_document` (documents on the board aren't shared). A tool's
+// server's, from the renderer (`toolDefinitions`), but `share_document` (documents on the board aren't shared) and
+// organizations (`list_organizations` and the `organization` arguments: the board has none). A tool's
 // result is its JSON as text and as `structuredContent`; a failure is its message as a tool error, without anything
 // before it, as the hosted server's.
 
 /** The hosted server's tools this one leaves out. */
-const LEFT_OUT = new Set(["share_document"])
+const LEFT_OUT = new Set(["share_document", "list_organizations"])
+
+/** A tool's input schema without the hosted server's `organization` argument. */
+const withoutOrganization = (schema: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> => {
+  const properties = schema["properties"]
+  if (typeof properties !== "object" || properties === null || !("organization" in properties)) return schema
+  const { organization: _, ...rest } = properties as Record<string, unknown>
+  return { ...schema, properties: rest }
+}
 
 /** What the server tells agents (Claude Code adds it to its system prompt). */
 export const INSTRUCTIONS =
-  "Docs keeps Markdown documents for the user to read on this Huntaway board: reports, plans, research, write-ups. " +
+  "Docs keeps Markdown documents for the user to read on this Huntaway board: reports, plans, research, write-ups, and HTML mockups of designs. " +
   "Publish with `publish_document` (one or more pages; nested paths like `plan/phase-1` make a nested menu). Every " +
   'publish creates a new version, so you can revise freely; `mode: "merge"` keeps the other pages of the previous ' +
   "version. If you can start sub-agents, have one write and publish the document: give it what the document should " +
@@ -31,14 +40,27 @@ export const INSTRUCTIONS =
   "or run npm packages, renderers or other tools to check pages. The user can also select text in a document on the board " +
   "and comment on it for you: `get_feedback` has the comments and answers (pass its `cursor` as `since` next time for only " +
   "new ones), and the board sends them to the task that published the document as a message when the user chooses Send. " +
+  "The user can also edit a document themselves on the board, which publishes a new version (with no task): before you " +
+  "publish a new version of a document they may have edited, read its latest pages (`get_document`, `read_page`) so you " +
+  "don't undo their changes. " +
+  'To show the user a design, publish mockups: pages with format "html" (or a `.html` path), each a complete, ' +
+  "self-contained HTML document with its CSS in a `<style>` element and no scripts (they don't run), one page per screen, " +
+  "state or variant. The user opens them in the design editor: every mockup of the document is a frame on a canvas they " +
+  "zoom and pan, at desktop, tablet or phone width. There they inspect elements, change text, colours, type and spacing, " +
+  "tune the CSS custom properties the mockup defines (so define the design's colours, fonts and sizes as variables on " +
+  "`:root`), comment on elements, and save their changes as a new version. `get_feedback` gives their comments with each " +
+  "element's selector (`element`), and `read_page` the HTML as they last saved it. " +
   "Documents belong to your profile on this board. A new " +
   "document goes in a folder named after your task's project unless you give `folder`; a `folder` you give is used as " +
   'it is (`"plans"` is a top-level folder, `"<project>/plans"` one inside the project\'s), and later versions stay ' +
   "wherever the document is. Use `move_document` only when the user asks to move one. Documents can also have labels, " +
   "nested with '/' (\"research/ai\"): pass `labels` to `publish_document` or call `set_document_labels`, and call " +
-  "`list_labels` to reuse the labels that already exist rather than inventing near-duplicates. Images: pass them to " +
-  "`publish_document` as `images` ({name, data}: base64 PNG, JPEG, WebP, GIF or AVIF, name a relative path like " +
-  '"images/chart.png") and refer to them by name (`![Chart](images/chart.png)`), or inline them as data: URIs. Every image ' +
+  "`list_labels` to reuse the labels that already exist rather than inventing near-duplicates. Images: for an image " +
+  "file (a screenshot, a chart), call `create_upload_url` and send the file to the URL it gives with HTTP " +
+  '(`curl -sS --data-binary @shot.png "<upload_url>"`), so its bytes never go through a tool call; it answers an id, ' +
+  "and you pass `{name, upload: <id>}` in `publish_document`'s `images` (name a relative path like " +
+  '"images/chart.png") and refer to the image by name (`![Chart](images/chart.png)`). Small images can also go in ' +
+  "`images` as `{name, data}` (base64 PNG, JPEG, WebP, GIF or AVIF), or inline in a page as data: URIs. Every image " +
   "is converted to AVIF and must be at most 500 KB after that (downscale or crop one that isn't); only the AVIF is kept, " +
   "not the original, and SVG and remote images aren't shown. Always give the reader the URL returned by `publish_document`."
 
@@ -59,6 +81,7 @@ export const definitions = (lib: RenderLib): ReadonlyArray<Definition> =>
   lib
     .toolDefinitions()
     .filter((t) => !LEFT_OUT.has(t.name))
+    .map((t) => ({ ...t, inputSchema: withoutOrganization(t.inputSchema) }))
     .map((t) => (t.name === "move_document" ? { ...t, inputSchema: { ...t.inputSchema, required: ["slug"] } } : t))
 
 // ---- arguments, read as the hosted server's serde structs read them ----------------------------------------------------
@@ -174,6 +197,7 @@ export const docsTools = (lib: RenderLib, docs: Docs): ReadonlyArray<PluginTool>
         return yield* docs.feedback(c, yield* read(a.str("slug")), yield* read(a.optInt("version")), yield* read(a.optInt("since")))
       }),
     list_components: () => docs.components,
+    create_upload_url: (c) => docs.uploadUrl(c),
   }
 
   return definitions(lib).flatMap((d): ReadonlyArray<PluginTool> => {

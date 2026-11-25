@@ -18,6 +18,16 @@ pub const MAX_IMAGE_BYTES: usize = 500 * 1024;
 pub const MAX_IMAGES: usize = 200;
 /// Image names are at most this many characters.
 pub const MAX_IMAGE_NAME_CHARS: usize = 200;
+/// The most an image file uploaded on its own may be, before conversion: 32 MiB.
+pub const MAX_UPLOAD_BYTES: usize = 32 * 1024 * 1024;
+/// How long an upload URL (`create_upload_url`) takes images: an hour.
+pub const UPLOAD_URL_SECONDS: i64 = 60 * 60;
+/// How long an uploaded image waits to be published before it is deleted: a day.
+pub const UPLOAD_KEPT_SECONDS: i64 = 24 * 60 * 60;
+/// The most uploaded images one uploader may have waiting.
+pub const MAX_WAITING_UPLOADS: usize = 200;
+/// How errors name an image uploaded on its own, which has no name until a publish gives it one.
+pub const UPLOAD_LABEL: &str = "the uploaded image";
 
 const FORMATS: &str = "PNG, JPEG, WebP, GIF or AVIF";
 
@@ -110,6 +120,49 @@ pub fn too_large_error(label: &str, avif_bytes: usize) -> String {
 /// The error for a version with more than [`MAX_IMAGES`] images.
 pub fn too_many_error(count: usize) -> String {
     format!("a version can have at most {MAX_IMAGES} images, not {count}")
+}
+
+/// The error for an entry of `images` without exactly one of `data` and `upload`.
+pub fn source_error(label: &str) -> String {
+    format!(
+        "{label} needs either `data` (its bytes in base64) or `upload` (the id of an image uploaded with create_upload_url), and not both"
+    )
+}
+
+/// The error for an entry of `images` whose `upload` isn't an upload the publisher can use.
+pub fn upload_missing_error(label: &str, id: &str) -> String {
+    format!(
+        "{label}: there is no uploaded image {id:?}. Uploads are deleted a day after they are made, \
+         and only whoever uploaded an image can publish it: upload it again (create_upload_url)"
+    )
+}
+
+/// The error for an upload when its uploader has [`MAX_WAITING_UPLOADS`] waiting already.
+pub fn too_many_uploads_error() -> String {
+    format!(
+        "there are {MAX_WAITING_UPLOADS} uploaded images waiting already, the most there can be: \
+         they are deleted a day after they are uploaded"
+    )
+}
+
+/// The error for an uploaded file over [`MAX_UPLOAD_BYTES`].
+pub fn upload_too_big_error() -> String {
+    format!("{UPLOAD_LABEL} is over {MAX_UPLOAD_BYTES} bytes (32 MiB), the most an upload can be: downscale it")
+}
+
+/// The error for an upload URL whose token isn't one that still takes uploads.
+pub fn upload_url_error() -> String {
+    "this upload URL isn't valid any more (one lasts an hour): get another with create_upload_url".into()
+}
+
+/// The error for an upload whose body isn't an image file (it is empty, or a form).
+pub fn upload_body_error() -> String {
+    "send the image file itself as the request body, not a form: curl --data-binary @chart.png \"<upload_url>\"".into()
+}
+
+/// The id of an uploaded image as given in `images` (`upload`): trimmed, lower case.
+pub fn normalize_upload_id(raw: &str) -> String {
+    raw.trim().to_ascii_lowercase()
 }
 
 /// The error for a name listed twice in `images`.

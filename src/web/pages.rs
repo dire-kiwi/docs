@@ -12,24 +12,26 @@ use serde::Deserialize;
 
 use crate::AppState;
 use crate::components::COMPONENTS;
-use crate::db::{self, DocumentSummary, User, Version};
+use crate::db::{self, DocumentSummary, User};
 use crate::error::{AppError, AppResult};
 use crate::labels::{self, LabelNode};
+use crate::mcp;
 use crate::paths::{self, NavNode};
 use crate::render::{self, Format, Options};
 use crate::web::auth::{Viewer, safe_next};
 use crate::web::layout::{self, Shell, shell, time};
 
-pub fn doc_base(slug: &str, version: Option<i64>) -> String {
+/// A document's pages, at its UUID (`DocumentSummary::uuid`) so the URL can't be guessed.
+pub fn doc_base(uuid: &str, version: Option<i64>) -> String {
     match version {
-        Some(n) => format!("/d/{slug}/-/v/{n}/"),
-        None => format!("/d/{slug}/"),
+        Some(n) => format!("/d/{uuid}/-/v/{n}/"),
+        None => format!("/d/{uuid}/"),
     }
 }
 
 /// Where one of a document's images is served (by the SHA-256 of its AVIF, so it never changes).
-pub fn image_path(slug: &str, sha256: &str) -> String {
-    format!("/d/{slug}/-/images/{sha256}.avif")
+pub fn image_path(uuid: &str, sha256: &str) -> String {
+    format!("/d/{uuid}/-/images/{sha256}.avif")
 }
 
 fn mcp_help(base: &str) -> Markup {
@@ -157,12 +159,20 @@ fn join_folder(parent: &str, name: &str) -> String {
 }
 
 /// How a folder tree is shown: whose it is, and whether the viewer can reorganise it.
+#[derive(Clone, Copy)]
 struct TreeView<'a> {
     /// Prefix of the keys the browser remembers open/closed folders by.
     key: &'a str,
-    /// The viewer's own documents: show the move and rename forms.
+    /// Documents the viewer can edit (theirs or their organization's): show the move and rename forms.
     editable: bool,
     csrf: &'a str,
+    /// The organization whose documents these are (its slug), or `None` for the viewer's own.
+    org: Option<&'a str>,
+    /// The id of the `<datalist>` of this tree's folders.
+    folder_list: &'a str,
+    /// The organizations the viewer can move documents to.
+    orgs: &'a [db::Organization],
+    user_id: i64,
 }
 
 /// Folders first, then documents, each sorted by name (ignoring case).
@@ -183,8 +193,9 @@ fn folder_tree(folder: &Folder, path: &str, depth: usize, view: &TreeView) -> Ma
                             form method="post" action="/folders/rename" {
                                 input type="hidden" name="csrf" value=(view.csrf);
                                 input type="hidden" name="from" value=(sub);
+                                @if let Some(o) = view.org { input type="hidden" name="organization" value=(o); }
                                 label { "Rename or move " strong { (sub) } " to" }
-                                input type="text" name="to" value=(sub) list="folder-options" maxlength="200"
+                                input type="text" name="to" value=(sub) list=(view.folder_list) maxlength="200"
                                     placeholder="Top level" aria-label={ "New path for " (sub) };
                                 p.muted.small { "Moves the " (n) " " (if n == 1 { "document" } else { "documents" })
                                     " in it, and any subfolders. Leave it empty to move them to the top level." }
@@ -222,22 +233,35 @@ fn doc_row(d: &DocumentSummary, indent: &str, view: &TreeView) -> Markup {
     html! {
         li.tree-doc {
             span.tree-title style=(indent) {
-                a href=(doc_base(&d.slug, None)) { (d.title) }
+                a href=(doc_base(&d.uuid, None)) { (d.title) }
                 " " small.muted { (d.slug) }
+                @if d.public { " " span.badge { "public" } }
                 (label_chips(&d.labels))
             }
             span.tree-pages { (d.page_count) " " (if d.page_count == 1 { "page" } else { "pages" }) }
-            a.tree-version href={ "/d/" (d.slug) "/-/versions" } { "v" (d.latest_version) }
+            a.tree-version href={ "/d/" (d.uuid) "/-/versions" } { "v" (d.latest_version) }
             span.tree-updated { (time(d.updated_at)) }
             @if view.editable {
                 details.tree-edit {
                     summary { "Move" }
-                    form method="post" action={ "/d/" (d.slug) "/-/move" } {
+                    form method="post" action={ "/d/" (d.uuid) "/-/move" } {
                         input type="hidden" name="csrf" value=(view.csrf);
                         label { "Move " strong { (d.title) } " to the folder" }
-                        input type="text" name="folder" value=(d.folder) list="folder-options" maxlength="200"
+                        input type="text" name="folder" value=(d.folder) list=(view.folder_list) maxlength="200"
                             placeholder="Top level" aria-label={ "Folder for " (d.title) };
                         p.muted.small { "Type a new path like " code { "docs/plans" } " to make a folder." }
+                        // Only its creator can take a document out of an organization (to
+                        // their own documents or another organization), so others can only
+                        // change its folder.
+                        @if !view.orgs.is_empty() && (d.org_id.is_none() || d.owner_id == view.user_id) {
+                            label { "in" }
+                            select name="organization" aria-label={ "Where " (d.title) " belongs" } {
+                                option value="" selected[d.org_id.is_none()] { "Your documents" }
+                                @for o in view.orgs {
+                                    option value=(o.slug) selected[d.org_id == Some(o.id)] { (o.name) }
+                                }
+                            }
+                        }
                         button.primary type="submit" { "Move" }
                     }
                 }
@@ -279,48 +303,103 @@ fn sorted<'a>(docs: impl IntoIterator<Item = &'a DocumentSummary>) -> Vec<&'a Do
     docs
 }
 
+/// The documents of one space on the home page: a folder tree, or a label tree in the Labels view.
+fn space_tree(docs: &[&DocumentSummary], view: &HomeView, tree: &TreeView) -> Markup {
+    let folders = Folder::build(docs.iter().copied());
+    let mut folder_paths = Vec::new();
+    folders.paths("", &mut folder_paths);
+    let label_nodes = labels::label_tree(&docs.iter().map(|d| d.labels.as_slice()).collect::<Vec<_>>());
+    let unlabelled = sorted(docs.iter().copied().filter(|d| d.labels.is_empty()));
+    // The keys your own documents' label folders have always had ("labels:research", "unlabelled").
+    let (label_key, unlabelled_key) = match tree.key {
+        "mine" => ("labels".to_string(), "unlabelled".to_string()),
+        key => (format!("labels:{key}"), format!("{key}:unlabelled")),
+    };
+    let label_tree = TreeView {
+        key: &label_key,
+        ..*tree
+    };
+    html! {
+        datalist id=(tree.folder_list) {
+            @for p in &folder_paths { option value=(p) {} }
+        }
+        div.doc-tree data-tree-store={ (if view.labels { "docs.closedLabels" } else { "docs.closedFolders" }) }
+            data-tree-partial=[view.label.as_ref().map(|_| "")] {
+            div.tree-head {
+                span { "Title" } span { "Pages" } span { "Version" } span { "Updated" }
+            }
+            @if view.labels {
+                (label_tree_view(&label_nodes, docs, 0, &label_tree))
+                @if !unlabelled.is_empty() {
+                    ul.tree {
+                        li.tree-folder {
+                            details.folder open data-folder-key=(unlabelled_key) {
+                                summary style="--depth: 0" {
+                                    span.folder-name.muted { "Unlabelled" }
+                                    " " span.muted.small { (unlabelled.len()) }
+                                }
+                                ul.tree {
+                                    @for d in &unlabelled { (doc_row(d, "--depth: 1", tree)) }
+                                }
+                            }
+                        }
+                    }
+                }
+            } @else {
+                (folder_tree(&folders, "", 0, tree))
+            }
+        }
+    }
+}
+
 async fn render_home(state: &AppState, viewer: &Viewer, view: &HomeView, error: Option<String>) -> AppResult<Markup> {
     let user = viewer.require()?;
     let mut docs = db::list_documents(&state.db, user).await?;
-    let any_mine = docs.iter().any(|d| d.owner_id == user.id);
+    let orgs = db::user_organizations(&state.db, user).await?;
+    let any_editable = docs.iter().any(|d| d.can_edit);
     if let Some(f) = &view.label {
-        // Labels are your own, so a filter shows only your documents. In the Labels
-        // view each is shown only under the labels the filter matches.
-        docs.retain(|d| d.owner_id == user.id && d.labels.iter().any(|l| labels::label_matches(l, f)));
+        // Labels are only seen by the people who can edit a document, so a filter shows
+        // only those. In the Labels view each is shown only under the labels the filter matches.
+        docs.retain(|d| d.can_edit && d.labels.iter().any(|l| labels::label_matches(l, f)));
         if view.labels {
             for d in &mut docs {
                 d.labels.retain(|l| labels::label_matches(l, f));
             }
         }
     }
-    let (my_docs, shared): (Vec<_>, Vec<_>) = docs.iter().partition(|d| d.owner_id == user.id);
-    let label_nodes = labels::label_tree(&my_docs.iter().map(|d| d.labels.as_slice()).collect::<Vec<_>>());
-    let unlabelled = sorted(my_docs.iter().copied().filter(|d| d.labels.is_empty()));
-    let labelled_view = TreeView {
-        key: "labels",
-        editable: true,
-        csrf: &viewer.csrf,
-    };
-    let mine = Folder::build(my_docs.iter().copied());
-    let mut folder_paths = Vec::new();
-    mine.paths("", &mut folder_paths);
+    let mine: Vec<&DocumentSummary> = docs
+        .iter()
+        .filter(|d| d.can_edit && d.space() == db::Space::User(user.id))
+        .collect();
     let mut by_owner: BTreeMap<&str, Vec<&DocumentSummary>> = BTreeMap::new();
-    for d in shared {
+    for d in docs.iter().filter(|d| !d.can_edit) {
         by_owner.entry(&d.owner).or_default().push(d);
     }
-    let own = TreeView {
-        key: "mine",
+    let tree = |key: &'static str, org: Option<&'static str>, folder_list: &'static str| TreeView {
+        key,
         editable: true,
         csrf: &viewer.csrf,
+        org,
+        folder_list,
+        orgs: &orgs,
+        user_id: user.id,
+    };
+    let empty_note = if view.label.is_some() {
+        "None of your documents have this label."
+    } else {
+        "No documents yet."
     };
     Ok(layout::simple(
         "Documents",
         Some(user),
         &viewer.csrf,
         html! {
-            h1 { "Documents" }
+            div.home-head {
+                h1 { "Documents" }
+                a.button.primary href="/new" { "New document" }
+            }
             @if let Some(e) = &error { div.render-error { (e) } }
-            @if any_mine {
+            @if any_editable {
                 nav.view-toggle aria-label="Show documents by" {
                     a href=(view.href("folders")) aria-current=[(!view.labels).then_some("true")] { "Folders" }
                     a href=(view.href("labels")) aria-current=[view.labels.then_some("true")] { "Labels" }
@@ -332,42 +411,37 @@ async fn render_home(state: &AppState, viewer: &Viewer, view: &HomeView, error: 
                     a href="/" { "Show all documents" }
                 }
             }
-            @if !any_mine {
+            @if !any_editable {
                 div.card {
                     p { strong { "Nothing of yours here yet." } }
                     (mcp_help(&state.config.base_url))
                 }
-            } @else if mine.count() == 0 {
-                p.muted { "None of your documents have this label." }
             } @else {
-                datalist #folder-options {
-                    @for p in &folder_paths { option value=(p) {} }
+                @if !orgs.is_empty() { h2 { "Your documents" } }
+                @if mine.is_empty() {
+                    p.muted { (empty_note) }
+                } @else {
+                    (space_tree(&mine, view, &tree("mine", None, "folder-options")))
                 }
-                div.doc-tree data-tree-store=(if view.labels { "docs.closedLabels" } else { "docs.closedFolders" })
-                    data-tree-partial=[view.label.as_ref().map(|_| "")] {
-                    div.tree-head {
-                        span { "Title" } span { "Pages" } span { "Version" } span { "Updated" }
-                    }
-                    @if view.labels {
-                        (label_tree_view(&label_nodes, &my_docs, 0, &labelled_view))
-                        @if !unlabelled.is_empty() {
-                            ul.tree {
-                                li.tree-folder {
-                                    details.folder open data-folder-key="unlabelled" {
-                                        summary style="--depth: 0" {
-                                            span.folder-name.muted { "Unlabelled" }
-                                            " " span.muted.small { (unlabelled.len()) }
-                                        }
-                                        ul.tree {
-                                            @for d in &unlabelled { (doc_row(d, "--depth: 1", &labelled_view)) }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    } @else {
-                        (folder_tree(&mine, "", 0, &own))
-                    }
+            }
+            @for o in &orgs {
+                @let org_docs: Vec<&DocumentSummary> = docs.iter().filter(|d| d.org_id == Some(o.id)).collect();
+                @let key = format!("org:{}", o.slug);
+                @let list = format!("folder-options-{}", o.slug);
+                h2 #{ "org-" (o.slug) } {
+                    a href={ "/orgs/" (o.slug) } { (o.name) } " " span.muted.small { "organization" }
+                }
+                @if org_docs.is_empty() {
+                    p.muted { (empty_note)
+                        @if view.label.is_none() { " Agents publish to it with " code { "publish_document" } "'s "
+                            code { "organization: \"" (o.slug) "\"" } "." } }
+                } @else {
+                    (space_tree(&org_docs, view, &TreeView {
+                        key: &key,
+                        org: Some(&o.slug),
+                        folder_list: &list,
+                        ..tree("", None, "")
+                    }))
                 }
             }
             @if !by_owner.is_empty() {
@@ -385,7 +459,7 @@ async fn render_home(state: &AppState, viewer: &Viewer, view: &HomeView, error: 
                                     (folder_tree(&Folder::build(docs.iter().copied()), "", 1, &TreeView {
                                         key: &key,
                                         editable: false,
-                                        csrf: &viewer.csrf,
+                                        ..tree("", None, "")
                                     }))
                                 }
                             }
@@ -393,7 +467,7 @@ async fn render_home(state: &AppState, viewer: &Viewer, view: &HomeView, error: 
                     }
                 }
             }
-            @if any_mine || !by_owner.is_empty() {
+            @if any_editable || !by_owner.is_empty() {
                 details.connect {
                     summary { "Connect an agent" }
                     (mcp_help(&state.config.base_url))
@@ -408,9 +482,11 @@ pub struct MoveForm {
     csrf: String,
     #[serde(default)]
     folder: String,
+    /// The organization to move it to, "" for the owner's own documents; absent keeps it where it is.
+    organization: Option<String>,
 }
 
-/// `POST /d/{slug}/-/move`: file one of your documents in another folder.
+/// `POST /d/{slug}/-/move`: file a document you can edit in another folder, or another organization.
 pub async fn move_document(
     State(state): State<AppState>,
     viewer: Viewer,
@@ -420,12 +496,33 @@ pub async fn move_document(
 ) -> AppResult<Response> {
     viewer.check_csrf(&f.csrf)?;
     let user = viewer.require()?;
-    let doc = owned_doc(&state, &slug, user, "Only the owner can move this document.").await?;
-    match paths::normalize_folder(&f.folder) {
-        Ok(folder) => {
-            db::move_document(&state.db, user.id, &doc.slug, &folder).await?;
-            Ok(Redirect::to("/").into_response())
-        }
+    let doc = editable_doc(
+        &state,
+        &slug,
+        user,
+        "Only the owner, or its organization's members, can move this document.",
+    )
+    .await?;
+    let org_id = match f.organization.as_deref().map(str::trim) {
+        None => Ok(doc.org_id),
+        Some("") => Ok(None),
+        Some(o) => mcp::member_org(&state.db, user, o)
+            .await
+            .map(|o| Some(o.id))
+            .map_err(|e| e.0),
+    };
+    let moved = match (paths::normalize_folder(&f.folder), org_id) {
+        (Ok(folder), Ok(org_id)) => match mcp::check_move(&doc, user, org_id) {
+            Ok(()) => {
+                db::move_document(&state.db, doc.id, org_id, &folder).await?;
+                Ok(())
+            }
+            Err(e) => Err(e),
+        },
+        (Err(e), _) | (_, Err(e)) => Err(e),
+    };
+    match moved {
+        Ok(()) => Ok(Redirect::to("/").into_response()),
         Err(e) => Ok(render_home(&state, &viewer, &HomeView::saved(&jar), Some(e))
             .await?
             .into_response()),
@@ -438,9 +535,11 @@ pub struct RenameFolderForm {
     from: String,
     #[serde(default)]
     to: String,
+    /// The organization whose folder it is; absent for your own documents.
+    organization: Option<String>,
 }
 
-/// `POST /folders/rename`: rename or move one of your folders, with everything in it.
+/// `POST /folders/rename`: rename or move a folder of yours or of one of your organizations, with everything in it.
 pub async fn rename_folder(
     State(state): State<AppState>,
     viewer: Viewer,
@@ -449,9 +548,16 @@ pub async fn rename_folder(
 ) -> AppResult<Response> {
     viewer.check_csrf(&f.csrf)?;
     let user = viewer.require()?;
-    let renamed = match (paths::normalize_folder(&f.from), paths::normalize_folder(&f.to)) {
-        (Ok(from), Ok(to)) => db::rename_folder(&state.db, user.id, &from, &to).await?,
-        (Err(e), _) | (_, Err(e)) => Err(e),
+    let space = match f.organization.as_deref() {
+        None => Ok(db::Space::User(user.id)),
+        Some(o) => mcp::member_org(&state.db, user, o)
+            .await
+            .map(|o| db::Space::Org(o.id))
+            .map_err(|e| e.0),
+    };
+    let renamed = match (paths::normalize_folder(&f.from), paths::normalize_folder(&f.to), space) {
+        (Ok(from), Ok(to), Ok(space)) => db::rename_folder(&state.db, space, &from, &to).await?,
+        (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => Err(e),
     };
     match renamed {
         Ok(_) => Ok(Redirect::to("/").into_response()),
@@ -511,43 +617,60 @@ pub async fn components_page(viewer: Viewer) -> Markup {
 
 // ---------- documents ----------
 
-async fn load_doc(
-    state: &AppState,
-    slug: &str,
-    number: Option<i64>,
-    user: &User,
-) -> AppResult<(DocumentSummary, Version)> {
-    // Documents the viewer can't see are reported as missing.
-    let doc = db::get_document(&state.db, slug, user)
-        .await?
-        .ok_or(AppError::NotFound)?;
-    let version = db::version(&state.db, doc.id, number)
-        .await?
-        .ok_or(AppError::NotFound)?;
-    Ok((doc, version))
+/// A document the viewer can read.
+struct Found<'v> {
+    doc: DocumentSummary,
+    /// The viewer, when they own the document, are in its organization or it is shared with them: they can answer,
+    /// comment and see the feedback. `None` when they can read it only because it is public.
+    member: Option<&'v User>,
 }
 
-/// `/d/{slug}/-/images/{sha256}.avif`: an image of the document, for people who can see it.
+/// The document `key` (its UUID, or its slug in older links) names, if the viewer can read
+/// it: theirs or shared with them, or public (by UUID only). Others are reported as missing.
+async fn find_doc<'v>(state: &AppState, key: &str, viewer: &'v Viewer) -> AppResult<Found<'v>> {
+    if let Some(user) = &viewer.user
+        && let Some(doc) = db::get_document(&state.db, key, user).await?
+    {
+        return Ok(Found {
+            doc,
+            member: Some(user),
+        });
+    }
+    if let Some(doc) = db::get_public_document(&state.db, key).await? {
+        return Ok(Found { doc, member: None });
+    }
+    viewer.require()?;
+    Err(AppError::NotFound)
+}
+
+/// Older links name a document by its slug: send them to the same page at its UUID.
+fn to_uuid(viewer: &Viewer, key: &str, doc: &DocumentSummary) -> Option<Response> {
+    (key != doc.uuid).then(|| {
+        let path = viewer
+            .path()
+            .replacen(&format!("/d/{key}"), &format!("/d/{}", doc.uuid), 1);
+        Redirect::to(&path).into_response()
+    })
+}
+
+/// `/d/{uuid}/-/images/{sha256}.avif`: an image of the document, for people who can see it.
 pub async fn document_image(
     State(state): State<AppState>,
     viewer: Viewer,
-    Path((slug, file)): Path<(String, String)>,
+    Path((key, file)): Path<(String, String)>,
 ) -> AppResult<Response> {
-    let user = viewer.require()?;
     let sha256 = file.strip_suffix(".avif").ok_or(AppError::NotFound)?;
     if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) {
         return Err(AppError::NotFound);
     }
-    let doc = db::get_document(&state.db, &slug, user)
-        .await?
-        .ok_or(AppError::NotFound)?;
+    let doc = find_doc(&state, &key, &viewer).await?.doc;
     let data = db::document_image(&state.db, doc.id, sha256)
         .await?
         .ok_or(AppError::NotFound)?;
     Ok((
         [
             (header::CONTENT_TYPE, "image/avif"),
-            // Private: only people who can see the document may fetch it.
+            // Private even for a public document, which can be made private again.
             (header::CACHE_CONTROL, "private, max-age=31536000, immutable"),
         ],
         data,
@@ -559,32 +682,47 @@ pub async fn doc_redirect(Path(slug): Path<String>) -> Redirect {
     Redirect::permanent(&doc_base(&slug, None))
 }
 
-pub async fn doc_root(state: State<AppState>, viewer: Viewer, Path(slug): Path<String>) -> AppResult<Response> {
-    show_page(state, viewer, slug, None, String::new()).await
+#[derive(Deserialize)]
+pub struct PageQuery {
+    /// On a mockup's page: show the document's own page (its menu, labels, feedback and
+    /// sharing) rather than the design editor.
+    details: Option<String>,
+}
+
+pub async fn doc_root(
+    state: State<AppState>,
+    viewer: Viewer,
+    Path(slug): Path<String>,
+    Query(q): Query<PageQuery>,
+) -> AppResult<Response> {
+    show_page(state, viewer, slug, None, String::new(), q.details.is_some()).await
 }
 
 pub async fn doc_page(
     state: State<AppState>,
     viewer: Viewer,
     Path((slug, path)): Path<(String, String)>,
+    Query(q): Query<PageQuery>,
 ) -> AppResult<Response> {
-    show_page(state, viewer, slug, None, path).await
+    show_page(state, viewer, slug, None, path, q.details.is_some()).await
 }
 
 pub async fn version_root(
     state: State<AppState>,
     viewer: Viewer,
     Path((slug, n)): Path<(String, i64)>,
+    Query(q): Query<PageQuery>,
 ) -> AppResult<Response> {
-    show_page(state, viewer, slug, Some(n), String::new()).await
+    show_page(state, viewer, slug, Some(n), String::new(), q.details.is_some()).await
 }
 
 pub async fn version_page(
     state: State<AppState>,
     viewer: Viewer,
     Path((slug, n, path)): Path<(String, i64, String)>,
+    Query(q): Query<PageQuery>,
 ) -> AppResult<Response> {
-    show_page(state, viewer, slug, Some(n), path).await
+    show_page(state, viewer, slug, Some(n), path, q.details.is_some()).await
 }
 
 async fn show_page(
@@ -593,10 +731,16 @@ async fn show_page(
     slug: String,
     number: Option<i64>,
     suffix: String,
+    details: bool,
 ) -> AppResult<Response> {
-    let user = viewer.require()?;
-    let (doc, version) = load_doc(&state, &slug, number, user).await?;
-    let base = doc_base(&doc.slug, number);
+    let Found { doc, member } = find_doc(&state, &slug, &viewer).await?;
+    if let Some(r) = to_uuid(&viewer, &slug, &doc) {
+        return Ok(r);
+    }
+    let version = db::version(&state.db, doc.id, number)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let base = doc_base(&doc.uuid, number);
     let pages = db::pages(&state.db, version.id).await?;
 
     let mut page = None;
@@ -620,12 +764,18 @@ async fn show_page(
         return Ok(Redirect::to(&format!("{base}{canonical}")).into_response());
     }
 
-    let answers = db::user_answers(&state.db, version.id, &page.path, user.id).await?;
     let format = Format::parse(&page.format).unwrap_or(Format::Md);
+    if format == Format::Html && !details {
+        return design_view(&state, &viewer, &doc, member, &version, number, &pages, &page).await;
+    }
+    let answers = match member {
+        Some(user) => db::user_answers(&state.db, version.id, &page.path, user.id).await?,
+        None => HashMap::new(),
+    };
     let images: HashMap<String, String> = db::version_images(&state.db, version.id)
         .await?
         .into_iter()
-        .map(|i| (i.name, image_path(&doc.slug, &i.sha256)))
+        .map(|i| (i.name, image_path(&doc.uuid, &i.sha256)))
         .collect();
     let opts = Options {
         page_path: &page.path,
@@ -634,7 +784,13 @@ async fn show_page(
         images: &images,
     };
     let rendered = render::render(&page.source, format, &opts);
-    let selections = db::page_selections(&state.db, version.id, &page.path).await?;
+    // Comments are between the owner and the people it is shared with.
+    let selections = match member {
+        Some(_) => db::page_selections(&state.db, version.id, &page.path).await?,
+        None => Vec::new(),
+    };
+    // Its owner, or a member of its organization: they can label and share it.
+    let editor = member.filter(|_| doc.can_edit);
     let nav = paths::nav_tree(
         &pages
             .iter()
@@ -643,8 +799,8 @@ async fn show_page(
     );
     let is_latest = number.is_none() || number == Some(doc.latest_version);
     let title = format!("{} · {}", page.title, doc.title);
-    let known_labels = if doc.owner_id == user.id {
-        db::owner_labels(&state.db, user.id).await?
+    let known_labels = if editor.is_some() {
+        db::space_labels(&state.db, doc.space()).await?
     } else {
         Vec::new()
     };
@@ -653,28 +809,42 @@ async fn show_page(
         div.doc-layout {
             nav.doc-nav #doc-nav aria-label="Pages" {
                 a.doc-title href=(base) { (doc.title) }
-                a.version-link href={ "/d/" (doc.slug) "/-/versions" } {
+                a.version-link href={ "/d/" (doc.uuid) "/-/versions" } {
                     "Version " (version.number)
                     @if is_latest { " (latest)" }
                 }
-                @if doc.owner_id == user.id {
+                @if editor.is_some() {
                     (labels_editor(&doc, &known_labels, &viewer.csrf, &format!("{base}{canonical}")))
                 }
                 (nav_list(&nav, &base, &page.path))
                 div.doc-links {
-                    a href={ "/d/" (doc.slug) "/-/feedback" } { "All feedback" }
-                    @if doc.owner_id == user.id {
-                        a href={ "/d/" (doc.slug) "/-/share" } { "Share" }
+                    @if member.is_some() {
+                        a href={ "/d/" (doc.uuid) "/-/feedback" } { "All feedback" }
+                    }
+                    @if editor.is_some() {
+                        a href={ "/d/" (doc.uuid) "/-/share" } { (if doc.public { "Share (public)" } else { "Share" }) }
+                        @if let Some(o) = &doc.organization {
+                            a href={ "/orgs/" (o) } { "In " (o) }
+                        }
+                    } @else if member.is_some() {
+                        span.muted { "Shared by " (doc.organization.as_deref().unwrap_or(&doc.owner)) }
                     } @else {
-                        span.muted { "Shared by " (doc.owner) }
+                        span.muted { "Public document by " (doc.organization.as_deref().unwrap_or(&doc.owner)) }
                     }
                 }
             }
             main.doc-main {
+                @if editor.is_some() && is_latest {
+                    div.doc-actions {
+                        a.button href={ "/d/" (doc.uuid) "/-/edit/" (canonical) } title="Edit the document's pages and save them as a new version" {
+                            "✎ Edit"
+                        }
+                    }
+                }
                 @if !is_latest {
                     div.banner {
                         "You are viewing version " (version.number) ". "
-                        a href={ (doc_base(&doc.slug, None)) (canonical) } { "Go to the latest version (v" (doc.latest_version) ")" }
+                        a href={ (doc_base(&doc.uuid, None)) (canonical) } { "Go to the latest version (v" (doc.latest_version) ")" }
                     }
                 }
                 div.doc-body.has-comments[!selections.is_empty()] {
@@ -682,7 +852,15 @@ async fn show_page(
                         @match &rendered {
                             Ok(r) => {
                                 @for w in &r.warnings { div.render-warning { "⚠ " (w) } }
-                                article.doc-content data-version-id=(version.id) data-page=(page.path) {
+                                // Readers who aren't members can't answer or comment: without
+                                // `data-version-id` the page script saves nothing.
+                                @if format == Format::Html {
+                                    div.banner {
+                                        (page.title) " is a mockup. "
+                                        a href={ (base) (canonical) } { "Open it in the design editor" }
+                                    }
+                                }
+                                article.doc-content data-version-id=[member.map(|_| version.id)] data-readonly[member.is_none()] data-page=(page.path) {
                                     @if !r.has_h1 { h1 { (page.title) } }
                                     (PreEscaped(&r.html))
                                 }
@@ -693,7 +871,7 @@ async fn show_page(
                             }
                         }
                     }
-                    (comment_rail(&selections, user.id))
+                    @if let Some(user) = member { (comment_rail(&selections, user.id)) }
                 }
             }
             aside.doc-aside {
@@ -717,11 +895,127 @@ async fn show_page(
     Ok(shell(
         Shell {
             title: &title,
-            user: Some(user),
+            user: viewer.user.as_ref(),
             csrf: &viewer.csrf,
             body_class: "doc",
         },
         body,
+    )
+    .into_response())
+}
+
+/// What a mockup's `src`s and `url(...)`s name among the version's images (`images`: name →
+/// URL): each reference, as written in the mockup, to the URL its image is served from.
+pub fn mockup_images(page_path: &str, source: &str, images: &HashMap<String, String>) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    if images.is_empty() {
+        return out;
+    }
+    for src in docs_render::mockup::image_srcs(source) {
+        if let Some(url) = docs_render::images::candidates(page_path, &src)
+            .iter()
+            .find_map(|name| images.get(name))
+        {
+            out.insert(src, url.clone());
+        }
+    }
+    out
+}
+
+/// A mockup's page: the design editor (`frontend/src/design/`), with every mockup of the
+/// version as a frame on its canvas and this one in view. Anyone who can read the document
+/// can look and try changes; the people it is shared with can comment on elements; those
+/// who can edit it can save their changes as a new version (of the latest one).
+#[allow(clippy::too_many_arguments)]
+async fn design_view(
+    state: &AppState,
+    viewer: &Viewer,
+    doc: &DocumentSummary,
+    member: Option<&User>,
+    version: &db::Version,
+    number: Option<i64>,
+    pages: &[db::PageSummary],
+    open: &db::Page,
+) -> AppResult<Response> {
+    let base = doc_base(&doc.uuid, number);
+    let is_latest = number.is_none() || number == Some(doc.latest_version);
+    let can_edit = member.is_some() && doc.can_edit && is_latest;
+    let images: HashMap<String, String> = db::version_images(&state.db, version.id)
+        .await?
+        .into_iter()
+        .map(|i| (i.name, image_path(&doc.uuid, &i.sha256)))
+        .collect();
+    let is_mockup = |format: &str| Format::parse(format) == Some(Format::Html);
+    let mockups: Vec<serde_json::Value> = db::all_pages(&state.db, version.id)
+        .await?
+        .iter()
+        .filter(|p| is_mockup(&p.format))
+        .map(|p| {
+            serde_json::json!({
+                "path": p.path,
+                "title": p.title,
+                "content": p.source,
+                "images": mockup_images(&p.path, &p.source, &images),
+            })
+        })
+        .collect();
+    // Comments are between the owner and the people it is shared with.
+    let comments = match member {
+        Some(user) => db::version_selections(&state.db, version.id)
+            .await?
+            .into_iter()
+            .filter(|s| pages.iter().any(|p| p.path == s.page && is_mockup(&p.format)))
+            .map(|s| {
+                serde_json::json!({
+                    "id": s.id,
+                    "page": s.page,
+                    "quote": s.quote,
+                    "anchor": s.anchor,
+                    "comment": s.comment,
+                    "user": s.user,
+                    "mine": s.user_id == user.id,
+                    "created_at": s.created_at,
+                })
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    let suffix = paths::url_suffix(&open.path);
+    let data = serde_json::json!({
+        "title": doc.title,
+        "version": version.number,
+        "latestVersion": doc.latest_version,
+        "open": open.path,
+        "pages": mockups,
+        "others": pages.iter().filter(|p| !is_mockup(&p.format)).map(|p| serde_json::json!({
+            "title": p.title,
+            "url": format!("{base}{}", paths::url_suffix(&p.path)),
+        })).collect::<Vec<_>>(),
+        "comments": comments,
+        "canEdit": can_edit,
+        "canComment": member.is_some(),
+        "links": {
+            "home": "/",
+            "latest": (!is_latest).then(|| format!("{}{suffix}", doc_base(&doc.uuid, None))),
+            "versions": format!("/d/{}/-/versions", doc.uuid),
+            "source": can_edit.then(|| format!("/d/{}/-/edit/{suffix}", doc.uuid)),
+            "details": format!("{base}{suffix}?details=1"),
+        },
+    });
+    Ok(shell(
+        Shell {
+            title: &format!("{} · {}", open.title, doc.title),
+            user: viewer.user.as_ref(),
+            csrf: &viewer.csrf,
+            body_class: "designing",
+        },
+        html! {
+            main #design data-uuid=(doc.uuid) data-version-id=[member.map(|_| version.id)]
+                data-save-url=[can_edit.then(|| format!("/api/documents/{}/versions", doc.uuid))] {
+                noscript { p.page { "The design editor needs JavaScript." } }
+            }
+            script #design-data type="application/json" { (script_json(&data)) }
+        },
     )
     .into_response())
 }
@@ -750,7 +1044,7 @@ fn comment_rail(selections: &[db::Selection], user_id: i64) -> Markup {
 /// The document's labels, which its owner can add to and remove from (with
 /// suggestions from the labels they already use).
 fn labels_editor(doc: &DocumentSummary, known: &[String], csrf: &str, next: &str) -> Markup {
-    let action = format!("/d/{}/-/labels", doc.slug);
+    let action = format!("/d/{}/-/labels", doc.uuid);
     html! {
         div.doc-labels {
             @for l in &doc.labels {
@@ -798,7 +1092,13 @@ pub async fn update_labels(
 ) -> AppResult<Redirect> {
     viewer.check_csrf(&f.csrf)?;
     let user = viewer.require()?;
-    let doc = owned_doc(&state, &slug, user, "Only the owner can change this document's labels.").await?;
+    let doc = editable_doc(
+        &state,
+        &slug,
+        user,
+        "Only the owner, or its organization's members, can change this document's labels.",
+    )
+    .await?;
     let mut wanted = doc.labels.clone();
     match f.action.as_str() {
         "add" => wanted.push(labels::normalize_label(&f.label).map_err(AppError::BadRequest)?),
@@ -809,10 +1109,10 @@ pub async fn update_labels(
         _ => return Err(AppError::BadRequest("unknown action".into())),
     }
     let wanted = labels::normalize_labels(&wanted).map_err(AppError::BadRequest)?;
-    db::set_labels(&state.db, user.id, &doc.slug, &wanted).await?;
+    db::set_labels(&state.db, doc.id, &wanted).await?;
     Ok(Redirect::to(&match f.next {
         Some(n) => safe_next(Some(&n)),
-        None => doc_base(&doc.slug, None),
+        None => doc_base(&doc.uuid, None),
     }))
 }
 
@@ -836,24 +1136,24 @@ fn nav_list(nodes: &[NavNode], base: &str, current: &str) -> Markup {
 pub async fn versions_page(
     State(state): State<AppState>,
     viewer: Viewer,
-    Path(slug): Path<String>,
-) -> AppResult<Markup> {
-    let user = viewer.require()?;
-    let doc = db::get_document(&state.db, &slug, user)
-        .await?
-        .ok_or(AppError::NotFound)?;
+    Path(key): Path<String>,
+) -> AppResult<Response> {
+    let doc = find_doc(&state, &key, &viewer).await?.doc;
+    if let Some(r) = to_uuid(&viewer, &key, &doc) {
+        return Ok(r);
+    }
     let versions = db::versions(&state.db, doc.id).await?;
     Ok(layout::simple(
         &format!("Versions · {}", doc.title),
-        Some(user),
+        viewer.user.as_ref(),
         &viewer.csrf,
         html! {
-            p.crumbs { a href=(doc_base(&doc.slug, None)) { (doc.title) } " / Versions" }
+            p.crumbs { a href=(doc_base(&doc.uuid, None)) { (doc.title) } " / Versions" }
             h1 { "Versions" }
             ol.versions reversed {
                 @for v in &versions {
                     li {
-                        a href=(doc_base(&doc.slug, Some(v.number))) { "Version " (v.number) }
+                        a href=(doc_base(&doc.uuid, Some(v.number))) { "Version " (v.number) }
                         @if v.number == doc.latest_version { " " span.badge { "latest" } }
                         " — " (v.author) ", " (time(v.created_at))
                         @if let Some(m) = &v.message { p.muted { (m) } }
@@ -861,26 +1161,31 @@ pub async fn versions_page(
                 }
             }
         },
-    ))
+    )
+    .into_response())
 }
 
+/// Everyone's answers and comments: for the owner and the people it is shared with only.
 pub async fn feedback_page(
     State(state): State<AppState>,
     viewer: Viewer,
-    Path(slug): Path<String>,
-) -> AppResult<Markup> {
+    Path(key): Path<String>,
+) -> AppResult<Response> {
     let user = viewer.require()?;
-    let doc = db::get_document(&state.db, &slug, user)
+    let doc = db::get_document(&state.db, &key, user)
         .await?
         .ok_or(AppError::NotFound)?;
+    if let Some(r) = to_uuid(&viewer, &key, &doc) {
+        return Ok(r);
+    }
     let (responses, selections) = db::feedback(&state.db, doc.id, None, 0).await?;
-    let link = |version: i64, page: &str| format!("{}{}", doc_base(&doc.slug, Some(version)), paths::url_suffix(page));
+    let link = |version: i64, page: &str| format!("{}{}", doc_base(&doc.uuid, Some(version)), paths::url_suffix(page));
     Ok(layout::simple(
         &format!("Feedback · {}", doc.title),
         Some(user),
         &viewer.csrf,
         html! {
-            p.crumbs { a href=(doc_base(&doc.slug, None)) { (doc.title) } " / Feedback" }
+            p.crumbs { a href=(doc_base(&doc.uuid, None)) { (doc.title) } " / Feedback" }
             h1 { "Feedback" }
             p.muted { "Everything readers have answered or commented. Agents get the same data from the "
                 code { "get_feedback" } " MCP tool." }
@@ -902,12 +1207,13 @@ pub async fn feedback_page(
                     }
                 } }
             }
-            h2 { "Comments on selected text" }
+            h2 { "Comments" }
             @if selections.is_empty() { p.muted { "No comments yet." } } @else {
                 ol.selection-list {
                     @for s in &selections {
                         li.selection {
                             blockquote { (s.quote) }
+                            @if !s.anchor.is_empty() { p.muted.small { "On " code { (s.anchor) } } }
                             @if !s.comment.is_empty() { p { (s.comment) } }
                             footer { a href=(link(s.version, &s.page)) { (s.page) " (v" (s.version) ")" } " · " (s.user) " · " (time(s.created_at)) }
                         }
@@ -915,7 +1221,8 @@ pub async fn feedback_page(
                 }
             }
         },
-    ))
+    )
+    .into_response())
 }
 
 fn answer_text(v: &serde_json::Value) -> String {
@@ -1031,19 +1338,24 @@ pub async fn revoke_token(
 
 // ---------- sharing ----------
 
-const SHARE_FORBIDDEN: &str = "Only the owner can change who this document is shared with.";
+const SHARE_FORBIDDEN: &str =
+    "Only the owner, or its organization's members, can change who this document is shared with.";
 
-pub async fn share_page(State(state): State<AppState>, viewer: Viewer, Path(slug): Path<String>) -> AppResult<Markup> {
+pub async fn share_page(State(state): State<AppState>, viewer: Viewer, Path(key): Path<String>) -> AppResult<Response> {
     let user = viewer.require()?;
-    let doc = owned_doc(&state, &slug, user, SHARE_FORBIDDEN).await?;
-    render_share(&state, &viewer, user, &doc, None).await
+    let doc = editable_doc(&state, &key, user, SHARE_FORBIDDEN).await?;
+    if let Some(r) = to_uuid(&viewer, &key, &doc) {
+        return Ok(r);
+    }
+    Ok(render_share(&state, &viewer, user, &doc, None).await?.into_response())
 }
 
-async fn owned_doc(state: &AppState, slug: &str, user: &User, forbidden: &str) -> AppResult<DocumentSummary> {
+/// A document `user` can edit: theirs, or their organization's.
+async fn editable_doc(state: &AppState, slug: &str, user: &User, forbidden: &str) -> AppResult<DocumentSummary> {
     let doc = db::get_document(&state.db, slug, user)
         .await?
         .ok_or(AppError::NotFound)?;
-    if doc.owner_id != user.id {
+    if !doc.can_edit {
         return Err(AppError::Forbidden(forbidden.into()));
     }
     Ok(doc)
@@ -1058,7 +1370,7 @@ async fn render_share(
 ) -> AppResult<Markup> {
     let shares = db::shares(&state.db, doc.id).await?;
     let token = db::share_token(&state.db, doc.id).await?;
-    let action = format!("/d/{}/-/share", doc.slug);
+    let action = format!("/d/{}/-/share", doc.uuid);
     let button = |label: &str, act: &str, login: Option<&str>, class: &str| {
         html! {
             form.inline method="post" action=(action) {
@@ -1074,14 +1386,26 @@ async fn render_share(
         Some(user),
         &viewer.csrf,
         html! {
-            p.crumbs { a href=(doc_base(&doc.slug, None)) { (doc.title) } " / Share" }
+            p.crumbs { a href=(doc_base(&doc.uuid, None)) { (doc.title) } " / Share" }
             h1 { "Share" }
-            p { "Only you and the people listed here can see this document, answer its questions and comment on it. "
-                "Only you (and your agents) can publish new versions." }
+            @if let Some(o) = &doc.organization {
+                p { "The members of " a href={ "/orgs/" (o) } { (o) } " and the people listed here can see this document, "
+                    "answer its questions and comment on it"
+                    @if doc.public { " (anyone with the link can read it: it's public)" }
+                    ". Only the organization's members (and their agents) can publish new versions." }
+            } @else {
+                p { "Only you and the people listed here can see this document, answer its questions and comment on it"
+                    @if doc.public { " (anyone with the link can read it: it's public)" }
+                    ". Only you (and your agents) can publish new versions." }
+            }
             @if let Some(e) = &error { div.render-error { (e) } }
             h2 { "People" }
             ul.share-list {
-                li { strong { (doc.owner) } " " span.badge { "owner" } }
+                @if let Some(o) = &doc.organization {
+                    li { strong { "Members of " (o) } " " span.badge { "organization" } }
+                } @else {
+                    li { strong { (doc.owner) } " " span.badge { "owner" } }
+                }
                 @for s in &shares {
                     li { (s.login) " " span.muted.small { "added " (time(s.created_at)) } " " (button("Remove", "remove", Some(&s.login), "link danger")) }
                 }
@@ -1108,6 +1432,17 @@ async fn render_share(
                     (button("Create a share link", "link_on", None, "primary"))
                 }
             }
+            h2 { "Public" }
+            @if doc.public {
+                p { "Anyone with this link can read the document and its earlier versions, without signing in:" }
+                pre { code { (state.config.base_url) (doc_base(&doc.uuid, None)) } }
+                p.muted.small { "They can't answer its questions, comment, or see the feedback: that stays with the people above. "
+                    "The link has a random ID in it, so the document can't be found by guessing." }
+                (button("Make private", "public_off", None, "danger"))
+            } @else {
+                p.muted { "Private: only the people above can open it. Make it public to let anyone with its link read it, without signing in." }
+                (button("Make public", "public_on", None, "primary"))
+            }
         },
     ))
 }
@@ -1128,7 +1463,7 @@ pub async fn share_update(
 ) -> AppResult<Response> {
     viewer.check_csrf(&f.csrf)?;
     let user = viewer.require()?;
-    let doc = owned_doc(&state, &slug, user, SHARE_FORBIDDEN).await?;
+    let doc = editable_doc(&state, &slug, user, SHARE_FORBIDDEN).await?;
     match f.action.as_str() {
         "add" | "remove" => {
             let Some(login) = db::normalize_login(&f.login) else {
@@ -1156,9 +1491,12 @@ pub async fn share_update(
         "link_off" => {
             db::set_share_token(&state.db, doc.id, false).await?;
         }
+        "public_on" | "public_off" => {
+            db::set_public(&state.db, doc.id, f.action == "public_on").await?;
+        }
         _ => return Err(AppError::BadRequest("unknown action".into())),
     }
-    Ok(Redirect::to(&format!("/d/{}/-/share", doc.slug)).into_response())
+    Ok(Redirect::to(&format!("/d/{}/-/share", doc.uuid)).into_response())
 }
 
 /// `/s/{token}`: join a document through its share link.
@@ -1169,7 +1507,126 @@ pub async fn share_link(
 ) -> AppResult<Redirect> {
     let user = viewer.require()?;
     match db::accept_share_link(&state.db, &token, user).await? {
-        Some(slug) => Ok(Redirect::to(&doc_base(&slug, None))),
+        Some(uuid) => Ok(Redirect::to(&doc_base(&uuid, None))),
         None => Err(AppError::NotFound),
     }
+}
+
+// ---------- the editor ----------
+
+/// JSON for a `<script type="application/json">`, so nothing in it closes the element.
+fn script_json(v: &serde_json::Value) -> PreEscaped<String> {
+    PreEscaped(v.to_string().replace('<', "\\u003c"))
+}
+
+/// The editor's page: `frontend/src/editor.ts` builds the editor from `data`.
+fn editor_shell(
+    viewer: &Viewer,
+    user: &User,
+    title: &str,
+    save_url: &str,
+    slug: Option<&str>,
+    data: serde_json::Value,
+) -> Markup {
+    shell(
+        Shell {
+            title,
+            user: Some(user),
+            csrf: &viewer.csrf,
+            body_class: "editing",
+        },
+        html! {
+            main #editor data-save-url=(save_url) data-slug=[slug] {
+                noscript { p.page { "The editor needs JavaScript." } }
+            }
+            script #editor-data type="application/json" { (script_json(&data)) }
+        },
+    )
+}
+
+#[derive(Deserialize)]
+pub struct NewQuery {
+    folder: Option<String>,
+}
+
+/// `/new[?folder=…]`: write a new document.
+pub async fn new_document(viewer: Viewer, Query(q): Query<NewQuery>) -> AppResult<Markup> {
+    let user = viewer.require()?;
+    let folder = paths::normalize_folder(q.folder.as_deref().unwrap_or("")).unwrap_or_default();
+    let data = serde_json::json!({
+        "isNew": true,
+        "title": "",
+        "folder": folder,
+        "baseVersion": null,
+        "pages": [{ "path": "index", "title": "", "format": "md", "content": "" }],
+        "open": "index",
+        "images": [],
+        "cancelUrl": "/",
+    });
+    Ok(editor_shell(
+        &viewer,
+        user,
+        "New document",
+        "/api/documents",
+        None,
+        data,
+    ))
+}
+
+pub async fn edit_root(state: State<AppState>, viewer: Viewer, Path(slug): Path<String>) -> AppResult<Response> {
+    edit(state, viewer, slug, String::new()).await
+}
+
+pub async fn edit_page(
+    state: State<AppState>,
+    viewer: Viewer,
+    Path((slug, path)): Path<(String, String)>,
+) -> AppResult<Response> {
+    edit(state, viewer, slug, path).await
+}
+
+/// `/d/{slug}/-/edit/[page]`: edit a document you can edit (its latest version), opening at a page.
+async fn edit(State(state): State<AppState>, viewer: Viewer, slug: String, suffix: String) -> AppResult<Response> {
+    let user = viewer.require()?;
+    let doc = editable_doc(
+        &state,
+        &slug,
+        user,
+        "Only the owner, or its organization's members, can edit this document.",
+    )
+    .await?;
+    let version = db::version(&state.db, doc.id, None).await?.ok_or(AppError::NotFound)?;
+    let pages = db::all_pages(&state.db, version.id).await?;
+    let candidates = paths::candidates(&suffix);
+    let open = pages
+        .iter()
+        .find(|p| candidates.contains(&p.path))
+        .or(pages.first())
+        .map(|p| p.path.clone())
+        .unwrap_or_else(|| "index".into());
+    let images = db::version_images(&state.db, version.id).await?;
+    let data = serde_json::json!({
+        "isNew": false,
+        "title": doc.title,
+        "folder": doc.folder,
+        "baseVersion": version.number,
+        "pages": pages.iter().map(|p| serde_json::json!({
+            "path": p.path,
+            "title": p.title,
+            "format": p.format,
+            "content": p.source,
+        })).collect::<Vec<_>>(),
+        "open": open,
+        "images": images.iter().map(|i| &i.name).collect::<Vec<_>>(),
+        "cancelUrl": format!("{}{}", doc_base(&doc.uuid, None), paths::url_suffix(&open)),
+    });
+    Ok(editor_shell(
+        &viewer,
+        user,
+        &format!("Edit · {}", doc.title),
+        &format!("/api/documents/{}/versions", doc.uuid),
+        Some(&doc.uuid),
+        data,
+    )
+    .into_response())
 }

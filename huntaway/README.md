@@ -8,7 +8,7 @@ are the docs project's own and don't drift from the hosted site.
 It replaces the documents Huntaway had built in. Its id is `docs`, so:
 
 - **Agents** get an MCP server named `docs` (`mcp__docs__<tool>`) with the hosted server's tools, schemas, checks,
-  errors and warnings: `publish_document`, `list_documents`, `get_document`, `read_page`, `move_document`,
+  errors and warnings: `publish_document`, `create_upload_url`, `list_documents`, `get_document`, `read_page`, `move_document`,
   `set_document_labels`, `list_labels`, `get_feedback` and `list_components` (not `share_document`). They run without a
   permission prompt, as they only touch the plugin's own data.
 - **People** read documents at `/docs/<profile id>/d/<slug>/` on the board, the paths the built-in documents had, so
@@ -21,11 +21,27 @@ It replaces the documents Huntaway had built in. Its id is `docs`, so:
   "merge"` keeps the other pages, a new document goes in a folder named after its task's project, and labels nest with
   `/`. The home page shows a profile's documents by folder (rename a folder there) or by label.
 - **Images**: given in `images` or inline as `data:` URIs, checked by the renderer, converted to AVIF with
-  [sharp](https://sharp.pixelplumbing.com/) (at most 500 KB each after conversion), and kept once per profile. Pages
-  show them as `data:` URLs, since the board's frame reaches no network.
+  [sharp](https://sharp.pixelplumbing.com/) (at most 500 KB each after conversion), and kept once per profile. An
+  image file needn't go through a tool call as base64: `create_upload_url` gives a URL on the board
+  (`/plugins/docs/uploads/<token>`, the plugin's one HTTP route, good for an hour), the agent sends files to it with
+  `curl`, and `images` names each by the id its upload answered (`{ name, upload }`), a random UUID kept for a day.
+  Pages show images as `data:` URLs, since the board's frame reaches no network.
 - **Comments** on the text, as the hosted reader has them (DOC-14): select text, write in the popup, and it saves when
   you click away; comments show as bubbles beside their quotes. **Send** puts the unsent ones in one message to the
   task that published the newest version, and agents read them with `get_feedback`.
+- **Editing** (DOC-18): **Edit** on a document opens the hosted site's editor (`frontend/src/editor.ts`): every page's
+  source beside a live preview, a Markdown toolbar, pages to add, rename, reorder and delete, and images to upload.
+  **Save** publishes all the pages as a new version (with no task), and **New document** on the home page writes one.
+  Unsaved changes are kept in the plugin's database as a draft (the board reloads its pages whenever a document
+  changes), and come back when the editor opens again.
+- **Mockups and the design editor**: a page published as HTML (`"format": "html"`) is a mockup, and its page is the
+  hosted site's design editor (`frontend/src/design/`): every mockup of the document as a frame on a canvas, where the
+  user inspects and changes elements, tunes the mockup's CSS custom properties, edits its HTML, comments on elements
+  and saves the changed mockups as a new version. Comments on elements go to the task with the others, and
+  `get_feedback` gives each one's selector (`element`). The board's frame for a plugin's page has no origin, so each
+  mockup is in a frame of its own that runs the editor's agent (bundled into the page script) and nothing the mockup
+  brings: a policy with a one-time nonce allows that script only. Unsaved changes are kept as a draft beside the
+  document editor's. A mockup's page with `?details` is the document's own page (labels, versions, publishing, delete).
 - **Publishing to a hosted docs site**: connect a profile from the home page (the OAuth device sign-in, or a pasted
   personal access token), then **Publish** a version from its page. Publishing again adds a version to the same
   document there. Tokens stay in the plugin's database on the host and are renewed there.
@@ -43,7 +59,7 @@ Each release attaches the package to a GitHub release:
 
 ```sh
 cd apps/server
-pnpm add https://github.com/dire-kiwi/docs/releases/download/huntaway-v0.2.0/dire-kiwi-docs-huntaway-0.2.0.tgz
+pnpm add https://github.com/dire-kiwi/docs/releases/download/huntaway-v0.3.0/dire-kiwi-docs-huntaway-0.3.0.tgz
 ```
 
 then list it in `apps/server/src/plugins/installed.ts`:
@@ -73,18 +89,23 @@ pnpm preview     # the pages at http://localhost:4100/docs/, in a sandboxed fram
 pnpm build       # dist/: the server code as JavaScript, and the page script (client/page.ts) bundled
 ```
 
-`pnpm preview` runs the plugin on `.preview/plugin.db` with a pretend board (one profile, project and task), publishes
-a sample document the first time, and prints what it would send to the task.
+`pnpm preview` runs the plugin on `.preview/plugin.db` (or in `PREVIEW_DIR`) with a pretend board (one profile, project
+and task), under the board's policy for a plugin's frame. The first time, it publishes a sample document and a
+document of mockups (`/docs/preview/d/mockups/screens/home` is the design editor). It prints what it would send to the
+task.
 
 Layout:
 
 - `src/index.ts`: the plugin (`definePlugin`) and its parts
 - `src/schema.ts`: its tables, and copying the board's
 - `src/tools.ts`: the MCP server; `src/docs.ts`: documents, comments and what the tools answer; `src/publish.ts`:
-  `publish_document`; `src/images.ts`: AVIF conversion
+  `publish_document`; `src/images.ts`: AVIF conversion; `src/uploads.ts`: the route image files are uploaded to
 - `src/hosted.ts`, `src/siteRepo.ts`: connecting to and publishing on a hosted docs site
 - `src/pages/`: the pages (HTML, rendered on the host) and `src/calls.ts`, what they call
-- `client/page.ts`: the pages' script (forms, answers, comments), sharing `frontend/src/answer.ts`, `quote.ts` and `bubbles.ts` with the site
+- `client/page.ts`: the pages' script (forms, answers, comments, the editor, the design editor), sharing
+  `frontend/src/answer.ts`, `quote.ts`, `bubbles.ts`, `editor.ts` and `design/` (with `editor.css` and `design.css`,
+  bundled as text) with the site; `scripts/build.mjs` bundles `frontend/src/design/agent.ts` into it as source, for
+  the mockups' frames
 - `vendor/huntaway-plugin/`: a copy of Huntaway's plugin API, to type-check and test against until Huntaway publishes it
 
 ## Release

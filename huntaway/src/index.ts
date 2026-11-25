@@ -18,6 +18,7 @@ import { makeRepo } from "./repo.ts"
 import { migrations } from "./schema.ts"
 import { makeSiteRepo } from "./siteRepo.ts"
 import { docsTools, INSTRUCTIONS } from "./tools.ts"
+import { uploadRoutes } from "./uploads.ts"
 
 // The docs plugin for Huntaway (dire-kiwi/huntaway docs/plan/15-plugins.md): the board's documents, as the docs project
 // keeps them. Agents publish reports, plans and research through its `docs` MCP server exactly as they would to the
@@ -71,6 +72,7 @@ export const makeParts = (options: { readonly timing?: SiteTiming } = {}): Effec
       mcp: { tools: docsTools(lib, docs), instructions: INSTRUCTIONS, preApproved: true, maxRequestBytes: 64 * 1024 * 1024 },
       pages: makePages({ docs, hosted, lib, host, assets }),
       calls: makeCalls(docs, hosted),
+      routes: uploadRoutes(docs, lib),
     }
   })
 

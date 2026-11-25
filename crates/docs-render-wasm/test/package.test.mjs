@@ -121,7 +121,15 @@ test("images: inline extraction, names and limits", () => {
   assert.equal(docs.normalizeImageName("./images/a.png"), "images/a.png");
   assert.match(attempt(() => docs.normalizeImageName("../a.png")).error, /isn't a relative path/);
   assert.deepEqual(docs.imageCandidates("plan/x", "images/a.png"), ["plan/images/a.png", "images/a.png"]);
-  assert.deepEqual(docs.imageLimits(), { maxImageBytes: 512000, maxImages: 200, maxPageBytes: 1000000 });
+  assert.deepEqual(docs.imageLimits(), {
+    maxImageBytes: 512000,
+    maxImages: 200,
+    maxPageBytes: 1000000,
+    maxUploadBytes: 33554432,
+    uploadUrlSeconds: 3600,
+    uploadKeptSeconds: 86400,
+    maxWaitingUploads: 200,
+  });
   assert.equal(
     docs.imageTooLargeError('image "a.png"', 600000),
     'image "a.png" is 600000 bytes after conversion to AVIF, over the limit of 512000 bytes (500 KB): downscale or crop it and publish again',
@@ -154,12 +162,37 @@ test("validatePublish: pages and images, as publish_document checks them", () =>
   assert.equal(attempt(() => docs.validatePublish([{ path: "index", content: "x" }], [{ name: "a.png", data: "!!" }])).error, 'image "a.png" isn\'t valid base64');
   assert.match(attempt(() => docs.validatePublish([{ path: "index" }], [])).error, /^invalid pages: missing field `content`/);
   assert.equal(docs.imageTooManyError(201), "a version can have at most 200 images, not 201");
+  // An image uploaded on its own is named by its id.
+  const id = "3f2a9c1e-0000-4000-8000-000000000001";
+  const up = docs.validatePublish([{ path: "index", content: "![a](a.png)" }], [{ name: "a.png", upload: ` ${id.toUpperCase()} ` }, { name: "b.png", data: png }]);
+  assert.deepEqual(up.uploaded, [{ name: "a.png", label: 'image "a.png"', upload: id }]);
+  assert.deepEqual(up.images.map((im) => im.name), ["b.png"]);
+  assert.match(attempt(() => docs.validatePublish([{ path: "index", content: "x" }], [{ name: "a.png" }])).error, /^image "a.png" needs either `data` .* or `upload` /);
+  assert.match(attempt(() => docs.validatePublish([{ path: "index", content: "x" }], [{ name: "a.png", data: png, upload: id }])).error, /and not both$/);
+  assert.match(docs.imageUploadMissingError('image "a.png"', id), /^image "a.png": there is no uploaded image "3f2a9c1e-/);
+  assert.deepEqual(Object.keys(docs.uploadErrors()).sort(), ["body", "tooBig", "tooMany", "url"]);
+  assert.match(docs.uploadErrors().tooMany, /^there are 200 uploaded images waiting already/);
+  assert.deepEqual(docs.validateUpload(png), { label: "the uploaded image", format: "png" });
+  assert.equal(attempt(() => docs.validateUpload(Buffer.from("<svg/>").toString("base64"))).error, "the uploaded image is SVG, which isn't supported: images must be PNG, JPEG, WebP, GIF or AVIF");
+  assert.equal(attempt(() => docs.validateUpload("")).error, "the uploaded image isn't PNG, JPEG, WebP, GIF or AVIF");
   assert.equal(docs.imageUnreadableError('image "a.png"', "bad header"), 'image "a.png" couldn\'t be read: bad header');
 });
 
+test("mockups are html pages", () => {
+  const mockup = '<!doctype html><title>Sign in</title><img src="images/logo.png"><script>x()</script>';
+  // No reader HTML: the design editor shows the source.
+  const r = docs.render(mockup, "html", { pagePath: "screens/sign-in", baseUrl: "/" });
+  assert.equal(r.html, "");
+  assert.deepEqual(r.imageSrcs, ["images/logo.png"]);
+  assert.equal(r.warnings.length, 1);
+  const { pages, warnings } = docs.validatePages([{ path: "screens/sign-in.html", content: mockup }, { path: "found", content: mockup }]);
+  assert.deepEqual(pages.map((p) => [p.path, p.format, p.title]), [["screens/sign-in", "html", "Sign in"], ["found", "html", "Sign in"]]);
+  assert.equal(warnings.length, 2);
+});
+
 test("bad arguments throw strings", () => {
-  assert.deepEqual(attempt(() => docs.render("x", "html", { pagePath: "index", baseUrl: "/" })), {
-    error: 'format must be md or mdx, not "html"',
+  assert.deepEqual(attempt(() => docs.render("x", "rst", { pagePath: "index", baseUrl: "/" })), {
+    error: 'format must be md, mdx or html, not "rst"',
   });
   assert.match(attempt(() => docs.render("x", "md", {})).error, /^invalid render options/);
 });
@@ -203,7 +236,7 @@ test("missing arguments use the defaults or throw strings", () => {
   }
   assert.equal(attempt(() => docs.normalizePath(3)).error, "path must be a string, not number");
   assert.equal(attempt(() => docs.normalizeFolder(null)).error, "folder must be a string, not null");
-  assert.equal(attempt(() => docs.render("x")).error, 'format must be "md" or "mdx", not undefined');
+  assert.equal(attempt(() => docs.render("x")).error, 'format must be "md", "mdx" or "html", not undefined');
   // The instance still works after all that.
   assert.equal(docs.normalizePath("./A b.md"), "a-b");
 });

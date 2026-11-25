@@ -1,4 +1,6 @@
 @import "./reader.css";
+@import "./editor.css";
+@import "./design/design.css";
 
 /*
  * The site around the pages: a desk (dotted, a shade darker than the paper) with
@@ -1388,4 +1390,42 @@ a.label-chip:hover,
   font-size: 0.85em;
   padding: 2px 9px;
   box-shadow: none;
+}
+
+/* A form with one field under another (creating an organization). */
+form.stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  max-width: 420px;
+}
+
+form.stack label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+}
+
+/* ---------- editing ---------- */
+
+.home-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.doc-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin: 0 0 8px;
+}
+
+.doc-actions .button {
+  font-size: 0.9em;
+  padding: 4px 12px;
+  color: inherit;
 }

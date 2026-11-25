@@ -1,7 +1,7 @@
 import { NodeFileSystem, NodePath } from "@effect/platform-node"
 import { SqliteClient } from "@effect/sql-sqlite-node"
 import { Effect, Layer, Option, Redacted, Schema } from "effect"
-import { HttpClient, HttpClientResponse } from "effect/http"
+import { HttpClient, HttpClientResponse, HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http"
 import type { HttpClientRequest } from "effect/http"
 import { SqlClient } from "effect/sql"
 import { PluginError, PluginHost, PluginImport } from "@huntaway/plugin"
@@ -55,10 +55,12 @@ export interface Harness {
   readonly ok: (name: string, args: Readonly<Record<string, unknown>>, ctx?: CallContext) => Effect.Effect<any>
   /** A tool's error, or the test fails. */
   readonly refused: (name: string, args: Readonly<Record<string, unknown>>) => Effect.Effect<string>
-  readonly page: (path: string) => Effect.Effect<any, PluginError>
+  readonly page: (path: string, query?: Readonly<Record<string, string>>) => Effect.Effect<any, PluginError>
   readonly task: (id: string) => Effect.Effect<any, PluginError>
   readonly settings: Effect.Effect<any, PluginError>
   readonly call: (method: string, payload: unknown) => Effect.Effect<any, PluginError>
+  /** A request to one of the plugin's routes, as the board passes it on (`url` as `create_upload_url` gives it): its status and JSON answer. */
+  readonly route: (method: "POST" | "PUT", url: string, body: Uint8Array | string, headers?: Readonly<Record<string, string>>) => Effect.Effect<{ readonly status: number; readonly json: any }>
 }
 
 const decodeJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown))
@@ -129,13 +131,32 @@ export const harness = (options: { readonly board?: Readonly<Record<string, Read
       tool,
       ok: (name, args, ctx) => Effect.flatMap(tool(name, args, ctx), (r) => (r.isError ? Effect.die(new Error(`${name} failed: ${r.text}`)) : Effect.succeed(r.json))),
       refused: (name, args) => Effect.flatMap(tool(name, args), (r) => (r.isError ? Effect.succeed(r.text) : Effect.die(new Error(`${name} succeeded: ${r.text}`)))),
-      page: (path) => parts.pages!.render({ slot: "page", path, query: {}, task_id: null, session }),
+      page: (path, query = {}) => parts.pages!.render({ slot: "page", path, query, task_id: null, session }),
       task: (id) => parts.pages!.render({ slot: "task", path: "", query: {}, task_id: id, session }),
       settings: parts.pages!.render({ slot: "settings", path: "", query: {}, task_id: null, session }),
       call: (method, payload) => {
         const c = parts.calls?.[method]
         return c === undefined ? Effect.die(new Error(`no call ${method}`)) : c.run(payload, session)
       },
+      route: (method, url, body, headers = {}) =>
+        Effect.gen(function* () {
+          // The plugin's routes are `/plugins/docs<path>`, with `:name` segments.
+          const path = new URL(url).pathname.replace(/^\/plugins\/docs/, "").split("/")
+          for (const r of parts.routes ?? []) {
+            const pattern = r.path.split("/")
+            if (r.method !== method || pattern.length !== path.length) continue
+            const params: Record<string, string> = {}
+            if (!pattern.every((seg, i) => (seg.startsWith(":") ? ((params[seg.slice(1)] = path[i] ?? ""), true) : seg === path[i]))) continue
+            const request = HttpServerRequest.fromWeb(new Request(url, { method, body: typeof body === "string" ? body : new Uint8Array(body), headers }))
+            const response = yield* r.handle(request).pipe(
+              Effect.provideService(HttpRouter.RouteContext, { params, route: undefined as never }),
+              Effect.provideService(HttpServerRequest.ParsedSearchParams, {}),
+            )
+            const web = HttpServerResponse.toWeb(response)
+            return { status: web.status, json: yield* Effect.promise(() => web.json()) }
+          }
+          return yield* Effect.die(new Error(`no route ${method} ${url}`))
+        }),
     }
     return h
   })

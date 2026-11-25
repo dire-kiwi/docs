@@ -7,7 +7,8 @@ import { byLowercase } from "./rules.ts"
 // (`doc_version_images`), and `doc_comments` and `doc_answers` on a version's pages. Single statements; `Docs` puts them in
 // transactions. SQL errors and rows that don't decode are defects.
 
-export const Format = Schema.Literals(["md", "mdx"])
+/** A page's format: Markdown, MDX, or a mockup's HTML (which the design editor shows). */
+export const Format = Schema.Literals(["md", "mdx", "html"])
 export type Format = typeof Format.Type
 
 /** A document as it's kept, with its latest version's number, how many pages that has, and its labels (sorted). */
@@ -66,6 +67,8 @@ export const Comment = Schema.Struct({
   quote: Schema.String,
   prefix: Schema.String,
   suffix: Schema.String,
+  /** For a comment on a mockup's element: a CSS selector for it ("" for one on text). */
+  anchor: Schema.String,
   comment: Schema.String,
   created_at: Schema.String,
   updated_at: Schema.String,
@@ -111,6 +114,9 @@ const idRows = rowsOf(Id)
 const labelRows = rowsOf(Label)
 const countRows = rowsOf(Count)
 const publishedRows = rowsOf(Published)
+const draftRows = rowsOf(Schema.Struct({ data: Schema.String }))
+const profileRows = rowsOf(Schema.Struct({ profile_id: Schema.String }))
+const shaRows = rowsOf(Schema.Struct({ sha256: Schema.String }))
 
 // Labels have no control characters, so a newline keeps them apart.
 const docOf = (r: typeof DocRow.Type): Doc => ({
@@ -126,17 +132,21 @@ const SELECT_DOC = `SELECT d.id, d.profile_id, d.slug, d.title, d.folder, d.crea
   (SELECT group_concat(label, char(10)) FROM doc_labels l WHERE l.doc_id = d.id) AS labels
   FROM docs d`
 
-const SELECT_COMMENT = `SELECT m.id, v.number AS version, m.page_path AS page, m.quote, m.prefix, m.suffix, m.comment, m.created_at, m.updated_at, m.sent_at
+const SELECT_COMMENT = `SELECT m.id, v.number AS version, m.page_path AS page, m.quote, m.prefix, m.suffix, m.anchor, m.comment, m.created_at, m.updated_at, m.sent_at
   FROM doc_comments m JOIN doc_versions v ON v.id = m.version_id`
 
 const SELECT_ANSWER = `SELECT v.number AS version, a.page_path AS page, a.field, a.value, a.updated_at, a.sent_at
   FROM doc_answers a JOIN doc_versions v ON v.id = a.version_id`
 
-/** What a new comment says: the quote, its context, and the comment. */
+/** The key of the design editor's draft of a document, beside the document editor's (its slug): no slug has a space. */
+export const designDraft = (slug: string) => `${slug} design`
+
+/** What a new comment says: the quote, its context (or, on a mockup, its element), and the comment. */
 export interface CommentText {
   readonly quote: string
   readonly prefix: string
   readonly suffix: string
+  readonly anchor: string
   readonly comment: string
 }
 
@@ -164,6 +174,12 @@ export const makeRepo = (sql: SqlClient.SqlClient) => {
   const selectAnswer = sql.literal(SELECT_ANSWER)
   const versionCols = sql.literal("SELECT id, number, message, task_id, run_id, created_at FROM doc_versions")
   const comment = (doc: string, id: number) => first(commentRows(sql`${selectComment} WHERE v.doc_id = ${doc} AND m.id = ${id}`))
+  /** Deletes the profile's images nothing has any more: no version of its documents, and no upload still waiting. */
+  const dropUnusedImages = (profile: string) =>
+    done(sql`DELETE FROM doc_images WHERE profile_id = ${profile}
+      AND NOT EXISTS (SELECT 1 FROM doc_version_images vi JOIN doc_versions v ON v.id = vi.version_id JOIN docs d ON d.id = v.doc_id
+        WHERE vi.sha256 = doc_images.sha256 AND d.profile_id = ${profile})
+      AND NOT EXISTS (SELECT 1 FROM doc_uploads u WHERE u.sha256 = doc_images.sha256 AND u.profile_id = ${profile})`)
 
   return {
     /** A profile's documents, most recently updated first. */
@@ -243,12 +259,45 @@ export const makeRepo = (sql: SqlClient.SqlClient) => {
       Effect.gen(function* () {
         const gone = yield* idRows(sql`DELETE FROM docs WHERE profile_id = ${profile} AND slug = ${slug} RETURNING id`)
         if (gone.length === 0) return false
-        yield* sql`DELETE FROM doc_images WHERE profile_id = ${profile} AND NOT EXISTS (SELECT 1 FROM doc_version_images vi
-          JOIN doc_versions v ON v.id = vi.version_id JOIN docs d ON d.id = v.doc_id
-          WHERE vi.sha256 = doc_images.sha256 AND d.profile_id = ${profile})`.pipe(Effect.orDie)
+        yield* sql`DELETE FROM doc_drafts WHERE profile_id = ${profile} AND slug IN (${slug}, ${designDraft(slug)})`.pipe(Effect.orDie)
+        yield* dropUnusedImages(profile)
         return true
       }),
+    /** Keeps an upload URL, by its token's hash, for a profile's uploads until `expires` (milliseconds). */
+    addUploadUrl: (hash: string, profile: string, expires: number) =>
+      done(sql`INSERT INTO doc_upload_urls (hash, profile_id, expires_at) VALUES (${hash}, ${profile}, ${expires})`),
+    /** Whose uploads an upload URL takes, while it lasts. */
+    uploadUrlProfile: (hash: string, now: number) =>
+      Effect.map(first(profileRows(sql`SELECT profile_id FROM doc_upload_urls WHERE hash = ${hash} AND expires_at > ${now}`)), (r) => r?.profile_id ?? null),
+    /** How many uploads a profile has waiting. */
+    waitingUploads: (profile: string, now: number) =>
+      Effect.map(countRows(sql`SELECT COUNT(*) AS n FROM doc_uploads WHERE profile_id = ${profile} AND expires_at > ${now}`), (r) => r[0]?.n ?? 0),
+    /** Keeps an uploaded AVIF for its profile to publish, under `id`, until `expires` (milliseconds). */
+    addUpload: (id: string, profile: string, im: NewImage, now: string, expires: number) =>
+      Effect.gen(function* () {
+        yield* sql`INSERT OR IGNORE INTO doc_images (profile_id, sha256, data, width, height, created_at)
+          VALUES (${profile}, ${im.sha256}, ${im.data}, ${im.width}, ${im.height}, ${now})`
+        yield* sql`INSERT INTO doc_uploads (id, profile_id, sha256, created_at, expires_at) VALUES (${id}, ${profile}, ${im.sha256}, ${now}, ${expires})`
+      }).pipe(Effect.orDie),
+    /** The AVIF (its sha256) of a profile's upload that still waits. */
+    upload: (profile: string, id: string, now: number) =>
+      Effect.map(first(shaRows(sql`SELECT sha256 FROM doc_uploads WHERE id = ${id} AND profile_id = ${profile} AND expires_at > ${now}`)), (r) => r?.sha256 ?? null),
+    /** Deletes the upload URLs and uploads that have expired, and the images only they had. How many uploads went. */
+    purgeUploads: (now: number) =>
+      Effect.gen(function* () {
+        yield* done(sql`DELETE FROM doc_upload_urls WHERE expires_at <= ${now}`)
+        const gone = yield* profileRows(sql`DELETE FROM doc_uploads WHERE expires_at <= ${now} RETURNING profile_id`)
+        for (const profile of new Set(gone.map((g) => g.profile_id))) yield* dropUnusedImages(profile)
+        return gone.length
+      }),
     move: (doc: string, folder: string) => done(sql`UPDATE docs SET folder = ${folder} WHERE id = ${doc}`),
+    /** The editor's unsaved changes to a document (slug '' for a new one), as JSON. */
+    draft: (profile: string, slug: string) =>
+      Effect.map(first(draftRows(sql`SELECT data FROM doc_drafts WHERE profile_id = ${profile} AND slug = ${slug}`)), (r) => r?.data ?? null),
+    putDraft: (profile: string, slug: string, data: string, now: string) =>
+      done(sql`INSERT INTO doc_drafts (profile_id, slug, data, updated_at) VALUES (${profile}, ${slug}, ${data}, ${now})
+        ON CONFLICT (profile_id, slug) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at`),
+    dropDraft: (profile: string, slug: string) => done(sql`DELETE FROM doc_drafts WHERE profile_id = ${profile} AND slug = ${slug}`),
     /** A document's comments by version, page, then age: on one version, and made or changed at or after `since`, if given. */
     comments: (doc: string, filter: { readonly version?: number | null; readonly since?: string | null } = {}) => {
       const version = filter.version ?? null
@@ -261,8 +310,8 @@ export const makeRepo = (sql: SqlClient.SqlClient) => {
     comment,
     addComment: (doc: string, version: string, page: string, text: CommentText, now: string) =>
       Effect.gen(function* () {
-        const added = yield* idRows(sql`INSERT INTO doc_comments (version_id, page_path, quote, prefix, suffix, comment, created_at, updated_at)
-          VALUES (${version}, ${page}, ${text.quote}, ${text.prefix}, ${text.suffix}, ${text.comment}, ${now}, ${now}) RETURNING CAST(id AS TEXT) AS id`)
+        const added = yield* idRows(sql`INSERT INTO doc_comments (version_id, page_path, quote, prefix, suffix, anchor, comment, created_at, updated_at)
+          VALUES (${version}, ${page}, ${text.quote}, ${text.prefix}, ${text.suffix}, ${text.anchor}, ${text.comment}, ${now}, ${now}) RETURNING CAST(id AS TEXT) AS id`)
         const made = yield* comment(doc, Number(added[0]?.id))
         return made ?? (yield* Effect.die(new Error("a comment just added isn't there")))
       }),

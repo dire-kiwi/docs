@@ -1,6 +1,8 @@
 import { assert, describe, it } from "@effect/vitest"
 import { Effect } from "effect"
 import sharp from "sharp"
+import { loadRenderer } from "../src/render.ts"
+import { definitions } from "../src/tools.ts"
 import { BOARD, call, OTHER, TASK, withHarness } from "./harness.ts"
 
 // The docs plugin's MCP server, as an agent on the board uses it: the hosted server's tools, arguments, checks,
@@ -180,6 +182,98 @@ describe("images", () => {
       }),
     ),
   )
+
+  it.effect("are uploaded on their own to an upload URL, and named in a publish by the id it answers", () =>
+    withHarness({}, (h) =>
+      Effect.gen(function* () {
+        const file = Buffer.from(yield* png(40, 30), "base64")
+        const count = (table: string) => Effect.map(h.sql<{ readonly n: number }>`SELECT COUNT(*) AS n FROM ${h.sql(table)}`.pipe(Effect.orDie), (r) => r[0]?.n ?? 0)
+
+        // An agent asks for a URL and sends the file to it: no token of the board's, and no base64 in a tool call.
+        const made = yield* h.ok("create_upload_url", {})
+        const url = made.upload_url as string
+        assert.match(url, /^http:\/\/board\.test\/plugins\/docs\/uploads\/[A-Za-z0-9_-]{43}$/)
+        assert.strictEqual(made.expires_in, 3600)
+        assert.include(made.curl, url)
+        assert.deepStrictEqual(
+          h.parts.routes?.map((r) => [r.method, r.path, r.auth]),
+          [
+            ["POST", "/uploads/:token", "public"],
+            ["PUT", "/uploads/:token", "public"],
+          ],
+        )
+        const chart = yield* h.route("POST", url, file)
+        assert.strictEqual(chart.status, 200)
+        assert.match(chart.json.id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+        assert.strictEqual(chart.json.expires_in, 86400)
+        assert.isAbove(chart.json.bytes, 0)
+        // The URL takes any number of images (`curl -T` sends a PUT); the same bytes are kept once.
+        const again = yield* h.route("PUT", url, file)
+        assert.strictEqual(again.status, 200)
+        assert.notStrictEqual(again.json.id, chart.json.id)
+        assert.strictEqual(yield* count("doc_images"), 1)
+        // The token itself isn't kept.
+        assert.notInclude(JSON.stringify(yield* h.sql`SELECT * FROM doc_upload_urls`), url.split("/").at(-1) ?? "")
+
+        const out = yield* h.ok("publish_document", {
+          slug: "shots",
+          pages: [{ path: "index", content: "# Shots\n\n![Chart](images/chart.png)" }],
+          images: [{ name: "images/chart.png", upload: chart.json.id.toUpperCase() }],
+        })
+        assert.deepStrictEqual(out.warnings, [])
+        assert.deepStrictEqual(
+          out.images.map((im: { name: string; width: number; height: number; bytes: number }) => [im.name, im.width, im.height, im.bytes]),
+          [["images/chart.png", 40, 30, chart.json.bytes]],
+        )
+        assert.match((yield* h.page("p1/d/shots/")).html, /<img src="data:image\/avif;base64,/)
+        // An upload can be published again while it lasts.
+        const v2 = yield* h.ok("publish_document", { slug: "shots", pages: [{ path: "index", content: "![c](c.png)" }], images: [{ name: "c.png", upload: again.json.id }] })
+        assert.deepStrictEqual([v2.version, v2.images.length], [2, 1])
+
+        // What a publish and an upload URL refuse, in the hosted site's words.
+        const page = [{ path: "index", content: "# x" }]
+        const missing = (id: string) =>
+          `image "c.png": there is no uploaded image "${id}". Uploads are deleted a day after they are made, and only whoever uploaded an image can publish it: upload it again (create_upload_url)`
+        assert.strictEqual(yield* h.refused("publish_document", { slug: "nope", pages: page, images: [{ name: "c.png", upload: "nope" }] }), missing("nope"))
+        assert.strictEqual((yield* h.tool("get_document", { slug: "nope" })).isError, true, "a refused publish makes no document")
+        assert.strictEqual(
+          yield* h.refused("publish_document", { pages: page, images: [{ name: "c.png" }] }),
+          'image "c.png" needs either `data` (its bytes in base64) or `upload` (the id of an image uploaded with create_upload_url), and not both',
+        )
+        assert.deepStrictEqual(yield* h.route("POST", url, "<svg></svg>"), {
+          status: 400,
+          json: { error: "the uploaded image is SVG, which isn't supported: images must be PNG, JPEG, WebP, GIF or AVIF" },
+        })
+        assert.match((yield* h.route("POST", url, "")).json.error, /^send the image file itself as the request body/)
+        const form = yield* h.route("POST", url, "--x--", { "content-type": "multipart/form-data; boundary=x" })
+        assert.deepStrictEqual([form.status, /not a form/.test(form.json.error)], [400, true])
+        const wrong = yield* h.route("POST", url.replace(/[^/]+$/, "not-a-token"), file)
+        assert.deepStrictEqual([wrong.status, /^this upload URL isn't valid any more/.test(wrong.json.error)], [404, true])
+
+        // No more than 200 wait at once.
+        const later = Date.now() + 60_000
+        for (let n = 0; n < 198; n++) yield* h.sql`INSERT INTO doc_uploads (id, profile_id, sha256, created_at, expires_at) VALUES (${`w${n}`}, 'p1', 'x', '', ${later})`.pipe(Effect.orDie)
+        const full = yield* h.route("POST", url, file)
+        assert.deepStrictEqual(full, {
+          status: 429,
+          json: { error: "there are 200 uploaded images waiting already, the most there can be: they are deleted a day after they are uploaded" },
+        })
+
+        // Uploads last a day and their URL an hour: after that they go, with the images no document has.
+        const other = Buffer.from(yield* png(20, 20), "base64")
+        yield* h.sql`DELETE FROM doc_uploads WHERE sha256 = 'x'`.pipe(Effect.orDie)
+        const unused = yield* h.route("POST", url, other)
+        assert.strictEqual(yield* count("doc_images"), 2)
+        yield* h.sql`UPDATE doc_uploads SET expires_at = 0`.pipe(Effect.orDie)
+        yield* h.sql`UPDATE doc_upload_urls SET expires_at = 0`.pipe(Effect.orDie)
+        assert.strictEqual((yield* h.route("POST", url, file)).status, 404)
+        assert.strictEqual(yield* h.refused("publish_document", { slug: "shots", pages: page, images: [{ name: "c.png", upload: unused.json.id }] }), missing(unused.json.id))
+        yield* h.ok("create_upload_url", {})
+        assert.deepStrictEqual([yield* count("doc_uploads"), yield* count("doc_upload_urls"), yield* count("doc_images")], [0, 1, 1])
+        assert.match((yield* h.page("p1/d/shots/")).html, /<img src="data:image\/avif;base64,/)
+      }),
+    ),
+  )
 })
 
 describe("labels and lists", () => {
@@ -218,7 +312,7 @@ describe("labels and lists", () => {
     ),
   )
 
-  it.effect("list_components is the renderer's reference, and share_document isn't offered", () =>
+  it.effect("list_components is the renderer's reference, and share_document and organizations aren't offered", () =>
     withHarness({}, (h) =>
       Effect.gen(function* () {
         assert.match((yield* h.tool("list_components", {})).text, /Callout/)
@@ -228,12 +322,16 @@ describe("labels and lists", () => {
           "get_document",
           "read_page",
           "publish_document",
+          "create_upload_url",
           "move_document",
           "set_document_labels",
           "list_labels",
           "get_feedback",
           "list_components",
         ])
+        for (const d of definitions(yield* yield* loadRenderer)) {
+          assert.notProperty(d.inputSchema["properties"] ?? {}, "organization", d.name)
+        }
         assert.strictEqual(h.parts.mcp?.preApproved, true)
       }),
     ),
@@ -486,6 +584,338 @@ describe("pages", () => {
         yield* h.call("doc.delete", { profile: "p1", slug: "the-plan" })
         assert.deepStrictEqual((yield* h.ok("list_documents", {})).documents, [])
         assert.deepStrictEqual(h.events.at(-1), { topic: "documents", profile_id: "p1", data: { slug: "the-plan", deleted: true }, reload: true })
+      }),
+    ),
+  )
+})
+
+/** The state a page gives its script (`window.DOCS`). */
+const stateOf = (html: string): any => {
+  const m = /<script>window\.DOCS=(.*?)<\/script>/s.exec(html)
+  if (m === null) throw new Error("no state in the page")
+  return JSON.parse(m[1] ?? "null")
+}
+
+describe("the editor", () => {
+  it.effect("edits a document's pages and saves them as a new version, keeping the images they use", () =>
+    withHarness({}, (h) =>
+      Effect.gen(function* () {
+        const chart = yield* png(30, 20)
+        yield* h.ok("publish_document", {
+          ...plan,
+          pages: [...plan.pages, { path: "old", content: "# Old\n\n![chart](images/chart.png)" }, { path: "pics", content: "![chart](images/chart.png)" }],
+          images: [{ name: "images/chart.png", data: chart }],
+        })
+        // The document's page links to the editor, which opens at that page with every page's source.
+        const doc = (yield* h.page("p1/d/the-plan/plan/phase-1")).html
+        assert.include(doc, `href="/docs/p1/d/the-plan/-/edit/plan/phase-1"`)
+        const editor = stateOf((yield* h.page("p1/d/the-plan/-/edit/plan/phase-1")).html)
+        assert.strictEqual(editor.page, "edit")
+        assert.strictEqual(editor.slug, "the-plan")
+        assert.strictEqual(editor.editor.open, "plan/phase-1")
+        assert.strictEqual(editor.editor.baseVersion, 1)
+        assert.deepStrictEqual(editor.editor.images, ["images/chart.png"])
+        assert.deepStrictEqual(
+          editor.editor.pages.map((p: { path: string }) => p.path),
+          ["index", "plan/phase-1", "old", "pics"],
+        )
+        assert.strictEqual(editor.editor.cancelUrl, "/docs/p1/d/the-plan/plan/phase-1")
+        assert.strictEqual(stateOf((yield* h.page("p1/d/the-plan/-/edit/")).html).editor.open, "index")
+
+        // The preview renders a page as it would be, with the document's images, storing nothing.
+        const where = { profile: "p1", slug: "the-plan" }
+        const shown = yield* h.call("doc.preview", { ...where, path: "pics", format: "mdx", content: "# Pics\n\n![c](images/chart.png)\n\n<Callout>Hi</Callout>" })
+        assert.strictEqual(shown.has_h1, true)
+        assert.include(shown.html, "data:image/avif;base64,")
+        assert.include(shown.html, "callout")
+        const broken = yield* h.call("doc.preview", { ...where, path: "x", format: "mdx", content: "<Callout>\n\nunclosed" })
+        assert.strictEqual(broken.html, null)
+        assert.include(broken.error, "isn't valid mdx")
+
+        // Saving: pages reordered and renamed, one removed, one new with an uploaded image.
+        const photo = yield* png(10, 10)
+        const save = {
+          ...where,
+          base_version: 1,
+          title: "The new plan",
+          folder: null,
+          message: "By hand",
+          pages: [
+            { path: "plan/phase-1", title: "Phase one", format: "md", content: "# Phase 1\n\nRewritten." },
+            { path: "index", title: null, format: "md", content: "# The plan" },
+            { path: "pics", title: null, format: "md", content: "![chart](images/chart.png)" },
+            { path: "photos", title: null, format: "md", content: "![p](images/photo.png)" },
+          ],
+          images: [{ name: "images/photo.png", data: photo }],
+        }
+        const saved = yield* h.call("doc.save", save)
+        assert.deepStrictEqual(saved, { slug: "the-plan", version: 2, url: "/docs/p1/d/the-plan/", warnings: [] })
+        const got = yield* h.ok("get_document", { slug: "the-plan" })
+        assert.strictEqual(got.title, "The new plan")
+        assert.deepStrictEqual(
+          got.pages.map((p: { path: string }) => p.path),
+          ["plan/phase-1", "index", "pics", "photos"],
+          "in the editor's order, without the page it removed",
+        )
+        assert.strictEqual(got.pages[0].title, "Phase one")
+        assert.deepStrictEqual(
+          got.images.map((i: { name: string }) => i.name).toSorted(),
+          ["images/chart.png", "images/photo.png"],
+        )
+        const v2 = got.versions.find((v: { number: number }) => v.number === 2)
+        assert.strictEqual(v2.message, "By hand")
+        assert.strictEqual(v2.task_id, null)
+        assert.include((yield* h.page("p1/d/the-plan/pics")).html, "data:image/avif;base64,")
+
+        // A version published since the editor opened: nothing is saved, and the editor is told which is the latest.
+        const conflict = yield* h.call("doc.save", save)
+        assert.deepStrictEqual(conflict, { conflict: 2, message: "Version 2 was published while you were editing." })
+        const invalid = yield* Effect.flip(h.call("doc.save", { ...save, base_version: 2, pages: [{ path: "index", format: "mdx", content: "<Callout>\n\nunclosed" }] }))
+        assert.strictEqual(invalid.reason, "invalid")
+        const untitled = yield* Effect.flip(h.call("doc.save", { ...save, base_version: 2, title: "  " }))
+        assert.strictEqual(untitled.message, "give the document a title")
+        assert.strictEqual((yield* h.ok("get_document", { slug: "the-plan" })).latest_version, 2)
+
+        // Unsaved changes are kept as a draft, which the editor gets back when the page is reloaded; saving drops it.
+        const draft = { baseVersion: 2, title: "Draft title", pages: [{ path: "index", title: "", format: "md", content: "Half done" }] }
+        yield* h.call("draft.keep", { ...where, draft })
+        assert.deepStrictEqual(stateOf((yield* h.page("p1/d/the-plan/-/edit/")).html).draft, draft)
+        assert.deepStrictEqual(stateOf((yield* h.page("p1/new")).html).draft, null, "a new document's draft is another")
+        yield* h.call("doc.save", { ...save, base_version: 2 })
+        assert.strictEqual(stateOf((yield* h.page("p1/d/the-plan/-/edit/")).html).draft, null)
+        yield* h.call("draft.keep", { ...where, draft })
+        yield* h.call("draft.keep", { ...where, draft: null })
+        assert.strictEqual(stateOf((yield* h.page("p1/d/the-plan/-/edit/")).html).draft, null)
+        yield* h.call("draft.keep", { ...where, draft })
+        yield* h.call("doc.delete", where)
+        const count = yield* h.sql<{ n: number }>`SELECT COUNT(*) AS n FROM doc_drafts`
+        assert.strictEqual(count[0]?.n, 0, "deleting the document deletes its draft")
+      }),
+    ),
+  )
+
+  it.effect("writes a new document in a folder", () =>
+    withHarness({}, (h) =>
+      Effect.gen(function* () {
+        assert.include((yield* h.page("p1")).html, `href="/docs/p1/new"`)
+        const editor = stateOf((yield* h.page("p1/new", { folder: " notes/ideas " })).html).editor
+        assert.strictEqual(editor.isNew, true)
+        assert.strictEqual(editor.folder, "notes/ideas")
+        assert.strictEqual(editor.cancelUrl, "/docs/p1")
+        yield* h.call("draft.keep", { profile: "p1", slug: null, draft: { title: "My no" } })
+        assert.deepStrictEqual(stateOf((yield* h.page("p1/new")).html).draft, { title: "My no" })
+        const saved = yield* h.call("doc.save", {
+          profile: "p1",
+          slug: null,
+          base_version: null,
+          title: "My notes",
+          folder: editor.folder,
+          message: null,
+          pages: [{ path: "index", title: null, format: "md", content: "Hello" }],
+          images: [],
+        })
+        assert.strictEqual(saved.url, "/docs/p1/d/my-notes/")
+        assert.strictEqual(stateOf((yield* h.page("p1/new")).html).draft, null, "saved, the new document's draft is gone")
+        const got = yield* h.ok("get_document", { slug: "my-notes" })
+        assert.strictEqual(got.title, "My notes")
+        assert.strictEqual(got.folder, "notes/ideas")
+      }),
+    ),
+  )
+})
+
+describe("mockups", () => {
+  const home =
+    '<!doctype html>\n<html><head><title>Home</title><style>:root { --accent: #d9480f } .hero { background: url(images/hero.png) }</style></head>\n' +
+    '<body><img src="../images/logo.png" alt=""><h1>Hello</h1><a class="cta" href="/signup">Start</a><script>alert(1)</script></body></html>'
+
+  it.effect("are html pages, which open in the design editor with their images, and are commented on by element", () =>
+    withHarness({}, (h) =>
+      Effect.gen(function* () {
+        const logo = yield* png(16, 16)
+        const published = yield* h.ok("publish_document", {
+          slug: "kea",
+          title: "Kea",
+          pages: [
+            { path: "index", content: "# Notes\n\nSee the screens." },
+            { path: "screens/home.html", content: home },
+            { path: "screens/sign-in", format: "html", content: "<main><h1>Sign in</h1></main>" },
+          ],
+          images: [
+            { name: "images/logo.png", data: logo },
+            { name: "screens/images/hero.png", data: logo },
+          ],
+        })
+        assert.deepStrictEqual(
+          published.warnings.map((w: { page: string }) => w.page),
+          ["screens/home"],
+          "its scripts don't run, which its publisher is told",
+        )
+        const got = yield* h.ok("get_document", { slug: "kea" })
+        assert.deepStrictEqual(
+          got.pages.map((p: { path: string; format: string; title: string }) => [p.path, p.format, p.title]),
+          [
+            ["index", "md", "Notes"],
+            ["screens/home", "html", "Home"],
+            ["screens/sign-in", "html", "Sign In"],
+          ],
+        )
+        const read = yield* h.ok("read_page", { slug: "kea", path: "screens/home.html" })
+        assert.strictEqual(read.content, home)
+        assert.strictEqual(read.format, "html")
+
+        // A mockup's page is the design editor: every mockup of the version, each image it names as a data: URL.
+        const page = yield* h.page("p1/d/kea/screens/home")
+        assert.include(page.html, '<div id="design"></div>')
+        assert.strictEqual(page.title, "Home · Kea")
+        const state = stateOf(page.html)
+        assert.strictEqual(state.page, "design")
+        assert.deepStrictEqual([state.profile, state.slug, state.version, state.draft], ["p1", "kea", 1, null])
+        assert.deepStrictEqual(state.task, { id: "t1", key: "DOC-1", title: "Write the plan" })
+        const d = state.design
+        assert.deepStrictEqual([d.title, d.version, d.latestVersion, d.open, d.canEdit, d.canComment], ["Kea", 1, 1, "screens/home", true, true])
+        assert.deepStrictEqual(
+          d.pages.map((p: { path: string; title: string }) => [p.path, p.title]),
+          [
+            ["screens/home", "Home"],
+            ["screens/sign-in", "Sign In"],
+          ],
+        )
+        assert.strictEqual(d.pages[0].content, home)
+        assert.deepStrictEqual(Object.keys(d.pages[0].images).toSorted(), ["../images/logo.png", "images/hero.png"])
+        assert.match(d.pages[0].images["images/hero.png"], /^data:image\/avif;base64,/)
+        assert.deepStrictEqual(d.pages[1].images, {})
+        assert.deepStrictEqual(d.others, [{ title: "Notes", url: "/docs/p1/d/kea/" }])
+        assert.deepStrictEqual(d.links, {
+          home: "/docs/p1",
+          latest: null,
+          versions: null,
+          source: "/docs/p1/d/kea/-/edit/screens/home",
+          details: "/docs/p1/d/kea/screens/home?details=1",
+        })
+        assert.deepStrictEqual(d.comments, [])
+        // The page script has the editor and its frames' agent in it.
+        assert.include(page.html, "docs-design")
+
+        // With ?details it is the document's own page, naming the mockup; the other pages are documents as before.
+        const details = (yield* h.page("p1/d/kea/screens/home", { details: "1" })).html
+        assert.include(details, 'Home is a mockup. <a href="/docs/p1/d/kea/screens/home">Open it in the design editor</a>')
+        assert.include(details, 'id="delete-form"')
+        assert.notInclude(details, "alert(1)")
+        const index = (yield* h.page("p1/d/kea/")).html
+        assert.include(index, "<article")
+        assert.include(index, 'href="/docs/p1/d/kea/screens/home"')
+
+        // A comment on an element keeps its selector: the agent gets it from get_feedback and in the message sent on.
+        const where = { profile: "p1", slug: "kea" }
+        const c = yield* h.call("comment.add", {
+          ...where,
+          version: 1,
+          page: "screens/home",
+          quote: '<a class="cta">Start</a>',
+          prefix: "",
+          suffix: "",
+          anchor: " body > a:nth-child(3) ",
+          comment: "Make it louder",
+        })
+        assert.strictEqual(c.anchor, "body > a:nth-child(3)")
+        const shown = stateOf((yield* h.page("p1/d/kea/screens/sign-in")).html).design.comments
+        assert.deepStrictEqual(
+          shown.map((m: Record<string, unknown>) => [m.id, m.page, m.anchor, m.comment, m.mine, m.sent]),
+          [[c.id, "screens/home", "body > a:nth-child(3)", "Make it louder", true, false]],
+        )
+        const fb = yield* h.ok("get_feedback", { slug: "kea" })
+        assert.deepStrictEqual(
+          fb.selections.map((s: { element: string | null; quote: string; comment: string }) => [s.element, s.quote, s.comment]),
+          [["body > a:nth-child(3)", '<a class="cta">Start</a>', "Make it louder"]],
+        )
+        yield* h.call("feedback.send", where)
+        assert.include(h.sent[0]?.text ?? "", `1. On version 1, page \`screens/home\`, element \`body > a:nth-child(3)\` (${BOARD}/docs/p1/d/kea/-/v/1/screens/home):`)
+        assert.strictEqual(stateOf((yield* h.page("p1/d/kea/screens/home")).html).design.comments[0].sent, true)
+      }),
+    ),
+  )
+
+  it.effect("are saved from the design editor as a new version with the other pages kept, and drafted beside the document editor's", () =>
+    withHarness({}, (h) =>
+      Effect.gen(function* () {
+        const logo = yield* png(16, 16)
+        yield* h.ok("publish_document", {
+          slug: "kea",
+          title: "Kea",
+          pages: [
+            { path: "index", content: "# Notes" },
+            { path: "screens/home.html", content: home },
+            { path: "screens/other.html", content: "<p>Other</p>" },
+          ],
+          images: [
+            { name: "images/logo.png", data: logo },
+            { name: "screens/images/hero.png", data: logo },
+          ],
+        })
+        const where = { profile: "p1", slug: "kea" }
+
+        // The design editor's draft is its own: the document editor's, of the same document, is another.
+        const draft = { version: 1, pages: { "screens/home": "<p>Half done</p>" }, savedAt: "2026-11-20T00:00:00Z" }
+        yield* h.call("draft.keep", { ...where, draft, design: true })
+        yield* h.call("draft.keep", { ...where, draft: { baseVersion: 1, title: "Text draft", pages: [] } })
+        assert.deepStrictEqual(stateOf((yield* h.page("p1/d/kea/screens/home")).html).draft, draft)
+        assert.strictEqual(stateOf((yield* h.page("p1/d/kea/-/edit/")).html).draft.title, "Text draft")
+
+        // Saving gives only the mockup that changed.
+        const changed = home.replace("<h1>Hello</h1>", '<h1 style="color: red">Hello there</h1>')
+        const save = {
+          ...where,
+          base_version: 1,
+          title: "Kea",
+          folder: null,
+          message: "Louder",
+          pages: [{ path: "screens/home", title: "Home", format: "html", content: changed }],
+          images: [],
+          design: true,
+        }
+        const saved = yield* h.call("doc.save", save)
+        assert.deepStrictEqual(saved, { slug: "kea", version: 2, url: "/docs/p1/d/kea/", warnings: [{ page: "screens/home", warning: saved.warnings[0]?.warning }] })
+        const got = yield* h.ok("get_document", { slug: "kea" })
+        assert.deepStrictEqual(
+          got.pages.map((p: { path: string; format: string }) => [p.path, p.format]),
+          [
+            ["index", "md"],
+            ["screens/home", "html"],
+            ["screens/other", "html"],
+          ],
+          "the pages it didn't give are kept",
+        )
+        assert.deepStrictEqual(
+          got.images.map((i: { name: string }) => i.name).toSorted(),
+          ["images/logo.png", "screens/images/hero.png"],
+          "and the images the mockup still names",
+        )
+        assert.strictEqual((yield* h.ok("read_page", { slug: "kea", path: "screens/home" })).content, changed)
+        // Its draft is gone with the save; the document editor's isn't its to drop.
+        const after = stateOf((yield* h.page("p1/d/kea/screens/home")).html)
+        assert.strictEqual(after.draft, null)
+        assert.strictEqual(after.design.version, 2)
+        assert.strictEqual(after.design.pages[0].content, changed)
+        assert.strictEqual(stateOf((yield* h.page("p1/d/kea/-/edit/")).html).draft.title, "Text draft")
+        assert.deepStrictEqual(yield* h.call("doc.save", save), { conflict: 2, message: "Version 2 was published while you were editing." })
+
+        // An older version can be looked at, not saved over.
+        const old = stateOf((yield* h.page("p1/d/kea/-/v/1/screens/home")).html)
+        assert.deepStrictEqual([old.design.version, old.design.canEdit, old.draft], [1, false, null])
+        assert.strictEqual(old.design.links.latest, "/docs/p1/d/kea/screens/home")
+        assert.strictEqual(old.design.pages[0].content, home)
+
+        // The document editor keeps a mockup as the page it is, and deleting the document drops both drafts.
+        const editor = stateOf((yield* h.page("p1/d/kea/-/edit/screens/home")).html).editor
+        assert.deepStrictEqual(
+          editor.pages.map((p: { format: string }) => p.format),
+          ["md", "html", "html"],
+        )
+        yield* h.call("draft.keep", { ...where, draft, design: true })
+        yield* h.call("doc.delete", where)
+        const count = yield* h.sql<{ n: number }>`SELECT COUNT(*) AS n FROM doc_drafts`
+        assert.strictEqual(count[0]?.n, 0)
       }),
     ),
   )

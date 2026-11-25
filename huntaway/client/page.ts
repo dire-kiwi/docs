@@ -2,11 +2,22 @@
 // `huntaway.call` to the plugin on its host). Forms and buttons; times in the reader's zone; links to a page's own
 // headings; and on a document, its form fields saving the user's answers as they give them (frontend/src/fields.ts, sharing its answer.ts),
 // comments on its text as the hosted site's reader has them (frontend/src/selection.ts): select text, comment in the
-// popup (saved when you click away, Esc cancels), and the comments as bubbles beside their quotes; and a bar that sends
-// the answers and comments to the task that published the document.
+// popup (saved when you click away, Esc cancels), and the comments as bubbles beside their quotes; a bar that sends
+// the answers and comments to the task that published the document; and the editor, where the user edits a document's
+// pages and saves them as a new version (frontend/src/editor.ts, previewing and saving through the plugin's calls).
 import { layoutBubbles } from "../../frontend/src/bubbles.ts"
 import { fieldValue, linkOther } from "../../frontend/src/answer.ts"
 import { CONTEXT, findQuote, indexText, offsetOf, rangeFor } from "../../frontend/src/quote.ts"
+import { mountEditor } from "../../frontend/src/editor.ts"
+import type { Draft, EditorData, PreviewResult, SaveResult } from "../../frontend/src/editor.ts"
+import editorCss from "../../frontend/src/editor.css"
+import { mountDesign } from "../../frontend/src/design/design.ts"
+import type { DesignComment, DesignData, DesignDraft, DesignSaved } from "../../frontend/src/design/design.ts"
+import { remoteFrame } from "../../frontend/src/design/frames.ts"
+import designCss from "../../frontend/src/design/design.css"
+
+/** The design editor's script for a mockup's frame (frontend/src/design/agent.ts, bundled: see scripts/build.mjs). */
+declare const DESIGN_AGENT: string
 
 interface Bridge {
   call(method: string, payload?: unknown): Promise<unknown>
@@ -17,12 +28,18 @@ interface Bridge {
 interface State {
   page?: string
   profile?: string
-  slug?: string
+  slug?: string | null
   version?: number
   path?: string
   unsent?: number
   unsent_answers?: number
   task?: { id: string; key: string; title: string } | null
+  /** The editor's page: what it opens with, and the changes it had kept and not saved. */
+  editor?: EditorData
+  /** The editor's draft, or on a mockup's page the design editor's. */
+  draft?: Draft | DesignDraft | null
+  /** A mockup's page: what the design editor opens with. */
+  design?: DesignData
 }
 declare global {
   interface Window {
@@ -561,4 +578,97 @@ function bubble(id: number, createdAt: string, s: { quote: string; prefix: strin
   b.append(quote, p, footer)
   showTimes(b)
   return b
+}
+
+// ---- the editor ---------------------------------------------------------------------------------------------------------
+
+if (state.page === "edit" && state.editor) {
+  const style = document.createElement("style")
+  style.textContent = editorCss
+  document.head.append(style)
+  const root = document.getElementById("editor")
+  const slug = state.slug ?? null
+  if (root) {
+    mountEditor(root, state.editor, {
+      async preview(page) {
+        const out = (await bridge.call("doc.preview", { profile: state.profile, slug, ...page })) as {
+          html: string | null
+          has_h1: boolean
+          warnings: string[]
+          error: string | null
+        }
+        const result: PreviewResult = { html: out.html, hasH1: out.has_h1, warnings: out.warnings, error: out.error }
+        return result
+      },
+      async save(request) {
+        return (await bridge.call("doc.save", { profile: state.profile, slug, ...request })) as SaveResult
+      },
+      go(url) {
+        bridge.navigate(url)
+      },
+      // Kept in the plugin: the board reloads its pages when any document changes.
+      drafts: {
+        load: async () => (state.draft ?? null) as Draft | null,
+        save: async (draft) => void (await bridge.call("draft.keep", { profile: state.profile, slug, draft })),
+        clear: async () => void (await bridge.call("draft.keep", { profile: state.profile, slug, draft: null })),
+      },
+    })
+  }
+}
+
+// ---- the design editor ---------------------------------------------------------------------------------------------------
+
+// A mockup's page: the hosted site's design editor (frontend/src/design/design.ts), with each mockup in a frame of its
+// own that runs the editor's agent and nothing of the mockup's (frames.ts), saving and commenting through the plugin's calls.
+if (state.page === "design" && state.design) {
+  const style = document.createElement("style")
+  style.textContent = designCss
+  document.head.append(style)
+  const root = document.getElementById("design")
+  const slug = state.slug ?? null
+  const task = state.task ?? null
+  interface Made {
+    id: number
+    page: string
+    quote: string
+    anchor: string
+    comment: string
+    created_at: string
+    sent_at: string | null
+  }
+  if (root) {
+    mountDesign(root, state.design, {
+      frame: (iframe) => remoteFrame(iframe, DESIGN_AGENT),
+      async save(request) {
+        return (await bridge.call("doc.save", {
+          profile: state.profile,
+          slug,
+          title: state.design?.title ?? "",
+          folder: null,
+          images: [],
+          design: true,
+          ...request,
+        })) as DesignSaved
+      },
+      async addComment(c) {
+        const made = (await bridge.call("comment.add", { ...where, version: state.version, prefix: "", suffix: "", ...c })) as Made
+        const comment: DesignComment = { id: made.id, page: made.page, quote: made.quote, anchor: made.anchor, comment: made.comment, user: "You", mine: true, created_at: made.created_at, sent: made.sent_at !== null }
+        return comment
+      },
+      async deleteComment(id) {
+        await bridge.call("comment.delete", { ...where, id })
+      },
+      // The comments go to the task that published the document, when the user sends them (with any unsent answers).
+      send: task === null ? undefined : { to: task.key, run: async () => void (await bridge.call("feedback.send", where)) },
+      go(url) {
+        bridge.navigate(url)
+      },
+      // Kept in the plugin: the board reloads its pages when any document changes.
+      drafts: {
+        load: async () => (state.draft ?? null) as DesignDraft | null,
+        save: async (draft) => void (await bridge.call("draft.keep", { profile: state.profile, slug, draft, design: true })),
+        clear: async () => void (await bridge.call("draft.keep", { profile: state.profile, slug, draft: null, design: true })),
+      },
+    })
+  }
 }

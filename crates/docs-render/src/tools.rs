@@ -15,8 +15,10 @@ Documents are organised in folders: when you create one, set `folder` to the nam
 optionally with a subfolder (\"docs/plans\"). Later versions stay in whatever folder the document is in; use `move_document` only when the user asks to move one. \
 Documents can also have labels, nested with '/' (\"research/ai\"): pass `labels` to `publish_document` or call `set_document_labels`, \
 and call `list_labels` to reuse the labels that already exist rather than inventing near-duplicates. \
-Pages can show images: pass them in `publish_document`'s `images` (`{ name, data }`, base64) and refer to them by name (`![chart](images/chart.png)`), \
-or inline them as `data:image/png;base64,...` URIs. PNG, JPEG, WebP, GIF (first frame) and AVIF are accepted, not SVG. \
+Pages can show images, referred to by name (`![chart](images/chart.png)`). For an image file (a screenshot, a chart), call `create_upload_url` \
+and send the file to the URL it gives (`curl --data-binary @chart.png \"<upload_url>\"`), then pass `{ name, upload: <the id it answered> }` in `publish_document`'s `images`: \
+its bytes never go through a tool call. Small images can also be passed there as `{ name, data }` (base64), or inlined in a page as `data:image/png;base64,...` URIs. \
+PNG, JPEG, WebP, GIF (first frame) and AVIF are accepted, not SVG. \
 Every image is converted to AVIF and must be at most 500 KB (512000 bytes) after conversion, so downscale big screenshots and photos; \
 the originals aren't kept. Image data doesn't count towards a page's size. \
 Plain Markdown needs no reference. For components (callouts, collapsible sections, form fields), call `list_components` \
@@ -25,7 +27,18 @@ for their names, props and examples, and use format \"mdx\". \
 fix them and publish again. Don't install or run npm packages, renderers or other tools to check pages. \
 Add form fields when you need a decision or input from the reader, \
 then call `get_feedback` later to read their answers and any text they selected and commented on. \
-Documents are private to the user you act for; use `share_document` to share one with other people (by username) or to get a share link. \
+To show a design, publish mockups: pages with format \"html\" (or a `.html` path), each a complete, self-contained HTML document \
+with its CSS in a `<style>` element and no scripts (they don't run), one page per screen, state or variant. \
+People open them in the design editor: every mockup of the document is a frame on a canvas they zoom and pan, at desktop, tablet or phone width. \
+There they inspect elements, change text, colours, type and spacing, tune the CSS custom properties the mockup defines \
+(so define the design's colours, fonts and sizes as variables on `:root`), comment on elements, and save their changes as a new version. \
+`get_feedback` gives their comments with each element's selector (`element`), and `read_page` the HTML as they last saved it. \
+People can also edit a document themselves on the site, which publishes a new version: before you publish a new version \
+of a document they may have edited, read its latest pages (`get_document`, `read_page`) so you don't undo their changes. \
+Documents are private to the user you act for, unless they belong to an organization: the user may be a member of organizations (`list_organizations`), \
+whose documents every member can read and publish to. To publish for an organization, pass its slug as `publish_document`'s `organization` when you create the document. \
+Use `share_document` to share a document with other people (by username), to get a share link, \
+or to make it public (anyone with its URL can read it, without signing in) when the user asks. \
 Always give the reader the URL returned by `publish_document`.";
 
 /// The `tools/list` result: one entry per tool.
@@ -39,6 +52,8 @@ pub fn tool_definitions() -> Value {
     optionally with subfolders separated by '/' (\"docs/plans\"). Only used when the document is created; \
     new versions keep the folder the document is in. Omit for the top level.",
     });
+    let organization =
+        |what: &str| json!({ "type": "string", "description": format!("{what} Its slug, from list_organizations.") });
     let labels = |what: &str| {
         json!({
             "type": "array",
@@ -51,12 +66,13 @@ pub fn tool_definitions() -> Value {
         {
             "name": "list_documents",
             "title": "List documents",
-            "description": "List the documents you can see (yours and those shared with you) with their folder, labels, latest version and URL. \
-    Labels are yours alone: documents shared with you are listed without their owner's labels.",
+            "description": "List the documents you can see (yours, your organizations' and those shared with you) with their organization, folder, labels, latest version and URL. \
+    Labels are seen only by the people who can edit a document: documents shared with you are listed without their labels.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "label": { "type": "string", "description": "Only your documents with this label or one nested under it (\"research\" includes \"research/ai\")." },
+                    "label": { "type": "string", "description": "Only documents you can edit with this label or one nested under it (\"research\" includes \"research/ai\")." },
+                    "organization": organization("Only this organization's documents (\"\" for only your own)."),
                 },
             },
             "annotations": { "readOnlyHint": true },
@@ -71,7 +87,7 @@ pub fn tool_definitions() -> Value {
         {
             "name": "read_page",
             "title": "Read page",
-            "description": "Read the Markdown/MDX source of one page.",
+            "description": "Read the source of one page: its Markdown or MDX, or a mockup's HTML.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "slug": slug, "path": { "type": "string", "description": "Page path, e.g. \"index\" or \"plan/phase-1\"." }, "version": version },
@@ -83,12 +99,15 @@ pub fn tool_definitions() -> Value {
             "name": "publish_document",
             "title": "Publish document",
             "description": "Create a document, or publish a new version of an existing one. Each call creates a new version. \
-    Pages are CommonMark/GFM Markdown (\"md\") or MDX (\"mdx\", which can use the components from list_components). \
+    Pages are CommonMark/GFM Markdown (\"md\"), MDX (\"mdx\", which can use the components from list_components) \
+    or mockups (\"html\": a complete, self-contained HTML document with its CSS in <style> and no scripts, which people open in the design editor \
+    to inspect, adjust and comment on; its title is its <title>). \
     Paths may be nested (\"plan/phase-1\"); \"index\" is the landing page and \"plan/index\" the page for the \"plan\" folder. \
     Pages are listed in the order given, unless their YAML frontmatter has `order: <n>`; the title comes from `title`, the frontmatter, or the first # heading. \
     Relative links between pages (\"phase-2.md\", \"../index.md\") work like links between files. \
-    Images: pass them in `images` and refer to them by name (`![chart](images/chart.png)`, resolved against the page's folder, then the document root), \
-    or inline them in a page as `data:image/png;base64,...` URIs (each is stored as an image and the URI replaced with its name). \
+    Images: pass them in `images` and refer to them by name (`![chart](images/chart.png)`, resolved against the page's folder, then the document root). \
+    Each is either an `upload` (the id of a file sent to a create_upload_url URL: best for image files, as their bytes stay out of this call) or `data` (base64). \
+    Images can also be inlined in a page as `data:image/png;base64,...` URIs (each is stored as an image and the URI replaced with its name). \
     PNG, JPEG, WebP, GIF (first frame) and AVIF are accepted; SVG isn't. Every image is converted to AVIF, \
     and the publish is rejected if one is over 500 KB (512000 bytes) after conversion: downscale or crop it. \
     The originals aren't kept. At most 200 images per version; image data doesn't count towards a page's 1,000,000-byte limit. \
@@ -98,6 +117,8 @@ pub fn tool_definitions() -> Value {
                 "properties": {
                     "slug": { "type": "string", "description": "Existing document to update, or the slug for a new one. Omit to create a new document with a slug derived from the title." },
                     "title": { "type": "string", "description": "Document title. Defaults to the title of the index (or first) page for new documents." },
+                    "organization": organization("Create the document in this organization, so all its members can read it and publish to it. \
+    Only used when the document is created; omit it for your own documents."),
                     "folder": folder,
                     "labels": labels("The document's labels. When given they replace its labels; when omitted its labels are kept. Labels belong to the document, not to a version."),
                     "message": { "type": "string", "description": "What changed in this version." },
@@ -106,9 +127,9 @@ pub fn tool_definitions() -> Value {
                         "items": {
                             "type": "object",
                             "properties": {
-                                "path": { "type": "string", "description": "Page path, e.g. \"index\", \"plan/phase-1\" or \"notes.md\"." },
-                                "content": { "type": "string", "description": "Markdown or MDX source." },
-                                "format": { "type": "string", "enum": ["md", "mdx"], "description": "Defaults to the path's extension, else mdx if the content uses <Components>, else md." },
+                                "path": { "type": "string", "description": "Page path, e.g. \"index\", \"plan/phase-1\", \"notes.md\" or \"screens/home.html\"." },
+                                "content": { "type": "string", "description": "Markdown or MDX source, or a mockup's HTML document." },
+                                "format": { "type": "string", "enum": ["md", "mdx", "html"], "description": "Defaults to the path's extension, else html if the content starts with <!doctype html> or <html>, else mdx if it uses <Components>, else md." },
                                 "title": { "type": "string", "description": "Page title for the menu." },
                             },
                             "required": ["path", "content"],
@@ -121,9 +142,10 @@ pub fn tool_definitions() -> Value {
                             "type": "object",
                             "properties": {
                                 "name": { "type": "string", "description": "Relative path pages refer to it by, e.g. \"images/chart.png\" (letters, digits, '.', '_' and '-', separated by '/')." },
-                                "data": { "type": "string", "description": "The image bytes in base64 (PNG, JPEG, WebP, GIF or AVIF; not SVG), without a data: prefix." },
+                                "upload": { "type": "string", "description": "The id of an image uploaded to a create_upload_url URL. Give this or `data`, not both." },
+                                "data": { "type": "string", "description": "The image bytes in base64 (PNG, JPEG, WebP, GIF or AVIF; not SVG), without a data: prefix. Give this or `upload`, not both." },
                             },
-                            "required": ["name", "data"],
+                            "required": ["name"],
                         },
                     },
                     "mode": { "type": "string", "enum": ["replace", "merge"], "description": "replace (default): the new version has exactly these pages, and only the images given or inlined in this publish. \
@@ -134,16 +156,33 @@ pub fn tool_definitions() -> Value {
             },
         },
         {
+            "name": "create_upload_url",
+            "title": "Create image upload URL",
+            "description": "Get a URL to upload image files to over HTTP, so that their bytes don't go through a tool call as base64: \
+    use it for screenshots, charts and any other image you have as a file. \
+    Send each file as the body of a POST (or PUT): `curl -sS --data-binary @chart.png \"<upload_url>\"`. \
+    The answer is JSON: `{ \"id\": \"<uuid>\", \"bytes\": <size of the stored AVIF> }`, or `{ \"error\": \"...\" }`. \
+    Then give the image to publish_document in `images`, as `{ \"name\": \"images/chart.png\", \"upload\": \"<id>\" }`, \
+    and show it in a page by that name (`![Chart](images/chart.png)`). \
+    The URL takes any number of images for an hour. It has a random token in it: whoever has the URL can upload as you, so don't put it in a document. \
+    An uploaded image has the formats and limits of any other (PNG, JPEG, WebP, GIF or AVIF, not SVG; converted to AVIF, at most 500 KB (512000 bytes) after conversion), \
+    and its file can be at most 32 MiB. Its id is a random UUID that only you can publish with, in any number of publishes, \
+    and it is deleted a day after it was uploaded: publish it by then. An image in a document stays as long as the document does.",
+            "inputSchema": { "type": "object", "properties": {} },
+        },
+        {
             "name": "move_document",
             "title": "Move document",
-            "description": "Move one of your documents to another folder, e.g. when the user asks you to. \
-    Folders are '/'-separated paths (\"docs/plans\"); \"\" is the top level. A folder exists while it has documents in it. \
-    Moving a document does not change its URL. Only the owner can move a document.",
+            "description": "Move a document to another folder, or to another organization, e.g. when the user asks you to. \
+    Folders are '/'-separated paths (\"docs/plans\"); \"\" is the top level. Your documents and each organization's have their own folders, \
+    and a folder exists while it has documents in it. Moving a document does not change its URL. \
+    Its owner can move it, and so can its organization's members; only its owner can take it out of an organization, to their own documents or another organization.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "slug": slug,
                     "folder": { "type": "string", "description": "The folder to move it to, e.g. \"docs/plans\", or \"\" for the top level." },
+                    "organization": organization("The organization to move it to, or \"\" for its owner's own documents. Omit to keep it where it is."),
                 },
                 "required": ["slug", "folder"],
             },
@@ -152,8 +191,8 @@ pub fn tool_definitions() -> Value {
         {
             "name": "set_document_labels",
             "title": "Set document labels",
-            "description": "Replace the labels of one of your documents (pass [] to remove them all). \
-    This doesn't publish a new version. Only the owner can label a document. Returns the labels as stored.",
+            "description": "Replace the labels of a document (pass [] to remove them all). \
+    This doesn't publish a new version. Its owner can label it, and so can its organization's members. Returns the labels as stored.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -168,14 +207,18 @@ pub fn tool_definitions() -> Value {
             "name": "list_labels",
             "title": "List labels",
             "description": "Your labels as a tree, with how many of your documents have each label or one nested under it, \
-    and how many have no labels. Reuse these labels when you label a document.",
-            "inputSchema": { "type": "object", "properties": {} },
+    and how many have no labels; or an organization's. Reuse these labels when you label a document.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "organization": organization("This organization's labels instead of yours.") },
+            },
             "annotations": { "readOnlyHint": true },
         },
         {
             "name": "get_feedback",
             "title": "Get feedback",
             "description": "Read what people answered in a document's form fields and the text they selected and commented on. \
+    A comment on a mockup is on an element: `element` is a CSS selector for it in the page's HTML, and `quote` its tag and text. \
     Use `cursor` from the result as `since` to poll for new feedback.",
             "inputSchema": {
                 "type": "object",
@@ -191,9 +234,11 @@ pub fn tool_definitions() -> Value {
         {
             "name": "share_document",
             "title": "Share document",
-            "description": "Documents are private to their owner. Share one with people by username (they see it after signing in), \
+            "description": "Documents are private to their owner, or to their organization's members. Share one with more people by username (they see it after signing in), \
     and/or turn on a share link: anyone who signs in and opens it gets access. People it is shared with can read it and leave feedback, \
-    but only the owner can publish versions. Only the owner can change sharing. Returns who it is shared with and the link.",
+    but can't publish versions or change sharing. A document can also be made public: anyone with its URL (which has a random UUID in it) \
+    can read it without signing in, but can't answer or comment. Only make a document public when the user asks. \
+    Its owner, or its organization's members, can change sharing. Returns who it is shared with, the link, and whether it is public.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -201,9 +246,19 @@ pub fn tool_definitions() -> Value {
                     "add_users": { "type": "array", "items": { "type": "string" }, "description": "Usernames (e.g. GitHub logins) to share with." },
                     "remove_users": { "type": "array", "items": { "type": "string" }, "description": "Usernames to stop sharing with." },
                     "link": { "type": "string", "enum": ["keep", "enable", "disable", "regenerate"], "description": "Share link: enable (keeps an existing link), disable, or regenerate (invalidates the old link). Default keep." },
+                    "public": { "type": "boolean", "description": "true makes it public (anyone with its URL can read it), false private again. Omit to keep it as it is." },
                 },
                 "required": ["slug"],
             },
+        },
+        {
+            "name": "list_organizations",
+            "title": "List organizations",
+            "description": "The organizations you are a member of: their slugs (to pass as `organization`), names, members and roles, \
+    and how many documents each has. Every member can read an organization's documents and publish to them; \
+    people manage organizations on the site.",
+            "inputSchema": { "type": "object", "properties": {} },
+            "annotations": { "readOnlyHint": true },
         },
         {
             "name": "list_components",

@@ -1,7 +1,7 @@
 // The pages' own styles, over the board's theme (`--color-*`, `--font-*` on the frame's :root); the rendered page's are
 // the renderer's (`@dire-kiwi/docs-render/styles.css`), its variables set from the board's.
 
-export const READER_VARS = `.docs-render.docs-render{
+export const READER_VARS = `.docs-render.docs-render,.editor,.dz{
   --bg:var(--color-bg,#0b0b0e);--bg-soft:var(--color-panel-2,#16161d);--fg:var(--color-fg,#e6e6ec);
   --fg-muted:var(--color-muted,#9a9aab);--border:var(--color-line-strong,#33333f);--accent:var(--color-accent,#7c7cf8);
   --accent-fg:#fff;--bg-mark:color-mix(in srgb,var(--accent) 30%,transparent);--success:var(--color-st-done,#34d399);
@@ -44,6 +44,7 @@ ul.tree{list-style:none;margin:0;padding:0 0 0 14px} ul.tree.top{padding:0}
 .doc-row .title{font-weight:500}
 .folder-name{font-weight:500}
 [hidden]{display:none!important}
+a.new-doc{padding:3px 10px;border-radius:6px;background:var(--color-accent,#7c7cf8);color:#fff} a.new-doc:hover{text-decoration:none}
 /* A document */
 .doc{display:grid;grid-template-columns:220px minmax(0,1fr);gap:0;min-height:100vh}
 .doc-nav{border-right:1px solid var(--color-line-strong,#33333f);padding:16px 14px;font-size:13.5px}

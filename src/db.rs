@@ -11,6 +11,8 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{FromRow, SqlitePool};
 
 use crate::labels;
+use docs_render::images;
+use docs_render::publish::UploadedImage;
 
 pub type Db = SqlitePool;
 
@@ -29,6 +31,16 @@ pub async fn connect(url: &str) -> Result<Db> {
 
 pub fn now() -> i64 {
     time::OffsetDateTime::now_utc().unix_timestamp()
+}
+
+/// A random (version 4) UUID, lowercase: what a document's URL has in it.
+pub fn new_uuid() -> String {
+    let mut b = [0u8; 16];
+    getrandom::fill(&mut b).expect("system random number generator");
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    format!("{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..])
 }
 
 /// 256 random bits, base64url encoded.
@@ -554,82 +566,172 @@ pub async fn poll_device_code(db: &Db, device_code: &str, client_id: &str) -> Re
 pub struct DocumentSummary {
     pub id: i64,
     pub slug: String,
+    /// What its URLs have in them (`/d/<uuid>/`), so they can't be guessed.
+    pub uuid: String,
+    /// Anyone with its URL can read it, without signing in.
+    pub public: bool,
     pub title: String,
     pub owner: String,
     pub owner_id: i64,
-    /// The owner's folder for it (`""` is the top level).
+    /// The organization it belongs to, if any (`organization` is its slug).
+    pub org_id: Option<i64>,
+    pub organization: Option<String>,
+    /// Its folder in its owner's documents, or in its organization's (`""` is the top level).
     pub folder: String,
-    /// Its labels, sorted, if the viewer owns it: labels are the owner's alone.
+    /// Its labels, sorted, if the viewer can edit it: labels belong to the owner, or to
+    /// the organization, and aren't shown to people it is only shared with.
     #[sqlx(skip)]
     pub labels: Vec<String>,
+    /// Whether the viewer can publish to it, label, move and share it: its owner, or
+    /// for an organization's document, the organization's members.
+    #[sqlx(skip)]
+    pub can_edit: bool,
     pub latest_version: i64,
     pub page_count: i64,
     pub updated_at: i64,
 }
 
-const DOC_SUMMARY: &str = "SELECT d.id, d.slug, d.title, u.login AS owner, d.owner_id, d.folder, d.updated_at,
+impl DocumentSummary {
+    /// Where it is filed: its owner's own documents or its organization's.
+    pub fn space(&self) -> Space {
+        match self.org_id {
+            Some(o) => Space::Org(o),
+            None => Space::User(self.owner_id),
+        }
+    }
+}
+
+/// A set of documents with their own folders and labels: a user's own documents, or
+/// an organization's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Space {
+    User(i64),
+    Org(i64),
+}
+
+impl Space {
+    /// SQL that is true for the space's documents (as `d`); bind [`Space::id`].
+    fn sql(self) -> &'static str {
+        match self {
+            Space::User(_) => "(d.org_id IS NULL AND d.owner_id = ?)",
+            Space::Org(_) => "d.org_id = ?",
+        }
+    }
+
+    fn id(self) -> i64 {
+        match self {
+            Space::User(id) | Space::Org(id) => id,
+        }
+    }
+}
+
+const DOC_SUMMARY: &str = "SELECT d.id, d.slug, d.uuid, d.public, d.title, u.login AS owner, d.owner_id, d.org_id, o.slug AS organization, d.folder, d.updated_at,
     (SELECT MAX(number) FROM versions v WHERE v.document_id = d.id) AS latest_version,
     (SELECT COUNT(*) FROM pages p JOIN versions v ON v.id = p.version_id
        WHERE v.document_id = d.id AND v.number = (SELECT MAX(number) FROM versions WHERE document_id = d.id)) AS page_count
-    FROM documents d JOIN users u ON u.id = d.owner_id";
+    FROM documents d JOIN users u ON u.id = d.owner_id LEFT JOIN organizations o ON o.id = d.org_id";
 
-/// Who can see a document: its owner and the people it is shared with.
-const CAN_VIEW: &str =
-    "(d.owner_id = ? OR EXISTS (SELECT 1 FROM document_shares s WHERE s.document_id = d.id AND s.login = ?))";
+/// Who can see a document: its owner (or for an organization's document, the
+/// organization's members) and the people it is shared with.
+/// Bind the user's id, then their lowercase login twice.
+const CAN_VIEW: &str = "((d.org_id IS NULL AND d.owner_id = ?)
+    OR d.org_id IN (SELECT org_id FROM organization_members WHERE login = ?)
+    OR EXISTS (SELECT 1 FROM document_shares s WHERE s.document_id = d.id AND s.login = ?))";
+
+fn bind_viewer<'q, O>(
+    q: sqlx::query::QueryAs<'q, sqlx::Sqlite, O, sqlx::sqlite::SqliteArguments<'q>>,
+    user: &User,
+) -> sqlx::query::QueryAs<'q, sqlx::Sqlite, O, sqlx::sqlite::SqliteArguments<'q>> {
+    let login = user.login.to_lowercase();
+    q.bind(user.id).bind(login.clone()).bind(login)
+}
 
 /// Documents `user` can see, most recently updated first.
 pub async fn list_documents(db: &Db, user: &User) -> Result<Vec<DocumentSummary>> {
-    let mut docs =
-        sqlx::query_as::<_, DocumentSummary>(&format!("{DOC_SUMMARY} WHERE {CAN_VIEW} ORDER BY d.updated_at DESC"))
-            .bind(user.id)
-            .bind(user.login.to_lowercase())
-            .fetch_all(db)
-            .await?;
-    attach_labels(db, user.id, &mut docs).await?;
+    let sql = format!("{DOC_SUMMARY} WHERE {CAN_VIEW} ORDER BY d.updated_at DESC");
+    let mut docs = bind_viewer(sqlx::query_as::<_, DocumentSummary>(&sql), user)
+        .fetch_all(db)
+        .await?;
+    finish(db, user, &mut docs).await?;
     Ok(docs)
 }
 
-/// A document, if `user` can see it.
-pub async fn get_document(db: &Db, slug: &str, user: &User) -> Result<Option<DocumentSummary>> {
-    let doc = sqlx::query_as::<_, DocumentSummary>(&format!("{DOC_SUMMARY} WHERE d.slug = ? AND {CAN_VIEW}"))
-        .bind(slug)
-        .bind(user.id)
-        .bind(user.login.to_lowercase())
+/// A document, by its UUID or slug, if `user` can see it: they own it, are in its
+/// organization, or it is shared with them. (Being public doesn't count: see [`get_public_document`].)
+pub async fn get_document(db: &Db, key: &str, user: &User) -> Result<Option<DocumentSummary>> {
+    // A slug could look like another document's UUID; the UUID wins.
+    let sql = format!("{DOC_SUMMARY} WHERE (d.uuid = ? OR d.slug = ?) AND {CAN_VIEW} ORDER BY d.uuid = ? DESC LIMIT 1");
+    let doc = bind_viewer(sqlx::query_as::<_, DocumentSummary>(&sql).bind(key).bind(key), user)
+        .bind(key)
         .fetch_optional(db)
         .await?;
     let mut docs = Vec::from_iter(doc);
-    attach_labels(db, user.id, &mut docs).await?;
+    finish(db, user, &mut docs).await?;
     Ok(docs.pop())
 }
 
-/// Fill in the labels of the documents `user_id` owns.
-async fn attach_labels(db: &Db, user_id: i64, docs: &mut [DocumentSummary]) -> Result<()> {
-    if !docs.iter().any(|d| d.owner_id == user_id) {
+/// A public document, by its UUID only, so a public document can't be found by guessing its slug.
+pub async fn get_public_document(db: &Db, uuid: &str) -> Result<Option<DocumentSummary>> {
+    Ok(
+        sqlx::query_as::<_, DocumentSummary>(&format!("{DOC_SUMMARY} WHERE d.uuid = ? AND d.public = 1"))
+            .bind(uuid)
+            .fetch_optional(db)
+            .await?,
+    )
+}
+
+/// Make a document public or private again.
+pub async fn set_public(db: &Db, document_id: i64, public: bool) -> Result<()> {
+    sqlx::query("UPDATE documents SET public = ? WHERE id = ?")
+        .bind(public)
+        .bind(document_id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+/// Work out which documents `user` can edit, and fill in their labels.
+async fn finish(db: &Db, user: &User, docs: &mut [DocumentSummary]) -> Result<()> {
+    let orgs: Vec<i64> = sqlx::query_scalar("SELECT org_id FROM organization_members WHERE login = ?")
+        .bind(user.login.to_lowercase())
+        .fetch_all(db)
+        .await?;
+    for d in docs.iter_mut() {
+        d.can_edit = match d.org_id {
+            Some(o) => orgs.contains(&o),
+            None => d.owner_id == user.id,
+        };
+    }
+    if !docs.iter().any(|d| d.can_edit) {
         return Ok(());
     }
     let rows: Vec<(i64, String)> = sqlx::query_as(
         "SELECT l.document_id, l.label FROM document_labels l JOIN documents d ON d.id = l.document_id
-         WHERE d.owner_id = ? ORDER BY l.key",
+         WHERE (d.org_id IS NULL AND d.owner_id = ?)
+            OR d.org_id IN (SELECT org_id FROM organization_members WHERE login = ?)
+         ORDER BY l.key",
     )
-    .bind(user_id)
+    .bind(user.id)
+    .bind(user.login.to_lowercase())
     .fetch_all(db)
     .await?;
     let mut by_doc: HashMap<i64, Vec<String>> = HashMap::new();
     for (id, label) in rows {
         by_doc.entry(id).or_default().push(label);
     }
-    for d in docs.iter_mut().filter(|d| d.owner_id == user_id) {
+    for d in docs.iter_mut().filter(|d| d.can_edit) {
         d.labels = by_doc.remove(&d.id).unwrap_or_default();
     }
     Ok(())
 }
 
 /// Replace a document's labels (normalised with [`labels::normalize_labels`]). Each is
-/// spelled the way the owner's label set (this document's included) already spells it. Returns the labels as stored.
+/// spelled the way its space's labels (this document's included) already spell it. Returns the labels as stored.
 async fn store_labels(conn: &mut sqlx::SqliteConnection, document_id: i64, labels: &[String]) -> Result<Vec<String>> {
     let mut known: Vec<String> = sqlx::query_scalar(
         "SELECT l.label FROM document_labels l JOIN documents d ON d.id = l.document_id
-         WHERE d.owner_id = (SELECT owner_id FROM documents WHERE id = ?)",
+         JOIN documents this ON this.id = ?
+         WHERE d.org_id IS this.org_id AND (d.org_id IS NOT NULL OR d.owner_id = this.owner_id)",
     )
     .bind(document_id)
     .fetch_all(&mut *conn)
@@ -654,13 +756,14 @@ async fn store_labels(conn: &mut sqlx::SqliteConnection, document_id: i64, label
     Ok(stored)
 }
 
-/// Every label `user_id` uses, with the labels above them (`research` for `research/ai`),
-/// sorted ignoring case.
-pub async fn owner_labels(db: &Db, user_id: i64) -> Result<Vec<String>> {
-    let used: Vec<String> = sqlx::query_scalar(
-        "SELECT l.label FROM document_labels l JOIN documents d ON d.id = l.document_id WHERE d.owner_id = ?",
-    )
-    .bind(user_id)
+/// Every label a space's documents use, with the labels above them (`research` for
+/// `research/ai`), sorted ignoring case.
+pub async fn space_labels(db: &Db, space: Space) -> Result<Vec<String>> {
+    let used: Vec<String> = sqlx::query_scalar(&format!(
+        "SELECT l.label FROM document_labels l JOIN documents d ON d.id = l.document_id WHERE {}",
+        space.sql()
+    ))
+    .bind(space.id())
     .fetch_all(db)
     .await?;
     let mut all: std::collections::BTreeMap<String, String> = Default::default();
@@ -673,36 +776,27 @@ pub async fn owner_labels(db: &Db, user_id: i64) -> Result<Vec<String>> {
     Ok(all.into_values().collect())
 }
 
-/// Replace the labels of one of `user_id`'s documents. `None` if they don't own it.
-pub async fn set_labels(db: &Db, user_id: i64, slug: &str, labels: &[String]) -> Result<Option<Vec<String>>> {
+/// Replace a document's labels (the caller checks the user can edit it).
+pub async fn set_labels(db: &Db, document_id: i64, labels: &[String]) -> Result<Vec<String>> {
     let mut tx = db.begin().await?;
-    let id: Option<i64> = sqlx::query_scalar("SELECT id FROM documents WHERE slug = ? AND owner_id = ?")
-        .bind(slug)
-        .bind(user_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-    let Some(id) = id else { return Ok(None) };
-    let stored = store_labels(&mut tx, id, labels).await?;
+    let stored = store_labels(&mut tx, document_id, labels).await?;
     tx.commit().await?;
-    Ok(Some(stored))
+    Ok(stored)
 }
 
 /// Whether `user` can see the document a version belongs to.
 pub async fn can_view_version(db: &Db, version_id: i64, user: &User) -> Result<bool> {
-    let row = sqlx::query(&format!(
-        "SELECT 1 FROM versions v JOIN documents d ON d.id = v.document_id WHERE v.id = ? AND {CAN_VIEW}"
-    ))
-    .bind(version_id)
-    .bind(user.id)
-    .bind(user.login.to_lowercase())
-    .fetch_optional(db)
-    .await?;
+    let sql =
+        format!("SELECT 1 FROM versions v JOIN documents d ON d.id = v.document_id WHERE v.id = ? AND {CAN_VIEW}");
+    let row: Option<(i64,)> = bind_viewer(sqlx::query_as(&sql).bind(version_id), user)
+        .fetch_optional(db)
+        .await?;
     Ok(row.is_some())
 }
 
-/// Whether any document, visible or not, has this slug.
+/// Whether any document, visible or not, has this slug (or UUID).
 pub async fn slug_exists(db: &Db, slug: &str) -> Result<bool> {
-    Ok(sqlx::query("SELECT 1 FROM documents WHERE slug = ?")
+    Ok(sqlx::query("SELECT 1 FROM documents WHERE slug = ?1 OR uuid = ?1")
         .bind(slug)
         .fetch_optional(db)
         .await?
@@ -772,18 +866,18 @@ pub async fn set_share_token(db: &Db, document_id: i64, enabled: bool) -> Result
     Ok(token)
 }
 
-/// Opening a share link adds the user to the document's shares. Returns the slug.
+/// Opening a share link adds the user to the document's shares. Returns its UUID.
 pub async fn accept_share_link(db: &Db, token: &str, user: &User) -> Result<Option<String>> {
     let row: Option<(i64, String, i64)> =
-        sqlx::query_as("SELECT id, slug, owner_id FROM documents WHERE share_token = ?")
+        sqlx::query_as("SELECT id, uuid, owner_id FROM documents WHERE share_token = ?")
             .bind(token)
             .fetch_optional(db)
             .await?;
-    let Some((id, slug, owner)) = row else { return Ok(None) };
+    let Some((id, uuid, owner)) = row else { return Ok(None) };
     if owner != user.id {
         add_share(db, id, &user.login.to_lowercase()).await?;
     }
-    Ok(Some(slug))
+    Ok(Some(uuid))
 }
 
 #[derive(Debug, Clone, FromRow, Serialize)]
@@ -880,9 +974,12 @@ pub struct NewImage {
 }
 
 pub struct Publish<'a> {
-    pub user_id: i64,
+    pub user: &'a User,
+    /// The organization a new document goes in (the caller checks the user is a member);
+    /// `None` for the user's own documents. Used only when the document is created.
+    pub org_id: Option<i64>,
     /// Document to add a version to; created when it does not exist yet.
-    /// When `None`, a new document is created with a slug derived from the title.
+    /// Its slug or UUID. When `None`, a new document is created with a slug derived from the title.
     pub slug: Option<&'a str>,
     pub title: Option<&'a str>,
     /// Normalised folder, used only when the document is created.
@@ -898,6 +995,8 @@ pub struct Publish<'a> {
     pub images: Vec<NewImage>,
     /// Images of the previous version to keep, `(name, sha256)`.
     pub kept_images: Vec<(String, String)>,
+    /// Images uploaded on their own before this publish (the user's own uploads).
+    pub uploaded: Vec<UploadedImage>,
     /// The version number `kept_images` (and the pages a merge keeps) were worked out from:
     /// the publish fails if another version was published since.
     pub based_on: Option<i64>,
@@ -908,19 +1007,28 @@ pub async fn publish(db: &Db, p: Publish<'_>) -> Result<(String, i64)> {
     let mut tx = db.begin().await?;
     let ts = now();
     let wanted = p.slug.map(doc_slug);
-    let existing: Option<(i64, i64, String)> = match &wanted {
+    let existing: Option<(i64, i64, String, bool)> = match &wanted {
         Some(slug) => {
-            sqlx::query_as("SELECT id, owner_id, slug FROM documents WHERE slug = ?")
-                .bind(slug)
-                .fetch_optional(&mut *tx)
-                .await?
+            // Agents may name a document by the UUID in its URL.
+            sqlx::query_as(
+                "SELECT d.id, d.owner_id, d.slug, CASE WHEN d.org_id IS NULL THEN d.owner_id = ?1
+                   ELSE EXISTS (SELECT 1 FROM organization_members m WHERE m.org_id = d.org_id AND m.login = ?2) END
+                 FROM documents d WHERE d.uuid = ?3 OR d.slug = ?3 ORDER BY d.uuid = ?3 DESC LIMIT 1",
+            )
+            .bind(p.user.id)
+            .bind(p.user.login.to_lowercase())
+            .bind(slug)
+            .fetch_optional(&mut *tx)
+            .await?
         }
         None => None,
     };
-    let (doc_id, slug) = match existing {
-        Some((id, owner, slug)) => {
-            if owner != p.user_id {
-                bail!("the slug {slug:?} is taken by another user's document; choose a different slug, or omit it");
+    let (doc_id, owner_id, slug) = match existing {
+        Some((id, owner, slug, can_edit)) => {
+            if !can_edit {
+                bail!(
+                    "the slug {slug:?} is taken by a document you can't publish to; choose a different slug, or omit it"
+                );
             }
             if let Some(title) = p.title {
                 sqlx::query("UPDATE documents SET title = ? WHERE id = ?")
@@ -929,7 +1037,7 @@ pub async fn publish(db: &Db, p: Publish<'_>) -> Result<(String, i64)> {
                     .execute(&mut *tx)
                     .await?;
             }
-            (id, slug)
+            (id, owner, slug)
         }
         None => {
             let title = p.title.unwrap_or("Untitled");
@@ -946,17 +1054,19 @@ pub async fn publish(db: &Db, p: Publish<'_>) -> Result<(String, i64)> {
                 slug = format!("{base}-{n}");
             }
             let (id,): (i64,) = sqlx::query_as(
-                "INSERT INTO documents (slug, title, folder, owner_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
+                "INSERT INTO documents (slug, uuid, title, folder, owner_id, org_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
             )
             .bind(&slug)
+            .bind(new_uuid())
             .bind(title)
             .bind(p.folder)
-            .bind(p.user_id)
+            .bind(p.user.id)
+            .bind(p.org_id)
             .bind(ts)
             .bind(ts)
             .fetch_one(&mut *tx)
             .await?;
-            (id, slug)
+            (id, p.user.id, slug)
         }
     };
 
@@ -975,7 +1085,7 @@ pub async fn publish(db: &Db, p: Publish<'_>) -> Result<(String, i64)> {
     .bind(doc_id)
     .bind(number)
     .bind(p.message)
-    .bind(p.user_id)
+    .bind(p.user.id)
     .bind(ts)
     .fetch_one(&mut *tx)
     .await?;
@@ -1022,18 +1132,45 @@ pub async fn publish(db: &Db, p: Publish<'_>) -> Result<(String, i64)> {
     if count == 0 {
         bail!("a version needs at least one page");
     }
+    // Images are stored with the document's owner, whoever publishes.
     for image in &p.images {
         sqlx::query(
             "INSERT INTO images (owner_id, sha256, data, created_at) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
         )
-        .bind(p.user_id)
+        .bind(owner_id)
         .bind(&image.sha256)
         .bind(&image.data)
         .bind(ts)
         .execute(&mut *tx)
         .await?;
     }
+    // The user's uploads: each AVIF is copied to the document's owner, if that is someone else.
+    let mut uploaded = Vec::new();
+    for u in &p.uploaded {
+        let found: Option<(String,)> =
+            sqlx::query_as("SELECT sha256 FROM uploads WHERE uuid = ? AND owner_id = ? AND expires_at > ?")
+                .bind(&u.upload)
+                .bind(p.user.id)
+                .bind(ts)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let Some((sha256,)) = found else {
+            bail!(images::upload_missing_error(&u.label, &u.upload));
+        };
+        sqlx::query(
+            "INSERT INTO images (owner_id, sha256, data, created_at)
+             SELECT ?, sha256, data, ? FROM images WHERE owner_id = ? AND sha256 = ? ON CONFLICT DO NOTHING",
+        )
+        .bind(owner_id)
+        .bind(ts)
+        .bind(p.user.id)
+        .bind(&sha256)
+        .execute(&mut *tx)
+        .await?;
+        uploaded.push((u.name.clone(), sha256));
+    }
     let names = p.images.iter().map(|i| (&i.name, &i.sha256));
+    let names = names.chain(uploaded.iter().map(|(n, s)| (n, s)));
     for (name, sha256) in names.chain(p.kept_images.iter().map(|(n, s)| (n, s))) {
         sqlx::query("INSERT INTO version_images (version_id, name, sha256) VALUES (?, ?, ?) ON CONFLICT DO NOTHING")
             .bind(version_id)
@@ -1088,6 +1225,109 @@ pub async fn document_image(db: &Db, document_id: i64, sha256: &str) -> Result<O
     .await?)
 }
 
+// ---------- images uploaded on their own ----------
+
+/// A new upload URL's token for the user, good for [`images::UPLOAD_URL_SECONDS`].
+pub async fn create_upload_url(db: &Db, user_id: i64) -> Result<String> {
+    let token = random_token();
+    sqlx::query("INSERT INTO upload_urls (hash, user_id, expires_at) VALUES (?, ?, ?)")
+        .bind(hash_token(&token))
+        .bind(user_id)
+        .bind(now() + images::UPLOAD_URL_SECONDS)
+        .execute(db)
+        .await?;
+    Ok(token)
+}
+
+/// Whose uploads an upload URL's token takes, while it lasts.
+pub async fn upload_url_user(db: &Db, token: &str) -> Result<Option<User>> {
+    Ok(sqlx::query_as::<_, User>(
+        "SELECT u.id, u.login, u.name, u.avatar_url FROM upload_urls t JOIN users u ON u.id = t.user_id
+         WHERE t.hash = ? AND t.expires_at > ?",
+    )
+    .bind(hash_token(token))
+    .bind(now())
+    .fetch_optional(db)
+    .await?)
+}
+
+/// Keep an uploaded image (already AVIF) for its uploader to publish. Returns its id, a
+/// random UUID, or `Err` with the message when the uploader has too many waiting.
+pub async fn add_upload(
+    db: &Db,
+    owner_id: i64,
+    sha256: &str,
+    avif: &[u8],
+) -> Result<std::result::Result<String, String>> {
+    let mut tx = db.begin().await?;
+    let ts = now();
+    let (waiting,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM uploads WHERE owner_id = ? AND expires_at > ?")
+        .bind(owner_id)
+        .bind(ts)
+        .fetch_one(&mut *tx)
+        .await?;
+    if waiting >= images::MAX_WAITING_UPLOADS as i64 {
+        return Ok(Err(images::too_many_uploads_error()));
+    }
+    sqlx::query("INSERT INTO images (owner_id, sha256, data, created_at) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING")
+        .bind(owner_id)
+        .bind(sha256)
+        .bind(avif)
+        .bind(ts)
+        .execute(&mut *tx)
+        .await?;
+    let uuid = new_uuid();
+    sqlx::query("INSERT INTO uploads (uuid, owner_id, sha256, created_at, expires_at) VALUES (?, ?, ?, ?, ?)")
+        .bind(&uuid)
+        .bind(owner_id)
+        .bind(sha256)
+        .bind(ts)
+        .bind(ts + images::UPLOAD_KEPT_SECONDS)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(Ok(uuid))
+}
+
+/// Delete the upload URLs and uploads that have expired, and the images only they had.
+pub async fn purge_uploads(db: &Db) -> Result<u64> {
+    let mut tx = db.begin().await?;
+    let ts = now();
+    sqlx::query("DELETE FROM upload_urls WHERE expires_at <= ?")
+        .bind(ts)
+        .execute(&mut *tx)
+        .await?;
+    let gone: Vec<(i64,)> = sqlx::query_as("DELETE FROM uploads WHERE expires_at <= ? RETURNING owner_id")
+        .bind(ts)
+        .fetch_all(&mut *tx)
+        .await?;
+    let mut owners: Vec<i64> = gone.iter().map(|(o,)| *o).collect();
+    owners.sort_unstable();
+    owners.dedup();
+    for owner in owners {
+        delete_unused_images(&mut tx, owner).await?;
+    }
+    tx.commit().await?;
+    Ok(gone.len() as u64)
+}
+
+/// Delete the owner's images that nothing has any more: no version of their documents,
+/// and no upload still waiting.
+async fn delete_unused_images(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, owner_id: i64) -> Result<()> {
+    sqlx::query(
+        "DELETE FROM images WHERE owner_id = ? AND NOT EXISTS (
+           SELECT 1 FROM version_images vi JOIN versions v ON v.id = vi.version_id
+           JOIN documents d ON d.id = v.document_id
+           WHERE d.owner_id = images.owner_id AND vi.sha256 = images.sha256)
+         AND NOT EXISTS (
+           SELECT 1 FROM uploads u WHERE u.owner_id = images.owner_id AND u.sha256 = images.sha256)",
+    )
+    .bind(owner_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 pub fn doc_slug(title: &str) -> String {
     let mut s = String::new();
     for c in title.chars().flat_map(char::to_lowercase) {
@@ -1104,29 +1344,31 @@ pub fn doc_slug(title: &str) -> String {
     if s.is_empty() { "doc".into() } else { s }
 }
 
-/// Move one of `user_id`'s documents to a (normalised) folder. False if they don't own it.
-pub async fn move_document(db: &Db, user_id: i64, slug: &str, folder: &str) -> Result<bool> {
-    let res = sqlx::query("UPDATE documents SET folder = ? WHERE slug = ? AND owner_id = ?")
+/// File a document in a (normalised) folder of an organization (`Some`) or of its
+/// owner's own documents (`None`). The caller checks the user may.
+pub async fn move_document(db: &Db, document_id: i64, org_id: Option<i64>, folder: &str) -> Result<()> {
+    sqlx::query("UPDATE documents SET folder = ?, org_id = ? WHERE id = ?")
         .bind(folder)
-        .bind(slug)
-        .bind(user_id)
+        .bind(org_id)
+        .bind(document_id)
         .execute(db)
         .await?;
-    Ok(res.rows_affected() > 0)
+    Ok(())
 }
 
-/// Rename (or move) one of `user_id`'s folders: `from` and every folder under it get
-/// the prefix `to` instead. Both are normalised; `from` can't be the top level.
-/// Returns how many documents moved, or `Err` with a message for the user.
-pub async fn rename_folder(db: &Db, user_id: i64, from: &str, to: &str) -> Result<std::result::Result<u64, String>> {
+/// Rename (or move) a folder of a space: `from` and every folder under it get the prefix
+/// `to` instead. Both are normalised; `from` can't be the top level. The caller checks
+/// the user can edit the space. Returns how many documents moved, or `Err` with a message for the user.
+pub async fn rename_folder(db: &Db, space: Space, from: &str, to: &str) -> Result<std::result::Result<u64, String>> {
     if from.is_empty() {
         return Ok(Err("choose a folder to rename".into()));
     }
     let mut tx = db.begin().await?;
-    let docs: Vec<(i64, String)> = sqlx::query_as(
-        "SELECT id, folder FROM documents WHERE owner_id = ? AND (folder = ? OR substr(folder, 1, length(?) + 1) = ? || '/')",
-    )
-    .bind(user_id)
+    let docs: Vec<(i64, String)> = sqlx::query_as(&format!(
+        "SELECT d.id, d.folder FROM documents d WHERE {} AND (d.folder = ? OR substr(d.folder, 1, length(?) + 1) = ? || '/')",
+        space.sql()
+    ))
+    .bind(space.id())
     .bind(from)
     .bind(from)
     .bind(from)
@@ -1159,18 +1401,186 @@ pub async fn delete_document(db: &Db, user_id: i64, slug: &str) -> Result<bool> 
         .bind(user_id)
         .execute(&mut *tx)
         .await?;
-    // Images are kept while any version of the owner's documents has them.
-    sqlx::query(
-        "DELETE FROM images WHERE owner_id = ? AND NOT EXISTS (
-           SELECT 1 FROM version_images vi JOIN versions v ON v.id = vi.version_id
-           JOIN documents d ON d.id = v.document_id
-           WHERE d.owner_id = images.owner_id AND vi.sha256 = images.sha256)",
-    )
-    .bind(user_id)
-    .execute(&mut *tx)
-    .await?;
+    // Images are kept while any version of the owner's documents has them (or an upload waits).
+    delete_unused_images(&mut tx, user_id).await?;
     tx.commit().await?;
     Ok(res.rows_affected() > 0)
+}
+
+// ---------- organizations ----------
+
+/// An organization, as one of its members sees it.
+#[derive(Debug, Clone, FromRow, Serialize)]
+pub struct Organization {
+    pub id: i64,
+    pub slug: String,
+    pub name: String,
+    /// The member's role: `owner` or `member`.
+    pub role: String,
+    /// How many documents it has.
+    pub documents: i64,
+    pub created_at: i64,
+}
+
+impl Organization {
+    pub fn is_owner(&self) -> bool {
+        self.role == "owner"
+    }
+}
+
+#[derive(Debug, Clone, FromRow, Serialize)]
+pub struct Member {
+    pub login: String,
+    pub role: String,
+    pub created_at: i64,
+}
+
+pub const ORG_ROLES: &[&str] = &["owner", "member"];
+
+const ORGANIZATION: &str = "SELECT o.id, o.slug, o.name, m.role, o.created_at,
+    (SELECT COUNT(*) FROM documents d WHERE d.org_id = o.id) AS documents
+    FROM organizations o JOIN organization_members m ON m.org_id = o.id AND m.login = ?";
+
+/// The organizations `user` is a member of, by name.
+pub async fn user_organizations(db: &Db, user: &User) -> Result<Vec<Organization>> {
+    Ok(
+        sqlx::query_as::<_, Organization>(&format!("{ORGANIZATION} ORDER BY lower(o.name), o.slug"))
+            .bind(user.login.to_lowercase())
+            .fetch_all(db)
+            .await?,
+    )
+}
+
+/// An organization by slug, if `user` is a member.
+pub async fn organization(db: &Db, slug: &str, user: &User) -> Result<Option<Organization>> {
+    Ok(
+        sqlx::query_as::<_, Organization>(&format!("{ORGANIZATION} WHERE o.slug = ?"))
+            .bind(user.login.to_lowercase())
+            .bind(slug.trim().to_lowercase())
+            .fetch_optional(db)
+            .await?,
+    )
+}
+
+/// An organization's slug: like a username, lowercase letters, digits, '-', '_' and '.'.
+pub fn normalize_org_slug(slug: &str) -> std::result::Result<String, String> {
+    match normalize_login(slug) {
+        Some(s) if s.len() <= 60 => Ok(s),
+        _ => Err(format!(
+            "{slug:?} isn't a valid organization name for URLs: use up to 60 letters, digits, '-', '_' and '.'"
+        )),
+    }
+}
+
+/// Create an organization with `user` as its owner. `Err` with a message if the slug is taken.
+pub async fn create_organization(
+    db: &Db,
+    slug: &str,
+    name: &str,
+    user: &User,
+) -> Result<std::result::Result<Organization, String>> {
+    let mut tx = db.begin().await?;
+    let ts = now();
+    let id: Option<i64> = sqlx::query_scalar(
+        "INSERT INTO organizations (slug, name, created_at) VALUES (?, ?, ?) ON CONFLICT (slug) DO NOTHING RETURNING id",
+    )
+    .bind(slug)
+    .bind(name)
+    .bind(ts)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(id) = id else {
+        return Ok(Err(format!("there is already an organization called {slug:?}")));
+    };
+    sqlx::query("INSERT INTO organization_members (org_id, login, role, created_at) VALUES (?, ?, 'owner', ?)")
+        .bind(id)
+        .bind(user.login.to_lowercase())
+        .bind(ts)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(Ok(Organization {
+        id,
+        slug: slug.to_string(),
+        name: name.to_string(),
+        role: "owner".into(),
+        documents: 0,
+        created_at: ts,
+    }))
+}
+
+pub async fn org_members(db: &Db, org_id: i64) -> Result<Vec<Member>> {
+    Ok(sqlx::query_as::<_, Member>(
+        "SELECT login, role, created_at FROM organization_members WHERE org_id = ?
+         ORDER BY role = 'member', login",
+    )
+    .bind(org_id)
+    .fetch_all(db)
+    .await?)
+}
+
+/// Add a member (a normalised login) with a role, or change their role. `Err` with a
+/// message if that would leave the organization without an owner.
+pub async fn set_member(db: &Db, org_id: i64, login: &str, role: &str) -> Result<std::result::Result<(), String>> {
+    let mut tx = db.begin().await?;
+    sqlx::query(
+        "INSERT INTO organization_members (org_id, login, role, created_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT (org_id, login) DO UPDATE SET role = excluded.role",
+    )
+    .bind(org_id)
+    .bind(login)
+    .bind(role)
+    .bind(now())
+    .execute(&mut *tx)
+    .await?;
+    if !has_owner(&mut tx, org_id).await? {
+        return Ok(Err("an organization needs at least one owner".into()));
+    }
+    tx.commit().await?;
+    Ok(Ok(()))
+}
+
+/// Remove a member. `Err` with a message if they are its last owner.
+pub async fn remove_member(db: &Db, org_id: i64, login: &str) -> Result<std::result::Result<(), String>> {
+    let mut tx = db.begin().await?;
+    sqlx::query("DELETE FROM organization_members WHERE org_id = ? AND login = ?")
+        .bind(org_id)
+        .bind(login)
+        .execute(&mut *tx)
+        .await?;
+    if !has_owner(&mut tx, org_id).await? {
+        return Ok(Err(
+            "an organization needs at least one owner: make someone else an owner first, or delete the organization"
+                .into(),
+        ));
+    }
+    tx.commit().await?;
+    Ok(Ok(()))
+}
+
+async fn has_owner(conn: &mut sqlx::SqliteConnection, org_id: i64) -> Result<bool> {
+    Ok(
+        sqlx::query("SELECT 1 FROM organization_members WHERE org_id = ? AND role = 'owner'")
+            .bind(org_id)
+            .fetch_optional(&mut *conn)
+            .await?
+            .is_some(),
+    )
+}
+
+/// Delete an organization that has no documents. `Err` with a message if it has some.
+pub async fn delete_organization(db: &Db, org_id: i64) -> Result<std::result::Result<(), String>> {
+    let res = sqlx::query(
+        "DELETE FROM organizations WHERE id = ? AND NOT EXISTS (SELECT 1 FROM documents WHERE org_id = organizations.id)",
+    )
+    .bind(org_id)
+    .execute(db)
+    .await?;
+    Ok(if res.rows_affected() > 0 {
+        Ok(())
+    } else {
+        Err("move or delete the organization's documents first".into())
+    })
 }
 
 // ---------- feedback ----------
@@ -1224,13 +1634,15 @@ pub struct NewSelection<'a> {
     pub quote: &'a str,
     pub prefix: &'a str,
     pub suffix: &'a str,
+    /// For a comment on a mockup's element: a CSS selector for it.
+    pub anchor: &'a str,
     pub comment: &'a str,
 }
 
 pub async fn add_selection(db: &Db, s: NewSelection<'_>) -> Result<i64> {
     let (id,): (i64,) = sqlx::query_as(
-        "INSERT INTO selections (version_id, page_path, user_id, quote, prefix, suffix, comment, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+        "INSERT INTO selections (version_id, page_path, user_id, quote, prefix, suffix, anchor, comment, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
     )
     .bind(s.version_id)
     .bind(s.page_path)
@@ -1238,6 +1650,7 @@ pub async fn add_selection(db: &Db, s: NewSelection<'_>) -> Result<i64> {
     .bind(s.quote)
     .bind(s.prefix)
     .bind(s.suffix)
+    .bind(s.anchor)
     .bind(s.comment)
     .bind(now())
     .fetch_one(db)
@@ -1265,6 +1678,8 @@ pub struct Selection {
     pub quote: String,
     pub prefix: String,
     pub suffix: String,
+    /// A CSS selector for the element of a mockup the comment is on ("" for one on text).
+    pub anchor: String,
     pub comment: String,
     pub created_at: i64,
 }
@@ -1289,12 +1704,25 @@ impl Response {
 pub async fn page_selections(db: &Db, version_id: i64, page_path: &str) -> Result<Vec<Selection>> {
     Ok(sqlx::query_as::<_, Selection>(
         "SELECT s.id, v.number AS version, s.page_path AS page, u.login AS user, s.user_id, s.quote, s.prefix,
-                s.suffix, s.comment, s.created_at
+                s.suffix, s.anchor, s.comment, s.created_at
          FROM selections s JOIN users u ON u.id = s.user_id JOIN versions v ON v.id = s.version_id
          WHERE s.version_id = ? AND s.page_path = ? ORDER BY s.created_at",
     )
     .bind(version_id)
     .bind(page_path)
+    .fetch_all(db)
+    .await?)
+}
+
+/// The comments on every page of a version, oldest first.
+pub async fn version_selections(db: &Db, version_id: i64) -> Result<Vec<Selection>> {
+    Ok(sqlx::query_as::<_, Selection>(
+        "SELECT s.id, v.number AS version, s.page_path AS page, u.login AS user, s.user_id, s.quote, s.prefix,
+                s.suffix, s.anchor, s.comment, s.created_at
+         FROM selections s JOIN users u ON u.id = s.user_id JOIN versions v ON v.id = s.version_id
+         WHERE s.version_id = ? ORDER BY s.created_at, s.id",
+    )
+    .bind(version_id)
     .fetch_all(db)
     .await?)
 }
@@ -1321,7 +1749,7 @@ pub async fn feedback(
     .await?;
     let selections = sqlx::query_as::<_, Selection>(
         "SELECT s.id, v.number AS version, s.page_path AS page, u.login AS user, s.user_id, s.quote, s.prefix,
-                s.suffix, s.comment, s.created_at
+                s.suffix, s.anchor, s.comment, s.created_at
          FROM selections s JOIN versions v ON v.id = s.version_id JOIN users u ON u.id = s.user_id
          WHERE v.document_id = ? AND (? = -1 OR v.number = ?) AND s.created_at >= ?
          ORDER BY v.number, s.page_path, s.created_at",
