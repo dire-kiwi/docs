@@ -239,7 +239,7 @@ async fn publish_view_and_collect_feedback() {
                 "pages": [
                     { "path": "index.mdx", "content": PLAN },
                     { "path": "plan/phase-1", "content": "# Phase 1\n\nBack to [the plan](../index.md).\n\n<TextArea name=\"risks\" label=\"Risks?\" />" },
-                    { "path": "plan/phase-2.md", "content": "# Phase 2\n\n- [ ] later" },
+                    { "path": "plan/phase-2.md", "content": "# Phase 2\n\n## What moves\n\n- [ ] later" },
                 ],
             }),
         )
@@ -262,12 +262,34 @@ async fn publish_view_and_collect_feedback() {
     assert!(page.body.contains("data-field=\"window\""));
     assert!(!page.body.contains("alert(\"xss\")"));
     assert!(page.body.contains(">Phase 2</a>"), "nested menu");
+    // The menu says who published it, and there is no column on the right.
+    let menu_of =
+        |body: &str| body[body.find("<nav class=\"doc-nav\"").unwrap()..body.find("<main").unwrap()].to_string();
+    let menu = menu_of(&page.body);
+    assert!(menu.contains("Published by alice"), "{menu}");
+    assert!(
+        !menu.contains("On this page"),
+        "a page with no headings has none in the menu: {menu}"
+    );
+    assert!(!page.body.contains("doc-aside"));
     let csrf = csrf_of(&page.body);
     let version_id: i64 = attr_after(&page.body, "<article", "data-version-id").parse().unwrap();
 
     // Sub page, and unauthenticated access redirects to login.
     let sub = t.get(&format!("{d}/plan/phase-1"), &cookie).await;
     assert!(sub.body.contains(&format!("href=\"{d}/\"")));
+    // The headings of the page being read are under it in the menu, and only there.
+    let menu = menu_of(&t.get(&format!("{d}/plan/phase-2"), &cookie).await.body);
+    let (before, after) = menu
+        .split_once("aria-current=\"page\">Phase 2</a>")
+        .expect("the page being read");
+    assert!(
+        after.starts_with(
+            "<ul class=\"toc\" aria-label=\"On this page\"><li class=\"toc-2\"><a href=\"#what-moves\">What moves</a>"
+        ),
+        "{after}"
+    );
+    assert!(!before.contains("class=\"toc\""), "{before}");
     let anon = t.get(&format!("{d}/"), "").await;
     assert_eq!(anon.status, StatusCode::SEE_OTHER);
     assert_eq!(

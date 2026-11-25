@@ -537,13 +537,12 @@ details.connect summary {
 
 .doc-layout {
   display: grid;
-  grid-template-columns: clamp(220px, 17vw, 320px) minmax(0, 1fr) clamp(190px, 14vw, 270px);
+  grid-template-columns: clamp(230px, 19vw, 340px) minmax(0, 1fr);
   gap: clamp(24px, 2.5vw, 44px);
   padding: 0 var(--gutter);
 }
 
-.doc-nav,
-.doc-aside {
+.doc-nav {
   position: sticky;
   top: var(--topbar);
   align-self: start;
@@ -657,48 +656,30 @@ details.connect summary {
   box-shadow: var(--sheet);
 }
 
-.toc h2 {
-  font-family: var(--mono);
-  font-size: 0.72em;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.12em;
-  color: var(--fg-muted);
-  margin: 0 0 10px;
+/* The headings of the page you're on, under its label in the menu. */
+.doc-nav ul.toc {
+  margin: 6px 0 10px 10px;
 }
 
-.toc ul {
-  list-style: none;
-  padding: 0;
-  margin: 0 0 26px;
-  border-left: 1.5px solid var(--border);
-}
-
-.toc li {
+.doc-nav .toc a {
   margin: 0;
-}
-
-.toc a {
-  display: block;
-  margin-left: -1.5px;
-  padding: 3px 0 3px 12px;
-  border-left: 1.5px solid transparent;
+  padding: 3px 10px;
   color: var(--fg-muted);
-  text-decoration: none;
+  font-size: 0.94em;
   line-height: 1.35;
 }
 
-.toc .toc-3 a {
-  padding-left: 24px;
-  font-size: 0.94em;
+.doc-nav .toc .toc-3 a {
+  padding-left: 22px;
+  font-size: 0.88em;
 }
 
-.toc a:hover {
+.doc-nav .toc a:hover {
   color: var(--fg);
-  border-left-color: var(--accent);
 }
 
-.doc-aside > p {
+.doc-published {
+  margin: 14px 0 0;
   padding-top: 12px;
   border-top: 1.5px dashed var(--border);
 }
@@ -739,9 +720,6 @@ details.connect summary {
 @media (max-width: 1100px) {
   .doc-layout {
     grid-template-columns: 220px minmax(0, 1fr);
-  }
-  .doc-aside {
-    display: none;
   }
 }
 
@@ -987,16 +965,6 @@ details.connect summary {
 
 .comment-bubble.orphaned blockquote {
   text-decoration: line-through dotted;
-}
-
-/* Room for the notes: no contents column when it's tight. */
-@media (min-width: 1101px) and (max-width: 1500px) {
-  .doc-layout:has(.doc-body.has-comments) {
-    grid-template-columns: 250px minmax(0, 1fr);
-  }
-  .doc-layout:has(.doc-body.has-comments) .doc-aside {
-    display: none;
-  }
 }
 
 /* Too narrow for a margin: the comments go under the page, in page order. */
