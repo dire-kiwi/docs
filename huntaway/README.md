@@ -59,7 +59,7 @@ Each release attaches the package to a GitHub release:
 
 ```sh
 cd apps/server
-pnpm add https://github.com/dire-kiwi/docs/releases/download/huntaway-v0.3.0/dire-kiwi-docs-huntaway-0.3.0.tgz
+pnpm add https://github.com/dire-kiwi/docs/releases/download/huntaway-v0.4.0/dire-kiwi-docs-huntaway-0.4.0.tgz
 ```
 
 then list it in `apps/server/src/plugins/installed.ts`:
