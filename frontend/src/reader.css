@@ -714,7 +714,6 @@ tbody tr:last-child > * {
   outline: 1.5px solid var(--c);
   outline-offset: -6px;
   padding: 11px 20px 10px;
-  transform: rotate(-2.5deg);
 }
 
 .approval .option:has(input:focus-visible) {
