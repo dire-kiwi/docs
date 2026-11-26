@@ -76,6 +76,31 @@ pre {
   tab-size: 2;
 }
 
+/* A Mermaid code block drawn as a diagram (diagrams.ts): its source stays in the page, hidden. */
+pre[hidden] {
+  display: none;
+}
+
+.mermaid-diagram {
+  margin: 1.25em 0;
+  overflow-x: auto;
+  text-align: center;
+}
+
+.mermaid-diagram svg {
+  max-width: 100%;
+  height: auto;
+}
+
+/* Why a diagram couldn't be drawn, under its code. */
+.mermaid-error {
+  margin-top: -0.5em;
+  font-family: var(--mono);
+  font-size: 0.8em;
+  color: var(--danger);
+  white-space: pre-wrap;
+}
+
 button,
 .button,
 input,

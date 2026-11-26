@@ -1,4 +1,5 @@
 import { api } from "./api.ts";
+import { DIAGRAMS_EVENT } from "./diagrams.ts";
 import { layoutBubbles } from "./bubbles.ts";
 import { CONTEXT, findQuote, indexText, offsetOf, rangeFor } from "./quote.ts";
 import { initTimes } from "./time.ts";
@@ -265,6 +266,8 @@ export function initSelections(): void {
 
   new ResizeObserver(() => layout()).observe(article);
   window.addEventListener("resize", layout);
+  // A diagram that was drawn has changed the page's text: find the quotes again.
+  document.addEventListener(DIAGRAMS_EVENT, refresh);
   refresh();
 }
 

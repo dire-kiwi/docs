@@ -102,8 +102,8 @@ Layout:
   `publish_document`; `src/images.ts`: AVIF conversion; `src/uploads.ts`: the route image files are uploaded to
 - `src/hosted.ts`, `src/siteRepo.ts`: connecting to and publishing on a hosted docs site
 - `src/pages/`: the pages (HTML, rendered on the host) and `src/calls.ts`, what they call
-- `client/page.ts`: the pages' script (forms, answers, comments, the editor, the design editor), sharing
-  `frontend/src/answer.ts`, `quote.ts`, `bubbles.ts`, `editor.ts` and `design/` (with `editor.css` and `design.css`,
+- `client/page.ts`: the pages' script (forms, answers, comments, Mermaid diagrams, the editor, the design editor), sharing
+  `frontend/src/answer.ts`, `quote.ts`, `bubbles.ts`, `diagrams.ts`, `editor.ts` and `design/` (with `editor.css` and `design.css`,
   bundled as text) with the site; `scripts/build.mjs` bundles `frontend/src/design/agent.ts` into it as source, for
   the mockups' frames
 - `vendor/huntaway-plugin/`: a copy of Huntaway's plugin API, to type-check and test against until Huntaway publishes it

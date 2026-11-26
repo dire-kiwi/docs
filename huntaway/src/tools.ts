@@ -31,7 +31,8 @@ export const INSTRUCTIONS =
   'publish creates a new version, so you can revise freely; `mode: "merge"` keeps the other pages of the previous ' +
   "version. If you can start sub-agents, have one write and publish the document: give it what the document should " +
   "say, let it look up components, publish and fix any problems, and have it return the URL. That keeps the component " +
-  "reference and the page sources out of your own context. Plain Markdown needs no reference. For components " +
+  "reference and the page sources out of your own context. Plain Markdown needs no reference, and a fenced code " +
+  "block with the language `mermaid` is drawn as a diagram. For components " +
   '(callouts, collapsible sections, form fields), call `list_components` for their names, props and examples, and use format "mdx". ' +
   "Form fields (`<Approval />`, inputs and the like) collect the user's answers: to ask the user questions, publish them " +
   "as form fields and give the user the URL; they answer on the page and send their answers to the task that published " +
