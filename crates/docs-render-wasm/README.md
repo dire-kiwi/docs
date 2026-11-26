@@ -69,7 +69,7 @@ Each colour is a `light-dark()` pair and `.docs-render` has `color-scheme: light
 
 The fonts (Fraunces for headings, Atkinson Hyperlegible Next for text and Atkinson Hyperlegible Mono for code and labels) are not in the package: load them yourself, e.g. from `@fontsource-variable`, or set `--font`, `--font-display` and `--mono`. Without them the stacks fall back to system serif, sans and mono fonts.
 
-The site's form autosave and text-selection comments (`frontend/src/fields.ts`, `selection.ts`) are not in the package yet. Form fields render with `data-field` and `data-kind` attributes, so you can read the answers yourself.
+The site's form autosave, text-selection comments and Mermaid diagrams (`frontend/src/fields.ts`, `selection.ts`, `diagrams.ts`) are not in the package yet. A fenced code block with the language `mermaid` renders as code (`<pre><code class="language-mermaid">`), for your page to draw; the styles have `.mermaid-diagram` and `.mermaid-error` for it. Form fields render with `data-field` and `data-kind` attributes, so you can read the answers yourself.
 
 ## API
 

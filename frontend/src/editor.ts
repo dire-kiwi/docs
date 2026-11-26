@@ -21,6 +21,7 @@ import {
   wrap,
 } from "./markdown-edit.ts";
 import type { TextState } from "./markdown-edit.ts";
+import { renderDiagrams } from "./diagrams.ts";
 
 /** `html` is a mockup: an HTML document, shown in the design editor (design/design.ts) once saved. */
 export type PageFormat = "md" | "mdx" | "html";
@@ -866,6 +867,7 @@ export function mountEditor(
     article.append(t.content);
     const top = preview.scrollTop;
     preview.replaceChildren(article);
+    void renderDiagrams(article);
     preview.scrollTop = top;
   }
 

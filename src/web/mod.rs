@@ -134,6 +134,11 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// Mermaid, which a page with a diagram loads (frontend/src/diagrams.ts, whose MERMAID_URL this is: a test
+/// keeps them the same). It is the one script the policy allows from anywhere else, and the browser checks
+/// it against the hash the page gives.
+const MERMAID_SCRIPT: &str = "https://cdn.jsdelivr.net/npm/mermaid@12.3.0/dist/mermaid.min.js";
+
 /// Agent-written content is sanitized when rendered; the CSP is a second line of defence.
 /// (No `form-action`: the OAuth consent form must redirect to the client.)
 fn content_security_policy(vite_dev_url: Option<&str>) -> HeaderValue {
@@ -142,8 +147,28 @@ fn content_security_policy(vite_dev_url: Option<&str>) -> HeaderValue {
         None => (String::new(), String::new()),
     };
     let policy = format!(
-        "default-src 'self'; script-src 'self'{dev}; style-src 'self' 'unsafe-inline'{dev}; img-src * data:; \
+        "default-src 'self'; script-src 'self' {MERMAID_SCRIPT}{dev}; style-src 'self' 'unsafe-inline'{dev}; img-src * data:; \
          connect-src 'self'{dev_ws}; font-src 'self' data:{dev}; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
     );
     HeaderValue::from_str(&policy).expect("valid CSP header")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_policy_allows_the_mermaid_script_the_pages_load() {
+        let page_script = include_str!("../../frontend/src/diagrams.ts");
+        assert!(
+            page_script.contains(&format!("MERMAID_URL = \"{MERMAID_SCRIPT}\"")),
+            "MERMAID_SCRIPT must be frontend/src/diagrams.ts's MERMAID_URL"
+        );
+        let policy = content_security_policy(None);
+        let policy = policy.to_str().unwrap();
+        assert!(
+            policy.contains(&format!("script-src 'self' {MERMAID_SCRIPT};")),
+            "{policy}"
+        );
+    }
 }

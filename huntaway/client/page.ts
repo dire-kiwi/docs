@@ -8,6 +8,7 @@
 import { layoutBubbles } from "../../frontend/src/bubbles.ts"
 import { fieldValue, linkOther } from "../../frontend/src/answer.ts"
 import { CONTEXT, findQuote, indexText, offsetOf, rangeFor } from "../../frontend/src/quote.ts"
+import { DIAGRAMS_EVENT, initDiagrams } from "../../frontend/src/diagrams.ts"
 import { mountEditor } from "../../frontend/src/editor.ts"
 import type { Draft, EditorData, PreviewResult, SaveResult } from "../../frontend/src/editor.ts"
 import editorCss from "../../frontend/src/editor.css"
@@ -267,6 +268,8 @@ if (state.page === "doc") {
   showSend()
   initComments()
 }
+// Mermaid code blocks as diagrams (frontend/src/diagrams.ts), on a document's page and in the editor's preview.
+initDiagrams()
 
 function initComments(): void {
   const article = document.querySelector<HTMLElement>("article.doc-content")
@@ -538,6 +541,8 @@ function initComments(): void {
 
   new ResizeObserver(() => layout()).observe(article)
   addEventListener("resize", layout)
+  // A diagram that was drawn has changed the page's text: find the quotes again.
+  document.addEventListener(DIAGRAMS_EVENT, refresh)
   refresh()
 }
 

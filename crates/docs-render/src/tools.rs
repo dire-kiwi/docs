@@ -21,7 +21,7 @@ its bytes never go through a tool call. Small images can also be passed there as
 PNG, JPEG, WebP, GIF (first frame) and AVIF are accepted, not SVG. \
 Every image is converted to AVIF and must be at most 500 KB (512000 bytes) after conversion, so downscale big screenshots and photos; \
 the originals aren't kept. Image data doesn't count towards a page's size. \
-Plain Markdown needs no reference. For components (callouts, collapsible sections, form fields), call `list_components` \
+Plain Markdown needs no reference, and a fenced code block with the language `mermaid` is drawn as a diagram. For components (callouts, collapsible sections, form fields), call `list_components` \
 for their names, props and examples, and use format \"mdx\". \
 `publish_document` is the check: it rejects a page it can't publish and says why, and returns warnings (an unknown component, a bad prop) with the URL; \
 fix them and publish again. Don't install or run npm packages, renderers or other tools to check pages. \

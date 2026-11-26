@@ -43,7 +43,7 @@ export interface TextIndex {
 export function indexText(root: Node): TextIndex {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
     acceptNode: (n) =>
-      n.parentElement?.closest("textarea, select, .field-status")
+      n.parentElement?.closest("textarea, select, .field-status, style, pre[hidden]")
         ? NodeFilter.FILTER_REJECT
         : NodeFilter.FILTER_ACCEPT,
   });

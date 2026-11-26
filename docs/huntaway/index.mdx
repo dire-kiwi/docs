@@ -128,7 +128,7 @@ Every publish creates a new version, and older ones stay readable, so revising i
 
 ### Finding components
 
-Plain Markdown (headings, lists, tables, code) needs no reference. For components, call `list_components`: it returns each component's name, props and an example, and for form fields the shape of the answer. [Components](components.mdx) shows the same reference rendered.
+Plain Markdown (headings, lists, tables, code) needs no reference. A fenced code block with the language `mermaid` is drawn as a [Mermaid](https://mermaid.js.org) diagram; if it can't be drawn, the page shows the code with the reason under it. For components, call `list_components`: it returns each component's name, props and an example, and for form fields the shape of the answer. [Components](components.mdx) shows the same reference rendered.
 
 ### Checking pages
 

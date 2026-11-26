@@ -83,7 +83,12 @@ if (listed.structuredContent.documents.length === 0) {
           '<Select name="region" label="Deploy region" options={["us-east", "eu-west", "ap-southeast"]} other="Somewhere else" />\n\n' +
           '<TextInput name="owner" label="Who should own this work?" placeholder="GitHub username" />\n\n<Approval />\n',
       },
-      { path: "plan/phase-1", content: "# Phase 1\n\nBack to [the overview](../index.md).\n\n```ts\nconst x = 1\n```\n" },
+      {
+        path: "plan/phase-1",
+        content:
+          "# Phase 1\n\nBack to [the overview](../index.md).\n\n```ts\nconst x = 1\n```\n\n" +
+          "```mermaid\nflowchart LR\n  A[Agent publishes] --> B{Approved?}\n  B -- yes --> C[Phase 2]\n  B -- no --> A\n```\n",
+      },
     ],
   })
 }
@@ -128,10 +133,11 @@ if (!(listed.structuredContent.documents as Array<{ slug: string }>).some((d) =>
 const session = { kind: "board" as const, device_id: null, scopes: ["read", "operate", "settings"] }
 const THEME =
   "color-scheme:dark;--color-bg:#0b0b0e;--color-fg:#e6e6ec;--color-muted:#9a9aab;--color-line-strong:#33333f;--color-panel-2:#16161d;--color-accent:#7c7cf8;--font-sans:ui-sans-serif,system-ui,sans-serif;--font-mono:ui-monospace,monospace"
-// The board's policy for a plugin's frame (apps/web/src/components/task/htmlFrame.ts's FRAME_CSP, without its CDNs), and
+// The board's policy for a plugin's frame (packages/shared/src/frameCsp.ts's FRAME_CSP, with jsDelivr alone of its CDNs:
+// a page with a Mermaid diagram loads Mermaid from there, frontend/src/diagrams.ts), and
 // the Trusted Types default policy it makes before the page's scripts: the design editor's frames depend on both.
 const FRAME_CSP =
-  "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' data: blob:; style-src 'unsafe-inline' data:; font-src data:; img-src data: blob:; " +
+  "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' data: blob: https://cdn.jsdelivr.net; style-src 'unsafe-inline' data:; font-src data:; img-src data: blob:; " +
   "media-src data: blob:; connect-src data: blob:; worker-src data: blob:; frame-src 'none'; form-action 'none'; base-uri 'none'; require-trusted-types-for 'script'"
 const TRUSTED = `<script>window.trustedTypes?.createPolicy("default", { createHTML: (s) => s, createScript: (s) => s, createScriptURL: (s) => s })</script>`
 
